@@ -135,25 +135,46 @@ struct CameraHUD: View {
     let showResolution: Bool
     let showFPS: Bool
     let showRemaining: Bool
-    let showZoom: Bool
     let showWhiteBalance: Bool
     let maxWidth: CGFloat
+
+    // Keep showZoom as an ignored, defaulted compatibility argument so an older
+    // CameraView/CameraControls pair cannot fail to compile during incremental updates.
+    init(
+        camera: CameraManager,
+        showResolution: Bool,
+        showFPS: Bool,
+        showRemaining: Bool,
+        showZoom: Bool = false,
+        showWhiteBalance: Bool,
+        maxWidth: CGFloat
+    ) {
+        _camera = ObservedObject(wrappedValue: camera)
+        self.showResolution = showResolution
+        self.showFPS = showFPS
+        self.showRemaining = showRemaining
+        self.showWhiteBalance = showWhiteBalance
+        self.maxWidth = maxWidth
+        _ = showZoom
+    }
 
     var body: some View {
         Text(displayText)
             .font(.system(size: 11, weight: .semibold, design: .rounded))
             .monospacedDigit()
             .lineLimit(1)
-            .minimumScaleFactor(0.62)
+            .minimumScaleFactor(0.72)
             .allowsTightening(true)
             .foregroundStyle(.white)
             .padding(.horizontal, 13)
             .frame(height: 34)
-            .frame(maxWidth: maxWidth)
-            .background(.black.opacity(0.86), in: Capsule())
+            .background(.black.opacity(0.90), in: Capsule())
             .overlay {
-                Capsule().stroke(.white.opacity(0.08), lineWidth: 1)
+                Capsule().stroke(.white.opacity(0.10), lineWidth: 1)
             }
+            // Keep the black pill only as wide as its content. The outer frame centers it in the
+            // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
+            .frame(maxWidth: maxWidth)
             .accessibilityLabel(items.joined(separator: ", "))
     }
 
@@ -166,7 +187,6 @@ struct CameraHUD: View {
         if showResolution { result.append(camera.hudResolutionLabel) }
         if showFPS, let fps = camera.hudFrameRateLabel { result.append("\(fps)fps") }
         if showRemaining { result.append(camera.hudRemainingLabel) }
-        if showZoom { result.append(camera.zoomLabel) }
         if showWhiteBalance { result.append(whiteBalanceShortLabel) }
         if result.isEmpty { result.append(camera.captureMode.rawValue) }
         return result
