@@ -179,6 +179,11 @@ struct CameraHUD: View {
             Text(camera.isRecording ? "REC" : camera.captureMode.rawValue)
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .foregroundStyle(theme)
+            if camera.isRecording {
+                Text(String(format: "%02d:%02d:%02d", Int(camera.recordingDuration) / 3600, (Int(camera.recordingDuration) / 60) % 60, Int(camera.recordingDuration) % 60))
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+            }
         }
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {

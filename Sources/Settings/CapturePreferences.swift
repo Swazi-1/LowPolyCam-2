@@ -97,6 +97,7 @@ struct CapturePreferencesView: View {
                 SettingsCard(title: "Recording", symbol: "video.fill") {
                     ThemeMenu(title: "Video Codec", selection: $camera.selectedVideoCodec, options: [("HEVC", "HEVC / H.265"), ("H264", "H.264")])
                     ThemeMenu(title: "Compression", selection: $camera.videoCompression, options: VideoCompression.allCases.map { ($0, $0.rawValue) })
+                    Text("High uses the native encoder defaults. Medium and Data Saver reduce the bitrate to save space.").font(.caption).foregroundStyle(.secondary)
                     ThemeMenu(title: "Split Recording", selection: $splitMinutes, options: [(0, "Off"), (15, "Every 15 minutes"), (30, "Every 30 minutes"), (60, "Every hour"), (120, "Every 2 hours")])
                     Text("Split clips save separately with a brief gap between files. Codec availability depends on the selected camera format.").font(.caption).foregroundStyle(.secondary)
                 }

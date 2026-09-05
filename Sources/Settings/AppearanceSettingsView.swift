@@ -80,26 +80,63 @@ struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.cameraTint) private var theme
     @Environment(\.dismiss) private var dismiss
+    @State private var preview: VideoQuickPreset = .balanced
     var body: some View {
         SettingsPage {
-            SettingsCard(title: "Video Presets", symbol: "wand.and.stars") {
+            VStack(spacing: 18) {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(theme).shadow(color: theme.opacity(0.4), radius: 14)
+                Text(preview.rawValue).font(.title3.weight(.bold))
+                VStack(spacing: 7) {
+                    HStack(spacing: 6) {
+                        Circle().fill(.red).frame(width: 6, height: 6)
+                        Text("REC  00:00:12").font(.system(.caption, design: .monospaced).weight(.bold))
+                    }
+                    HStack(spacing: 12) {
+                        Label(preview.resolution.rawValue, systemImage: "viewfinder")
+                        Label("\(preview.frameRate.rawValue) fps", systemImage: "speedometer")
+                        Text("HEVC")
+                    }.font(.caption2.weight(.semibold)).foregroundStyle(theme)
+                }
+                .padding(14)
+                .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.opacity(0.4)))
+                Text("HUD preview · example recording timer").font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 22)
+            .background(LinearGradient(colors: [theme.opacity(0.22), Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
+            SettingsCard(title: "Choose a Preset", symbol: "wand.and.stars") {
                 ForEach(VideoQuickPreset.allCases) { preset in
-                    Button {
-                        camera.applyQuickPreset(preset)
-                        dismiss()
-                    } label: {
+                    Button { preview = preset } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(preset.rawValue).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
                                 Text(preset.detail).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Image(systemName: "arrow.down.circle.fill").foregroundStyle(theme)
-                        }.padding(.vertical, 9).contentShape(Rectangle())
+                            Image(systemName: preview == preset ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(theme)
+                        }
+                        .padding(12)
+                        .background(theme.opacity(preview == preset ? 0.16 : 0.04), in: RoundedRectangle(cornerRadius: 12))
+                        .contentShape(Rectangle())
                     }.buttonStyle(.plain)
-                    if preset != .social { SettingsDivider() }
                 }
+                Button {
+                    camera.applyQuickPreset(preview)
+                    dismiss()
+                } label: {
+                    Text("Use \(preview.rawValue)").font(.subheadline.weight(.bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 13)
+                        .background(theme, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
+                }.buttonStyle(.plain)
             }
+        }
+        .onAppear {
+            preview = VideoQuickPreset.allCases.first {
+                $0.resolution == camera.selectedResolution && $0.frameRate == camera.selectedFrameRate && $0.compression == camera.videoCompression
+            } ?? .balanced
         }
         .navigationTitle("Video Presets").navigationBarTitleDisplayMode(.inline)
     }

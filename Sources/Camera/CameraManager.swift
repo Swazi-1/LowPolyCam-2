@@ -81,7 +81,13 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var statusMessage: String?
     @Published private(set) var lastFrameGaps: Int?
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
-        didSet { UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec") }
+        didSet {
+            UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
+            sessionQueue.async { [weak self] in
+                guard let self, !self.movieOutput.isRecording else { return }
+                self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            }
+        }
     }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
         didSet { UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat") }
@@ -1186,20 +1192,15 @@ final class CameraManager: NSObject, ObservableObject {
             self.supportedFrameRates = selection.supportedFrameRates
         }
 
-        // 4K60 is expensive enough that lens changes can stall the live preview even when the
-        // selected quality is otherwise valid. Replacing wide <-> ultra-wide inputs is worse.
-        // While idle, deliberately use the same virtual-camera/1080p60 preview path that was
-        // smooth in 1080p60, then switch once to the true selected format before recording.
-        let forceSmooth4K60Preview = selection.resolution == .p4k && selection.frameRate == .fps60
-
+        // All qualities share the same path. Preview fallback is needed only when
+        // the virtual device cannot actually provide the requested format.
         if allowSmoothPreviewFallback,
            preferVirtualCamera,
            !movieOutput.isRecording,
            currentDevice.position == .back,
            requestedWhiteBalancePreset == .auto,
            let virtualDevice = devices.first(where: { $0.isVirtualDevice }),
-           forceSmooth4K60Preview ||
-               supportedDevices.contains(where: { $0.uniqueID == virtualDevice.uniqueID }) == false,
+           supportedDevices.contains(where: { $0.uniqueID == virtualDevice.uniqueID }) == false,
            let previewFormat = smoothPreviewFormat(for: virtualDevice, preferredFrameRate: selection.frameRate) {
 
             let switchedDevice = virtualDevice.uniqueID != currentDevice.uniqueID
@@ -1268,9 +1269,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         guard let device = videoInput?.device,
-              let format = device.formats.first(where: {
-                  self.format($0, supports: selection.resolution, at: selection.frameRate)
-              }) else {
+              let format = preferredRecordingFormat(for: device, resolution: selection.resolution, rate: selection.frameRate) else {
             showError("This video quality isn’t available on this camera.")
             return
         }
@@ -1284,6 +1283,10 @@ final class CameraManager: NSObject, ObservableObject {
 
             try device.lockForConfiguration()
             device.activeFormat = format
+            if selectedVideoCodec == "H264" {
+                device.automaticallyAdjustsVideoHDREnabled = false
+                if device.isVideoHDREnabled { device.isVideoHDREnabled = false }
+            }
             let duration = CMTimeMakeWithSeconds(1 / actualRate, preferredTimescale: 60_000)
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
@@ -1341,9 +1344,20 @@ final class CameraManager: NSObject, ObservableObject {
               dimensions.height == selectedResolution.dimensions.height else { return false }
 
         let requestedRate = Double(selectedFrameRate.rawValue)
-        return device.activeFormat.videoSupportedFrameRateRanges.contains {
-            $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
+        let duration = device.activeVideoMinFrameDuration.seconds
+        return duration > 0 && abs(1 / duration - requestedRate) < 0.5
+    }
+
+    private func preferredRecordingFormat(for device: AVCaptureDevice, resolution: VideoResolution, rate: VideoFrameRate) -> AVCaptureDevice.Format? {
+        let formats = device.formats.filter { format($0, supports: resolution, at: rate) }
+        if selectedVideoCodec == "H264" {
+            // H.264 needs an 8-bit source; a 10-bit/HDR first match can expose HEVC only.
+            return formats.first {
+                let type = CMFormatDescriptionGetMediaSubType($0.formatDescription)
+                return type == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange || type == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            } ?? formats.first
         }
+        return formats.first
     }
 
     private func applySlowMotionFormat(allowPreview: Bool = true) {
@@ -1495,8 +1509,9 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func configureMovieOutputSettings() {
-        guard let connection = movieOutput.connection(with: .video) else { return }
+    @discardableResult
+    private func configureMovieOutputSettings() -> Bool {
+        guard let connection = movieOutput.connection(with: .video) else { return false }
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
@@ -1510,33 +1525,23 @@ final class CameraManager: NSObject, ObservableObject {
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
         var settings: [String: Any] = [:]
 
-        let codec: AVVideoCodecType?
         let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
-        if movieOutput.availableVideoCodecTypes.contains(preferred) {
-            codec = preferred
-        } else if movieOutput.availableVideoCodecTypes.contains(.hevc) {
-            codec = .hevc
-        } else if movieOutput.availableVideoCodecTypes.contains(.h264) {
-            codec = .h264
-        } else {
-            codec = nil
-        }
+        guard movieOutput.availableVideoCodecTypes.contains(preferred), supportedKeys.contains(AVVideoCodecKey) else { return false }
+        let codec = preferred
 
-        if let codec, supportedKeys.contains(AVVideoCodecKey) {
+        if supportedKeys.contains(AVVideoCodecKey) {
             // Keep compression properties native. AVCaptureMovieFileOutput fills them from the
             // active camera format, so bitrate can scale correctly for each iPhone/resolution/FPS
             // instead of forcing one brittle fixed Mbps value.
             settings[AVVideoCodecKey] = codec
-            if supportedKeys.contains(AVVideoCompressionPropertiesKey) {
+            if videoCompression != .high, supportedKeys.contains(AVVideoCompressionPropertiesKey) {
                 settings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: Int(estimatedVideoBitsPerSecond)]
             }
         }
 
-        if settings.isEmpty {
-            movieOutput.setOutputSettings(nil, for: connection)
-        } else {
-            movieOutput.setOutputSettings(settings, for: connection)
-        }
+        movieOutput.setOutputSettings(nil, for: connection)
+        movieOutput.setOutputSettings(settings, for: connection)
+        return (movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String) == preferred.rawValue
     }
 
     private func format(_ format: AVCaptureDevice.Format, supports resolution: VideoResolution, at frameRate: VideoFrameRate? = nil) -> Bool {
@@ -1589,7 +1594,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        if captureMode == .video, isUsingSmoothPreviewFallback {
+        if captureMode == .video {
             applySelectedFormat(
                 preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
                 allowSmoothPreviewFallback: false
@@ -1614,13 +1619,14 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
         }
-        configureMovieOutputSettings()
-        publish { self.isRecording = true }
-        if let connection = movieOutput.connection(with: .video),
-           let actual = movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String,
-           actual != (selectedVideoCodec == "H264" ? AVVideoCodecType.h264.rawValue : AVVideoCodecType.hevc.rawValue) {
-            showError("Selected codec isn’t supported at this quality; using \(actual == AVVideoCodecType.hevc.rawValue ? "HEVC" : "H.264").")
+        guard configureMovieOutputSettings() else {
+            recordingRequested = false
+            publish { self.isRecording = false }
+            showError("\(selectedVideoCodec == "H264" ? "H.264" : "HEVC") isn’t available at this resolution/FPS on this lens. Choose another codec or frame rate.")
+            return
         }
+        movieOutput.metadata = CameraMovieMetadata.items()
+        publish { self.isRecording = true }
         refreshAvailableStorage()
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)

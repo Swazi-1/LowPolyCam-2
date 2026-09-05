@@ -85,10 +85,6 @@ struct CameraView: View {
             VStack {
                 topControls
                 Spacer()
-                if camera.isRecording {
-                    RecordingTimer(duration: camera.recordingDuration)
-                        .padding(.bottom, 18)
-                }
                 bottomControls
             }
             .padding(.horizontal, 22)
@@ -203,7 +199,7 @@ struct CameraView: View {
                     }
                 }
 
-                if isHUDEnabled {
+                if isHUDEnabled || camera.isRecording {
                     CameraHUD(
                         camera: camera,
                         showResolution: hudResolution,
