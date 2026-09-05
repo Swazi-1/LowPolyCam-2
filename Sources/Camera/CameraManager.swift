@@ -388,8 +388,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.requestedWhiteBalancePreset = preset
 
             let currentDevice = self.videoInput?.device
-            let rearVideoOrPhoto = self.cameraPosition == .back && (self.captureMode == .video || self.captureMode == .photo)
-            let needsInputSwap = rearVideoOrPhoto && (
+            let needsInputSwap = self.cameraPosition == .back && (
                 (preset != .auto && currentDevice?.isVirtualDevice == true) ||
                 (preset == .auto && currentDevice?.isVirtualDevice == false)
             )
@@ -819,7 +818,6 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func restoreVirtualRearCameraIfPossible() {
         guard cameraPosition == .back,
-              captureMode == .video || captureMode == .photo,
               let currentDevice = videoInput?.device,
               !currentDevice.isVirtualDevice,
               let virtualDevice = preferredCamera(for: .back),
