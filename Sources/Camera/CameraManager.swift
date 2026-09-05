@@ -57,6 +57,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     @Published private(set) var isSessionRunning = false
     @Published private(set) var isRecording = false
+    @Published private(set) var isFinalizingRecording = false
     @Published private(set) var isCapturingPhoto = false
     @Published private(set) var captureMode: CaptureMode = .video
     @Published private(set) var isFocusExposureLocked = false
@@ -129,6 +130,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var latestZoomRequestID: UInt64 = 0
     private var isUsingSlowMotionPreview = false
     private var recordingRequested = false
+    private var recordingFinalizationRequested = false
     private var segmentTimer: DispatchWorkItem?
     private var continuingSegment = false
     private var segmentSeconds: Double = 0
@@ -487,11 +489,22 @@ final class CameraManager: NSObject, ObservableObject {
     func startOrStopRecording() {
         guard captureMode == .video || captureMode == .sloMo else { return }
         sessionQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.recordingFinalizationRequested else { return }
             if self.recordingRequested {
                 self.recordingRequested = false
+                self.recordingFinalizationRequested = true
                 self.continuingSegment = false
                 self.segmentTimer?.cancel()
+                // Stop should feel instant. AVCaptureMovieFileOutput still needs time to close
+                // the movie atom, but the interface can immediately show that saving started.
+                self.publish {
+                    self.durationTimer?.invalidate()
+                    self.recordingDuration = 0
+                    self.recordingStartedAt = nil
+                    self.isRecording = false
+                    self.isFinalizingRecording = true
+                    self.statusMessage = "Saving to Photos…"
+                }
                 self.movieOutput.stopRecording()
             } else {
                 self.recordingRequested = true
@@ -1641,11 +1654,13 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             self.segmentTimer?.cancel()
             let shouldContinue = successful && self.recordingRequested && self.continuingSegment && self.session.isRunning
             self.continuingSegment = false
+            self.recordingFinalizationRequested = false
             self.publish {
                 self.durationTimer?.invalidate()
                 self.recordingDuration = 0
                 self.recordingStartedAt = nil
                 self.isRecording = shouldContinue
+                self.isFinalizingRecording = false
             }
             if shouldContinue {
                 self.beginRecording()

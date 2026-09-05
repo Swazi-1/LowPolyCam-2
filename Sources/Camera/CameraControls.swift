@@ -35,6 +35,7 @@ struct CameraIconButton: View {
 struct RecordButton: View {
     @Environment(\.cameraTint) private var theme
     let isRecording: Bool
+    var isEnabled = true
     let action: () -> Void
 
     var body: some View {
@@ -48,6 +49,8 @@ struct RecordButton: View {
                     .frame(width: isRecording ? 30 : 62, height: isRecording ? 30 : 62)
             }
         }
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.55)
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
     }
 }
