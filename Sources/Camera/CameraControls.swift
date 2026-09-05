@@ -16,7 +16,16 @@ struct CameraIconButton: View {
         }
         .foregroundStyle(isEnabled ? color : .white.opacity(0.35))
         .disabled(!isEnabled)
-        .accessibilityLabel(symbol == "bolt.fill" ? "Torch" : symbol == "gearshape.fill" ? "Settings" : "Switch camera")
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        switch symbol {
+        case "bolt.fill": return "Torch"
+        case "gearshape.fill": return "Settings"
+        case "ellipsis": return "Pro Tools"
+        default: return "Switch camera"
+        }
     }
 }
 

@@ -3,6 +3,7 @@ import SwiftUI
 struct CameraView: View {
     @StateObject private var camera = CameraManager()
     @State private var isShowingSettings = false
+    @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
 
     var body: some View {
@@ -33,6 +34,23 @@ struct CameraView: View {
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
+
+            if isShowingProTools {
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .onTapGesture { isShowingProTools = false }
+
+                VStack {
+                    Spacer()
+                    HStack {
+                        ProToolsPopup(camera: camera)
+                        Spacer()
+                    }
+                }
+                .padding(.leading, 14)
+                .padding(.bottom, 132)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+            }
 
             if let message = camera.statusMessage {
                 VStack {
@@ -75,7 +93,11 @@ struct CameraView: View {
 
     private var bottomControls: some View {
         HStack {
-            Color.clear.frame(width: 48, height: 48)
+            CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    isShowingProTools.toggle()
+                }
+            }
             Spacer()
             VStack(spacing: 16) {
                 ZStack {

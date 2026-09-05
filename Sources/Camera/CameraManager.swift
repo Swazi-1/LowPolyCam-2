@@ -18,12 +18,33 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    enum WhiteBalancePreset: String, CaseIterable, Identifiable {
+        case auto = "Auto"
+        case daylight = "Daylight"
+        case cloudy = "Cloudy"
+        case tungsten = "Tungsten"
+        case fluorescent = "Fluorescent"
+
+        var id: String { rawValue }
+
+        var temperature: Float? {
+            switch self {
+            case .auto: return nil
+            case .daylight: return 5_200
+            case .cloudy: return 6_500
+            case .tungsten: return 3_200
+            case .fluorescent: return 4_000
+            }
+        }
+    }
+
     @Published private(set) var isSessionRunning = false
     @Published private(set) var isRecording = false
     @Published private(set) var isCapturingPhoto = false
     @Published private(set) var captureMode: CaptureMode = .video
     @Published private(set) var isFocusExposureLocked = false
     @Published private(set) var exposureBias: Float = 0
+    @Published private(set) var whiteBalancePreset: WhiteBalancePreset = .auto
     @Published private(set) var recordingDuration: TimeInterval = 0
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
@@ -51,6 +72,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var durationTimer: Timer?
     private var recordingStartedAt: Date?
     private var requestedZoom: CGFloat = 1
+    private var requestedExposureBias: Float = 0
     private var exposureDragStartBias: Float = 0
     private var pendingFocusLockWorkItem: DispatchWorkItem?
 
@@ -109,7 +131,7 @@ final class CameraManager: NSObject, ObservableObject {
                         self.showError("Stop recording to switch to 0.5× at this quality.")
                     }
                 } else if (requestedFactor < 1) != (currentDevice.deviceType == .builtInUltraWideCamera) {
-                    self.applySelectedFormat()
+                    self.applyActiveModeFormat()
                 }
             }
             guard let device = self.videoInput?.device else { return }
@@ -137,6 +159,11 @@ final class CameraManager: NSObject, ObservableObject {
     func selectCaptureMode(_ mode: CaptureMode) {
         guard !isRecording, !isCapturingPhoto, captureMode != mode else { return }
         captureMode = mode
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.applyActiveModeFormat()
+            self.resetFocusAndExposureState()
+        }
     }
 
     func capturePhoto() {
@@ -169,28 +196,35 @@ final class CameraManager: NSObject, ObservableObject {
 
     func adjustExposure(by deltaEV: Float) {
         sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.applyExposureBias(self.exposureDragStartBias + deltaEV)
+        }
+    }
+
+    func setExposureBias(_ bias: Float) {
+        sessionQueue.async { [weak self] in
+            self?.applyExposureBias(bias)
+        }
+    }
+
+    func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
+        sessionQueue.async { [weak self] in
             guard let self, let device = self.videoInput?.device else { return }
-            let target = min(max(self.exposureDragStartBias + deltaEV, device.minExposureTargetBias), device.maxExposureTargetBias)
-            do {
-                try device.lockForConfiguration()
-                device.setExposureTargetBias(target, completionHandler: nil)
-                device.unlockForConfiguration()
-                self.publish {
-                    self.exposureBias = target
-                }
-            } catch {
-                self.showError("Couldn’t adjust the exposure.")
+            if self.applyWhiteBalancePreset(preset, to: device) {
+                self.publish { self.whiteBalancePreset = preset }
             }
         }
     }
 
     func selectResolution(_ resolution: VideoResolution) {
         selectedResolution = resolution
+        guard captureMode == .video else { return }
         sessionQueue.async { [weak self] in self?.applySelectedFormat() }
     }
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
         selectedFrameRate = frameRate
+        guard captureMode == .video else { return }
         sessionQueue.async { [weak self] in self?.applySelectedFormat() }
     }
 
@@ -225,7 +259,7 @@ final class CameraManager: NSObject, ObservableObject {
         session.addOutput(photoOutput)
 
         updateCapabilities()
-        applySelectedFormat()
+        applyActiveModeFormat()
         resetFocusAndExposureState()
     }
 
@@ -241,7 +275,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         updateCapabilities()
-        applySelectedFormat()
+        applyActiveModeFormat()
         resetFocusAndExposureState()
     }
 
@@ -369,14 +403,75 @@ final class CameraManager: NSObject, ObservableObject {
             if device.isExposureModeSupported(.continuousAutoExposure) {
                 device.exposureMode = .continuousAutoExposure
             }
-            device.setExposureTargetBias(0, completionHandler: nil)
+            let target = clampedExposureBias(requestedExposureBias, for: device)
+            device.setExposureTargetBias(target, completionHandler: nil)
             device.unlockForConfiguration()
             publish {
                 self.isFocusExposureLocked = false
-                self.exposureBias = 0
+                self.exposureBias = target
             }
+            applyWhiteBalancePreset(whiteBalancePreset, to: device)
         } catch {
             showError("Couldn’t reset focus and exposure.")
+        }
+    }
+
+    private func clampedExposureBias(_ bias: Float, for device: AVCaptureDevice) -> Float {
+        let proToolsMinimum: Float = -2
+        let proToolsMaximum: Float = 2
+        return min(max(bias, max(device.minExposureTargetBias, proToolsMinimum)), min(device.maxExposureTargetBias, proToolsMaximum))
+    }
+
+    private func applyExposureBias(_ bias: Float) {
+        guard let device = videoInput?.device else { return }
+        let target = clampedExposureBias(bias, for: device)
+        do {
+            try device.lockForConfiguration()
+            device.setExposureTargetBias(target, completionHandler: nil)
+            device.unlockForConfiguration()
+            requestedExposureBias = target
+            publish { self.exposureBias = target }
+        } catch {
+            showError("Couldn’t adjust the exposure.")
+        }
+    }
+
+    @discardableResult
+    private func applyWhiteBalancePreset(_ preset: WhiteBalancePreset, to device: AVCaptureDevice) -> Bool {
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
+            if preset == .auto {
+                if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    device.whiteBalanceMode = .continuousAutoWhiteBalance
+                    return true
+                }
+                if device.isWhiteBalanceModeSupported(.autoWhiteBalance) {
+                    device.whiteBalanceMode = .autoWhiteBalance
+                    return true
+                }
+                showError("Auto white balance isn’t supported on this camera.")
+                return false
+            }
+
+            guard let temperature = preset.temperature,
+                  device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else {
+                showError("White balance presets aren’t supported on this camera.")
+                return false
+            }
+
+            let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: 0)
+            var gains = device.deviceWhiteBalanceGains(for: values)
+            let maximum = device.maxWhiteBalanceGain
+            gains.redGain = min(max(gains.redGain, 1), maximum)
+            gains.greenGain = min(max(gains.greenGain, 1), maximum)
+            gains.blueGain = min(max(gains.blueGain, 1), maximum)
+            device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+            return true
+        } catch {
+            showError("Couldn’t change white balance.")
+            return false
         }
     }
 
@@ -448,6 +543,94 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.asyncAfter(deadline: .now() + 0.45, execute: workItem)
     }
 
+    private func applyActiveModeFormat() {
+        if captureMode == .photo {
+            applyBestPhotoFormat()
+        } else {
+            applySelectedFormat()
+        }
+    }
+
+    private func applyBestPhotoFormat() {
+        guard let currentDevice = videoInput?.device else { return }
+        let devices = capabilityDevices(for: currentDevice.position)
+        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
+        let desiredDevice = devices.first(where: { $0.deviceType == desiredType })
+            ?? devices.first(where: { !$0.isVirtualDevice })
+            ?? devices.first
+
+        guard let desiredDevice else {
+            showError("Photo capture is unavailable on this camera.")
+            return
+        }
+
+        let switchedPhysicalCamera = desiredDevice.uniqueID != currentDevice.uniqueID
+        if switchedPhysicalCamera,
+           replaceVideoInput(with: desiredDevice) == false {
+            showError("Couldn’t switch cameras for Photo mode.")
+            return
+        }
+
+        guard let device = videoInput?.device,
+              let photoChoice = bestPhotoFormat(for: device) else {
+            showError("Full-resolution photos aren’t available on this camera.")
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = photoChoice.format
+            if let range = photoChoice.format.videoSupportedFrameRateRanges.first(where: {
+                $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
+            }) {
+                let duration = CMTimeMakeWithSeconds(1.0 / 30.0, preferredTimescale: 60_000)
+                device.activeVideoMinFrameDuration = duration
+                device.activeVideoMaxFrameDuration = duration
+                _ = range
+            }
+            let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
+            device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
+            device.unlockForConfiguration()
+
+            if photoOutput.maxPhotoDimensions.width != photoChoice.dimensions.width ||
+                photoOutput.maxPhotoDimensions.height != photoChoice.dimensions.height {
+                photoOutput.maxPhotoDimensions = photoChoice.dimensions
+            }
+
+            let minimum = devices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
+            let maximum = devices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
+            publish {
+                self.minimumZoomFactor = minimum
+                self.maximumZoomFactor = maximum
+                self.zoomFactor = displayedZoom
+                self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
+                self.torchAvailable = device.hasTorch
+                self.isTorchOn = device.torchMode == .on
+            }
+            if switchedPhysicalCamera {
+                resetFocusAndExposureState()
+            }
+        } catch {
+            showError("Couldn’t configure full-resolution Photo mode.")
+        }
+    }
+
+    private func bestPhotoFormat(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions)? {
+        var best: (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions, pixels: Int64)?
+
+        for format in device.formats {
+            for dimensions in format.supportedMaxPhotoDimensions {
+                let pixels = Int64(dimensions.width) * Int64(dimensions.height)
+                if best == nil || pixels > best!.pixels {
+                    best = (format, dimensions, pixels)
+                }
+            }
+        }
+
+        guard let best else { return nil }
+        return (best.format, best.dimensions)
+    }
+
     private func configurePhotoOutputForActiveFormat(_ device: AVCaptureDevice) {
         guard let largest = device.activeFormat.supportedMaxPhotoDimensions.max(by: { lhs, rhs in
             Int64(lhs.width) * Int64(lhs.height) < Int64(rhs.width) * Int64(rhs.height)
@@ -483,7 +666,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func resetZoomToOne() {
         requestedZoom = 1
-        applySelectedFormat()
+        applyActiveModeFormat()
         guard let device = videoInput?.device else { return }
         let oneX = min(max(1, minimumSupportedZoom(for: device)), maximumSupportedZoom(for: device))
         do {
@@ -553,7 +736,8 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        if desiredDevice.uniqueID != currentDevice.uniqueID,
+        let switchedPhysicalCamera = desiredDevice.uniqueID != currentDevice.uniqueID
+        if switchedPhysicalCamera,
            replaceVideoInput(with: desiredDevice) == false {
             showError("Couldn’t switch cameras for this video quality.")
             return
@@ -591,6 +775,9 @@ final class CameraManager: NSObject, ObservableObject {
                 self.maximumZoomFactor = maximum
                 self.torchAvailable = device.hasTorch
                 self.isTorchOn = device.torchMode == .on
+            }
+            if switchedPhysicalCamera {
+                resetFocusAndExposureState()
             }
         } catch {
             showError("Couldn’t set the video quality.")
