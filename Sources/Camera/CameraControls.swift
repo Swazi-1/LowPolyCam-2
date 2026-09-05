@@ -10,7 +10,7 @@ struct CameraIconButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button(action: { CameraHaptics.fire(); action() }) {
             Image(systemName: symbol)
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 48, height: 48)
@@ -132,6 +132,10 @@ struct RecordingTimer: View {
 
 struct CameraHUD: View {
     @ObservedObject var camera: CameraManager
+    @AppStorage("cameraHUDBattery") private var showBattery = false
+    @AppStorage("cameraHUDStorage") private var showStorage = false
+    @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
+    @State private var batteryLevel: Float = -1
     let showResolution: Bool
     let showFPS: Bool
     let showRemaining: Bool
@@ -159,15 +163,20 @@ struct CameraHUD: View {
     }
 
     var body: some View {
-        Text(displayText)
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
+        ViewThatFits(in: .horizontal) {
+            Text(displayText).fixedSize(horizontal: true, vertical: false)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    Text(item).lineLimit(1).minimumScaleFactor(0.75)
+                }
+            }
+        }
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
             .monospacedDigit()
-            .lineLimit(1)
-            .minimumScaleFactor(0.72)
-            .allowsTightening(true)
             .foregroundStyle(.white)
-            .padding(.horizontal, 13)
-            .frame(height: 34)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: maxWidth)
             .background(.black.opacity(0.90), in: Capsule())
             .overlay {
                 Capsule().stroke(.white.opacity(0.10), lineWidth: 1)
@@ -176,6 +185,13 @@ struct CameraHUD: View {
             // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
             .frame(maxWidth: maxWidth)
             .accessibilityLabel(items.joined(separator: ", "))
+            .task {
+                UIDevice.current.isBatteryMonitoringEnabled = true
+                batteryLevel = UIDevice.current.batteryLevel
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
+                batteryLevel = UIDevice.current.batteryLevel
+            }
     }
 
     private var displayText: String {
@@ -188,6 +204,11 @@ struct CameraHUD: View {
         if showFPS, let fps = camera.hudFrameRateLabel { result.append("\(fps)fps") }
         if showRemaining { result.append(camera.hudRemainingLabel) }
         if showWhiteBalance { result.append(whiteBalanceShortLabel) }
+        if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
+        if showStorage { result.append(String(format: "%.1f GB", Double(camera.availableStorageBytes) / 1_000_000_000)) }
+        if showDroppedFrames, camera.captureMode != .photo {
+            result.append(camera.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
+        }
         if result.isEmpty { result.append(camera.captureMode.rawValue) }
         return result
     }

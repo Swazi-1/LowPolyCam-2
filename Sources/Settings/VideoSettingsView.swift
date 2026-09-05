@@ -21,6 +21,12 @@ struct VideoSettingsView: View {
 
                     SettingsCard(title: "More Settings", symbol: "slider.horizontal.3") {
                         NavigationLink {
+                            CapturePreferencesView(camera: camera)
+                        } label: {
+                            SettingsNavigationRow(title: "Capture & Appearance", subtitle: "Timer, compression, split clips, haptics and colors", symbol: "paintpalette.fill")
+                        }.buttonStyle(.plain)
+                        SettingsDivider()
+                        NavigationLink {
                             CameraSettingsMenu(camera: camera)
                         } label: {
                             SettingsNavigationRow(
@@ -82,7 +88,18 @@ struct VideoSettingsView: View {
     }
 
     private var videoQualitySettings: some View {
-        SettingsCard(title: "Video Quality", symbol: "video.fill") {
+        VStack(spacing: 18) {
+          SettingsCard(title: "Video Quick Presets", symbol: "wand.and.stars") {
+            ForEach(VideoQuickPreset.allCases) { preset in
+                Button { camera.applyQuickPreset(preset) } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(preset.rawValue).font(.subheadline.weight(.semibold))
+                        Text(preset.detail).font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+                }.buttonStyle(.plain)
+            }
+          }
+          SettingsCard(title: "Video Quality", symbol: "video.fill") {
             SettingsPickerRow(
                 title: "Resolution",
                 options: camera.supportedResolutions,
@@ -100,6 +117,7 @@ struct VideoSettingsView: View {
                 label: { $0.label },
                 onSelect: camera.selectFrameRate
             )
+        }
         }
     }
 
@@ -133,6 +151,13 @@ struct VideoSettingsView: View {
 
     private var photoSettings: some View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
+            Picker("Save Format", selection: $camera.photoFileFormat) {
+                Text("HEIC").tag("HEIC")
+                Text("JPEG").tag("JPEG")
+            }
+            Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
+                .font(.caption).foregroundStyle(.secondary)
+            SettingsDivider()
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Photo Quality")
@@ -232,6 +257,9 @@ private struct CameraHUDSettingsMenu: View {
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
+    @AppStorage("cameraHUDBattery") private var hudBattery = false
+    @AppStorage("cameraHUDStorage") private var hudStorage = false
+    @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
 
     var body: some View {
         ScrollView {
@@ -246,6 +274,14 @@ private struct CameraHUDSettingsMenu: View {
 
                 if isHUDEnabled {
                     SettingsCard(title: "HUD Information", symbol: "text.line.first.and.arrowtriangle.forward") {
+                        Toggle("Battery", isOn: $hudBattery)
+                        Toggle("Free Storage", isOn: $hudStorage)
+                        if camera.captureMode != .photo {
+                            Toggle("Dropped Frames / Frame Gaps", isOn: $hudDroppedFrames)
+                            Text("Gaps* estimates missing frame intervals in the last saved clip. It updates after saving, not live; — means no result. The movie recorder does not expose live encoder drops.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        SettingsDivider()
                         SettingsToggleRow(
                             title: "Resolution",
                             subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show selected video resolution",

@@ -79,6 +79,13 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var zoomFactor: CGFloat = 1
     @Published private(set) var zoomLabel = "1×"
     @Published var statusMessage: String?
+    @Published private(set) var lastFrameGaps: Int?
+    @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
+        didSet { UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat") }
+    }
+    @Published var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
+        didSet { UserDefaults.standard.set(videoCompression.rawValue, forKey: "videoCompression") }
+    }
 
     @Published var selectedResolution: VideoResolution {
         didSet { UserDefaults.standard.set(selectedResolution.rawValue, forKey: Self.resolutionKey) }
@@ -111,6 +118,10 @@ final class CameraManager: NSObject, ObservableObject {
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
     private var isUsingSmoothPreviewFallback = false
+    private var recordingRequested = false
+    private var segmentTimer: DispatchWorkItem?
+    private var continuingSegment = false
+    private var segmentSeconds: Double = 0
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
@@ -188,7 +199,7 @@ final class CameraManager: NSObject, ObservableObject {
             : Double(selectedFrameRate.rawValue)
         let pixels = Double(resolution.dimensions.width) * Double(resolution.dimensions.height)
         // HUD estimate only; recording quality still comes from AVCaptureMovieFileOutput.
-        return max(pixels * fps * 0.12, 4_000_000)
+        return max(pixels * fps * videoCompression.bitsPerPixel, 2_000_000)
     }
 
     private var estimatedBytesPerPhoto: Double {
@@ -217,6 +228,13 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func appDidBecomeInactive() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.recordingRequested = false
+            self.continuingSegment = false
+            self.segmentTimer?.cancel()
+            if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+        }
         // iOS turns the torch off when the app is no longer active. Reflect that immediately
         // so the UI never comes back showing a yellow torch button while the LED is off.
         publish { self.isTorchOn = false }
@@ -256,30 +274,39 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self, self.isLatestZoomRequest(requestID),
                   let currentDevice = self.videoInput?.device else { return }
 
-            self.requestedZoom = requestedFactor
-            if !currentDevice.isVirtualDevice {
+            let clampedRequest = min(max(requestedFactor, self.minimumZoomFactor), self.maximumZoomFactor)
+            self.requestedZoom = clampedRequest
+            if !currentDevice.isVirtualDevice, currentDevice.position == .back {
                 if self.movieOutput.isRecording {
                     if requestedFactor < 1 && currentDevice.deviceType != .builtInUltraWideCamera {
                         self.showError("Stop recording to switch to 0.5× at this quality.")
                     }
-                } else if (requestedFactor < 1) != (currentDevice.deviceType == .builtInUltraWideCamera) {
-                    self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+                } else if (clampedRequest < 1) != (currentDevice.deviceType == .builtInUltraWideCamera) {
+                    // Never repeatedly rebuild HFR formats for a lens that cannot deliver the
+                    // selected frame rate. Keep digital zoom on the working capture device.
+                    let targetType: AVCaptureDevice.DeviceType = clampedRequest < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
+                    let target = self.capabilityDevices(for: .back).first { $0.deviceType == targetType }
+                    let canSwitch = target.map { device in
+                        switch self.captureMode {
+                        case .sloMo:
+                            return self.bestSlowMotionFormat(for: device, resolution: self.selectedSlowMotionResolution, frameRate: self.selectedSlowMotionFrameRate) != nil
+                        case .video:
+                            return device.formats.contains { self.format($0, supports: self.selectedResolution, at: self.selectedFrameRate) }
+                        case .photo: return true
+                        }
+                    } ?? false
+                    if canSwitch { self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput) }
                 }
             }
 
             guard self.isLatestZoomRequest(requestID),
                   let device = self.videoInput?.device else { return }
-            let factor = self.snappedZoomFactor(requestedFactor, for: device)
+            let factor = self.snappedZoomFactor(clampedRequest, for: device)
             do {
                 try device.lockForConfiguration()
                 let deviceFactor = self.deviceZoomFactor(for: factor, device: device)
-                // Snap real lens positions immediately. Intermediate zoom values can still ramp.
-                if abs(factor - 0.5) < 0.01 || abs(factor - 1.0) < 0.01 {
-                    device.cancelVideoZoomRamp()
-                    device.videoZoomFactor = deviceFactor
-                } else {
-                    device.ramp(toVideoZoomFactor: deviceFactor, withRate: 20)
-                }
+                // All modes use the same ramp; even detents avoid abrupt optical jumps.
+                device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
                 device.unlockForConfiguration()
                 self.publish {
                     self.zoomFactor = factor
@@ -444,10 +471,36 @@ final class CameraManager: NSObject, ObservableObject {
 
     func startOrStopRecording() {
         guard captureMode == .video || captureMode == .sloMo else { return }
-        if isRecording {
-            sessionQueue.async { [weak self] in self?.movieOutput.stopRecording() }
-        } else {
-            sessionQueue.async { [weak self] in self?.beginRecording() }
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.recordingRequested {
+                self.recordingRequested = false
+                self.continuingSegment = false
+                self.segmentTimer?.cancel()
+                self.movieOutput.stopRecording()
+            } else {
+                self.recordingRequested = true
+                self.segmentSeconds = Double(UserDefaults.standard.integer(forKey: "splitMinutes")) * 60
+                self.beginRecording()
+            }
+        }
+    }
+
+    func applyQuickPreset(_ preset: VideoQuickPreset) {
+        guard captureMode == .video, !isRecording, !isCapturingPhoto else { return }
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let devices = self.capabilityDevices(for: device.position)
+            guard self.frameRates(for: preset.resolution, devices: devices).contains(preset.frameRate) else {
+                self.showError("This preset isn’t supported by the current camera.")
+                return
+            }
+            self.publish {
+                self.selectedResolution = preset.resolution
+                self.selectedFrameRate = preset.frameRate
+                self.videoCompression = preset.compression
+                self.sessionQueue.async { self.applySelectedFormat() }
+            }
         }
     }
 
@@ -1313,8 +1366,9 @@ final class CameraManager: NSObject, ObservableObject {
             ? .builtInUltraWideCamera
             : .builtInWideAngleCamera
 
-        // Prefer a real physical camera for HFR. This also guarantees manual WB presets work.
-        guard let desiredDevice = supportedDevices.first(where: { !$0.isVirtualDevice && $0.deviceType == desiredType })
+        // Use the same virtual lens path as video when it truly supports the HFR format.
+        let virtual = requiresPhysicalWhiteBalanceInput ? nil : supportedDevices.first(where: { $0.isVirtualDevice })
+        guard let desiredDevice = virtual ?? supportedDevices.first(where: { !$0.isVirtualDevice && $0.deviceType == desiredType })
             ?? supportedDevices.first(where: { !$0.isVirtualDevice })
             ?? supportedDevices.first else {
             showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this lens.")
@@ -1336,7 +1390,9 @@ final class CameraManager: NSObject, ObservableObject {
         do {
             try device.lockForConfiguration()
             device.activeFormat = format
-            let duration = CMTimeMakeWithSeconds(1.0 / requestedFPS, preferredTimescale: 60_000)
+            let range = format.videoSupportedFrameRateRanges.first { $0.maxFrameRate >= requestedFPS - 0.5 }
+            let actualFPS = min(max(requestedFPS, range?.minFrameRate ?? requestedFPS), range?.maxFrameRate ?? requestedFPS)
+            let duration = CMTimeMakeWithSeconds(1.0 / actualFPS, preferredTimescale: 60_000)
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
@@ -1398,6 +1454,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func configureMovieOutputSettings() {
         guard let connection = movieOutput.connection(with: .video) else { return }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
+        }
 
         if connection.isVideoStabilizationSupported {
             let shouldStabilize = captureMode == .video && isVideoStabilizationEnabled
@@ -1421,6 +1481,9 @@ final class CameraManager: NSObject, ObservableObject {
             // active camera format, so bitrate can scale correctly for each iPhone/resolution/FPS
             // instead of forcing one brittle fixed Mbps value.
             settings[AVVideoCodecKey] = codec
+            if supportedKeys.contains(AVVideoCompressionPropertiesKey) {
+                settings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: Int(estimatedVideoBitsPerSecond)]
+            }
         }
 
         if settings.isEmpty {
@@ -1455,7 +1518,11 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        let useHEIC = photoOutput.availablePhotoCodecTypes.contains(.hevc)
+        let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
+        if let connection = photoOutput.connection(with: .video), connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
+        }
         let settings = useHEIC
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
@@ -1470,7 +1537,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginRecording() {
-        guard session.isRunning, movieOutput.isRecording == false else { return }
+        guard session.isRunning, movieOutput.isRecording == false else {
+            recordingRequested = false
+            publish { self.isRecording = false }
+            return
+        }
 
         if captureMode == .video, isUsingSmoothPreviewFallback {
             applySelectedFormat(
@@ -1479,11 +1550,14 @@ final class CameraManager: NSObject, ObservableObject {
             )
             guard activeVideoFormatMatchesSelection() else {
                 showError("Couldn’t prepare the selected recording quality.")
+                recordingRequested = false
+                publish { self.isRecording = false }
                 return
             }
         }
 
         configureMovieOutputSettings()
+        publish { self.isRecording = true }
         refreshAvailableStorage()
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
@@ -1524,6 +1598,20 @@ final class CameraManager: NSObject, ObservableObject {
 
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.recordingRequested else { self.movieOutput.stopRecording(); return }
+            self.segmentTimer?.cancel()
+            if self.segmentSeconds > 0 {
+                let timer = DispatchWorkItem { [weak self] in
+                    guard let self, self.recordingRequested, self.movieOutput.isRecording else { return }
+                    self.continuingSegment = true
+                    self.movieOutput.stopRecording()
+                }
+                self.segmentTimer = timer
+                self.sessionQueue.asyncAfter(deadline: .now() + self.segmentSeconds, execute: timer)
+            }
+        }
         publish {
             self.isRecording = true
             self.recordingStartedAt = Date()
@@ -1536,26 +1624,30 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
-        publish {
-            self.isRecording = false
-            self.recordingDuration = 0
-            self.recordingStartedAt = nil
-            self.durationTimer?.invalidate()
-        }
-
-        if captureMode == .video {
-            sessionQueue.async { [weak self] in
-                guard let self, !self.movieOutput.isRecording else { return }
-                self.applySelectedFormat(
-                    preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput,
-                    allowSmoothPreviewFallback: true
-                )
+        let successful = error == nil || (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.segmentTimer?.cancel()
+            let shouldContinue = successful && self.recordingRequested && self.continuingSegment && self.session.isRunning
+            self.continuingSegment = false
+            self.publish {
+                self.durationTimer?.invalidate()
+                self.recordingDuration = 0
+                self.recordingStartedAt = nil
+                self.isRecording = shouldContinue
+            }
+            if shouldContinue {
+                self.beginRecording()
+            } else {
+                self.recordingRequested = false
+                if self.captureMode == .video {
+                    self.applySelectedFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput, allowSmoothPreviewFallback: true)
+                }
             }
         }
 
-        if let error {
-            showError("Recording stopped: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: outputFileURL)
+        if !successful {
+            showError("Recording stopped: \(error?.localizedDescription ?? "Unknown error"). The file has been retained for recovery.")
             return
         }
 
@@ -1566,12 +1658,19 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             options.shouldMoveFile = false
             request.addResource(with: .video, fileURL: outputFileURL, options: options)
         }) { [weak self] success, error in
-            try? FileManager.default.removeItem(at: outputFileURL)
             self?.refreshAvailableStorage()
             if success {
                 self?.publish { self?.statusMessage = "Saved to Photos" }
+                if UserDefaults.standard.bool(forKey: "cameraHUDDroppedFrames") {
+                    ClipFrameDiagnostics.inspect(outputFileURL) { [weak self] gaps in
+                        self?.publish { self?.lastFrameGaps = gaps }
+                        try? FileManager.default.removeItem(at: outputFileURL)
+                    }
+                } else {
+                    try? FileManager.default.removeItem(at: outputFileURL)
+                }
             } else {
-                self?.showError(error?.localizedDescription ?? "Couldn’t save the video to Photos.")
+                self?.showError("Couldn’t save to Photos. The video has been retained in the app for recovery. \(error?.localizedDescription ?? "")")
             }
         }
     }

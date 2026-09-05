@@ -17,6 +17,12 @@ struct CameraView: View {
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
+    @State private var countdown = 0
+    @State private var shutterTask: Task<Void, Never>?
+    @State private var zoomWidth: CGFloat = 320
+    @AppStorage("shutterDelay") private var shutterDelay = 0
+    @AppStorage("centerCrosshair") private var crosshair = false
+    private var accent = CameraAccent()
 
     var body: some View {
         ZStack {
@@ -38,6 +44,24 @@ struct CameraView: View {
                 CameraGridOverlay()
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+            }
+
+            if crosshair {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .allowsHitTesting(false)
+            }
+
+            if countdown > 0 {
+                Button { cancelCountdown() } label: {
+                    VStack {
+                        Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
+                        Text("Tap to cancel").font(.caption)
+                    }
+                    .padding(24)
+                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
+                }.foregroundStyle(.white).zIndex(10)
             }
 
             if isLevelMeterEnabled {
@@ -98,6 +122,7 @@ struct CameraView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .tint(accent.color)
         .task {
             camera.start()
             camera.refreshAvailableStorage()
@@ -128,11 +153,13 @@ struct CameraView: View {
                 camera.refreshAvailableStorage()
                 if isLevelMeterEnabled { levelMonitor.start() }
             } else {
+                cancelCountdown()
                 camera.appDidBecomeInactive()
                 levelMonitor.stop()
             }
         }
         .onDisappear {
+            cancelCountdown()
             levelMonitor.stop()
             camera.stop()
             UIApplication.shared.isIdleTimerDisabled = false
@@ -142,6 +169,8 @@ struct CameraView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+        .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
+        .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
     }
 
     private var topControls: some View {
@@ -150,11 +179,11 @@ struct CameraView: View {
 
             ZStack {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? .yellow : .white) {
+                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? .yellow : accent.color) {
                         camera.toggleTorch()
                     }
                     Spacer()
-                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
+                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: accent.color) {
                         isShowingSettings = true
                     }
                 }
@@ -172,18 +201,11 @@ struct CameraView: View {
                 }
             }
         }
-        .frame(height: 48)
+        .frame(height: 82)
     }
 
     private var bottomControls: some View {
-        HStack {
-            CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    isShowingProTools.toggle()
-                }
-            }
-            Spacer()
-            VStack(spacing: 16) {
+        VStack(spacing: 14) {
                 ZStack {
                     Color.clear
                     ZoomIndicator(label: camera.zoomLabel)
@@ -191,29 +213,37 @@ struct CameraView: View {
                 .contentShape(Rectangle())
                 .frame(maxWidth: .infinity)
                 .frame(height: 48)
+                .padding(.horizontal, -22)
+                .background(GeometryReader { proxy in
+                    Color.clear.onAppear { zoomWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
+                })
                 .gesture(zoomGesture)
 
                 CaptureModeSelector(
                     selectedMode: camera.captureMode,
-                    isEnabled: !camera.isRecording && !camera.isCapturingPhoto,
+                    isEnabled: !camera.isRecording && !camera.isCapturingPhoto && countdown == 0,
                     onSelect: { camera.selectCaptureMode($0) }
                 )
 
+            HStack {
+                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
+                    withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
+                }
+                Spacer()
                 if camera.captureMode == .photo {
                     PhotoButton(isCapturing: camera.isCapturingPhoto) {
-                        captureHaptic()
-                        camera.capturePhoto()
+                        shutterPressed()
                     }
                 } else {
                     RecordButton(isRecording: camera.isRecording) {
-                        captureHaptic()
-                        camera.startOrStopRecording()
+                        shutterPressed()
                     }
                 }
-            }
             Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
+            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
                 camera.switchCamera()
+            }
             }
         }
         .padding(.bottom, 8)
@@ -226,7 +256,7 @@ struct CameraView: View {
                     dragStartZoom = camera.zoomFactor
                 }
                 guard let dragStartZoom else { return }
-                let screenWidth = max(UIScreen.main.bounds.width, 1)
+                let screenWidth = max(zoomWidth, 1)
                 let zoomRange = camera.maximumZoomFactor - camera.minimumZoomFactor
                 let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange)
                 camera.setZoomFactor(requestedZoom)
@@ -238,7 +268,32 @@ struct CameraView: View {
 
     private func captureHaptic() {
         guard isHapticCaptureEnabled else { return }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        CameraHaptics.fire()
+    }
+
+    private func cancelCountdown() {
+        shutterTask?.cancel()
+        shutterTask = nil
+        countdown = 0
+    }
+
+    private func shutterPressed() {
+        if countdown > 0 { cancelCountdown(); return }
+        if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
+        guard shutterTask == nil, camera.isSessionRunning else { return }
+        let mode = camera.captureMode
+        shutterTask = Task { @MainActor in
+            countdown = shutterDelay
+            while countdown > 0 {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                guard !Task.isCancelled else { return }
+                countdown -= 1
+            }
+            guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else { return }
+            captureHaptic()
+            if mode == .photo { camera.capturePhoto() } else { camera.startOrStopRecording() }
+            shutterTask = nil
+        }
     }
 
     private func updateIdleTimer(for phase: ScenePhase) {
