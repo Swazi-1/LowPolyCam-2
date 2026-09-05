@@ -161,32 +161,40 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func updateCapabilities() {
         guard let device = videoInput?.device else { return }
-        let supported = VideoResolution.allCases.filter { resolution in
-            device.formats.contains { self.format($0, supports: resolution) }
-        }
+        let supported = availableResolutions(for: device)
+        let selection = validSelection(for: device, availableResolutions: supported)
         publish {
             self.supportedResolutions = supported
             self.torchAvailable = device.hasTorch
+            self.selectedResolution = selection.resolution
+            self.selectedFrameRate = selection.frameRate
+            self.supportedFrameRates = selection.supportedFrameRates
         }
-        validateSelection(for: device)
     }
 
-    private func validateSelection(for device: AVCaptureDevice) {
-        let resolution = supportedResolutions.contains(selectedResolution) ? selectedResolution : (supportedResolutions.first ?? .p1080)
+    private func availableResolutions(for device: AVCaptureDevice) -> [VideoResolution] {
+        VideoResolution.allCases.filter { resolution in
+            device.formats.contains { self.format($0, supports: resolution) }
+        }
+    }
+
+    private func validSelection(for device: AVCaptureDevice, availableResolutions: [VideoResolution]) -> (resolution: VideoResolution, frameRate: VideoFrameRate, supportedFrameRates: [VideoFrameRate]) {
+        let resolution = availableResolutions.contains(selectedResolution) ? selectedResolution : (availableResolutions.first ?? .p1080)
         let rates = frameRates(for: resolution, device: device)
         let frameRate = rates.contains(selectedFrameRate) ? selectedFrameRate : (rates.first ?? .fps30)
-        publish {
-            self.selectedResolution = resolution
-            self.selectedFrameRate = frameRate
-            self.supportedFrameRates = rates
-        }
+        return (resolution, frameRate, rates)
     }
 
     private func applySelectedFormat() {
         guard let device = videoInput?.device else { return }
-        validateSelection(for: device)
+        let selection = validSelection(for: device, availableResolutions: availableResolutions(for: device))
+        publish {
+            self.selectedResolution = selection.resolution
+            self.selectedFrameRate = selection.frameRate
+            self.supportedFrameRates = selection.supportedFrameRates
+        }
         guard let format = device.formats.first(where: {
-            self.format($0, supports: self.selectedResolution, at: self.selectedFrameRate)
+            self.format($0, supports: selection.resolution, at: selection.frameRate)
         }) else {
             showError("This video quality isn’t available on this camera.")
             return
