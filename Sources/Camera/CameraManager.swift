@@ -316,7 +316,12 @@ final class CameraManager: NSObject, ObservableObject {
         do {
             try device.lockForConfiguration()
             device.activeFormat = format
-            let duration = CMTime(value: 1, timescale: CMTimeScale(selectedFrameRate.rawValue))
+            let requestedRate = Double(selection.frameRate.rawValue)
+            let range = format.videoSupportedFrameRateRanges.first {
+                $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
+            }
+            let actualRate = min(max(requestedRate, range?.minFrameRate ?? requestedRate), range?.maxFrameRate ?? requestedRate)
+            let duration = CMTimeMakeWithSeconds(1 / actualRate, preferredTimescale: 60_000)
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
@@ -330,7 +335,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard dimensions.width == resolution.dimensions.width, dimensions.height == resolution.dimensions.height else { return false }
         guard let frameRate else { return true }
         return format.videoSupportedFrameRateRanges.contains {
-            $0.minFrameRate <= Double(frameRate.rawValue) && $0.maxFrameRate >= Double(frameRate.rawValue)
+            let requestedRate = Double(frameRate.rawValue)
+            return $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
         }
     }
 
