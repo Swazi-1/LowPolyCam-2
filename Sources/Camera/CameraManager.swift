@@ -80,6 +80,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var zoomLabel = "1×"
     @Published var statusMessage: String?
     @Published private(set) var lastFrameGaps: Int?
+    @Published private(set) var codecAvailabilityMessage: String?
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
@@ -126,7 +127,6 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingPhotoFilename: String?
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
-    private var isUsingSmoothPreviewFallback = false
     private var isUsingSlowMotionPreview = false
     private var recordingRequested = false
     private var segmentTimer: DispatchWorkItem?
@@ -588,18 +588,7 @@ final class CameraManager: NSObject, ObservableObject {
             case .sloMo:
                 device = cameraSupportingSlowMotion(for: position) ?? preferredCamera(for: position)
             case .video:
-                if position == .back,
-                   requestedWhiteBalancePreset == .auto,
-                   let preferred = preferredCamera(for: position),
-                   preferred.isVirtualDevice {
-                    // Keep the rear virtual camera attached while idle. If the selected recording
-                    // quality isn't available on the virtual device (notably 4K60 on some iPhones),
-                    // applySelectedFormat uses a smooth 1080p60 preview and switches to the true
-                    // recording format only when recording begins.
-                    device = preferred
-                } else {
-                    device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
-                }
+                device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
             case .photo:
                 device = preferredCamera(for: position)
             }
@@ -1177,7 +1166,7 @@ final class CameraManager: NSObject, ObservableObject {
         return (resolution, frameRate, rates)
     }
 
-    private func applySelectedFormat(preferVirtualCamera: Bool = true, allowSmoothPreviewFallback: Bool = true) {
+    private func applySelectedFormat(preferVirtualCamera: Bool = true) {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let available = availableResolutions(for: devices)
@@ -1192,63 +1181,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.supportedFrameRates = selection.supportedFrameRates
         }
 
-        // All qualities share the same path. Preview fallback is needed only when
-        // the virtual device cannot actually provide the requested format.
-        if allowSmoothPreviewFallback,
-           preferVirtualCamera,
-           !movieOutput.isRecording,
-           currentDevice.position == .back,
-           requestedWhiteBalancePreset == .auto,
-           let virtualDevice = devices.first(where: { $0.isVirtualDevice }),
-           supportedDevices.contains(where: { $0.uniqueID == virtualDevice.uniqueID }) == false,
-           let previewFormat = smoothPreviewFormat(for: virtualDevice, preferredFrameRate: selection.frameRate) {
-
-            let switchedDevice = virtualDevice.uniqueID != currentDevice.uniqueID
-            if switchedDevice, replaceVideoInput(with: virtualDevice) == false {
-                showError("Couldn’t prepare the smooth camera preview.")
-                return
-            }
-
-            guard let device = videoInput?.device else { return }
-            let requestedRate = Double(selection.frameRate.rawValue)
-            let range = previewFormat.videoSupportedFrameRateRanges.first {
-                $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
-            }
-            let actualRate = min(max(requestedRate, range?.minFrameRate ?? requestedRate), range?.maxFrameRate ?? requestedRate)
-
-            do {
-                try device.lockForConfiguration()
-                device.activeFormat = previewFormat
-                let duration = CMTimeMakeWithSeconds(1 / actualRate, preferredTimescale: 60_000)
-                device.activeVideoMinFrameDuration = duration
-                device.activeVideoMaxFrameDuration = duration
-                let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
-                device.cancelVideoZoomRamp()
-                device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
-                device.unlockForConfiguration()
-
-                isUsingSmoothPreviewFallback = true
-                configureMovieOutputSettings()
-                publish {
-                    self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
-                    self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
-                    self.zoomFactor = displayedZoom
-                    self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
-                    self.torchAvailable = device.hasTorch
-                    self.isTorchOn = device.torchMode == .on
-                }
-                if switchedDevice {
-                    resetFocusAndExposureState()
-                }
-                return
-            } catch {
-                showError("Couldn’t configure the smooth camera preview.")
-                return
-            }
-        }
-
-        isUsingSmoothPreviewFallback = false
-
+        // Preview and recording use the same full-resolution format at every frame rate.
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
         let desiredDevice = preferVirtualCamera
             ? (supportedDevices.first(where: { $0.isVirtualDevice })
@@ -1318,8 +1251,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func smoothPreviewFormat(for device: AVCaptureDevice, preferredFrameRate: VideoFrameRate) -> AVCaptureDevice.Format? {
         let requestedRate = Double(preferredFrameRate.rawValue)
 
-        // Match the smooth 1080p path first. The phone display doesn't need a 4K live preview;
-        // keeping this at the selected frame rate avoids the 4K60 physical-input swap jitter.
+        // Slo-Mo-only idle preview; standard video always uses its recording format.
         for resolution in [VideoResolution.p1080, .p720] {
             if let format = device.formats.first(where: {
                 self.format($0, supports: resolution, at: preferredFrameRate)
@@ -1526,7 +1458,12 @@ final class CameraManager: NSObject, ObservableObject {
         var settings: [String: Any] = [:]
 
         let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
-        guard movieOutput.availableVideoCodecTypes.contains(preferred), supportedKeys.contains(AVVideoCodecKey) else { return false }
+        let codecAvailable = movieOutput.availableVideoCodecTypes.contains(preferred) && supportedKeys.contains(AVVideoCodecKey)
+        let message: String? = codecAvailable ? nil : (preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
+            ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264. Your codec will not be changed automatically."
+            : "The selected codec is unavailable for this camera configuration. Choose another codec or video quality.")
+        publish { self.codecAvailabilityMessage = message }
+        guard codecAvailable else { return false }
         let codec = preferred
 
         if supportedKeys.contains(AVVideoCodecKey) {
@@ -1542,6 +1479,13 @@ final class CameraManager: NSObject, ObservableObject {
         movieOutput.setOutputSettings(nil, for: connection)
         movieOutput.setOutputSettings(settings, for: connection)
         return (movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String) == preferred.rawValue
+    }
+
+    private func movieOutputMatchesSelectedCodec() -> Bool {
+        guard let connection = movieOutput.connection(with: .video) else { return false }
+        let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
+        return movieOutput.availableVideoCodecTypes.contains(preferred)
+            && (movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String) == preferred.rawValue
     }
 
     private func format(_ format: AVCaptureDevice.Format, supports resolution: VideoResolution, at frameRate: VideoFrameRate? = nil) -> Bool {
@@ -1595,10 +1539,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         if captureMode == .video {
-            applySelectedFormat(
-                preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
-                allowSmoothPreviewFallback: false
-            )
             guard activeVideoFormatMatchesSelection() else {
                 showError("Couldn’t prepare the selected recording quality.")
                 recordingRequested = false
@@ -1619,7 +1559,9 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
         }
-        guard configureMovieOutputSettings() else {
+        // Video output settings were prepared when quality/codec changed, not on Record.
+        let outputReady = captureMode == .video ? movieOutputMatchesSelectedCodec() : configureMovieOutputSettings()
+        guard outputReady else {
             recordingRequested = false
             publish { self.isRecording = false }
             showError("\(selectedVideoCodec == "H264" ? "H.264" : "HEVC") isn’t available at this resolution/FPS on this lens. Choose another codec or frame rate.")
@@ -1709,9 +1651,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 self.beginRecording()
             } else {
                 self.recordingRequested = false
-                if self.captureMode == .video {
-                    self.applySelectedFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput, allowSmoothPreviewFallback: true)
-                } else if self.captureMode == .sloMo {
+                if self.captureMode == .sloMo {
                     self.applySlowMotionFormat()
                 }
             }
