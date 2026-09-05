@@ -38,6 +38,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
     private var recordingStartedAt: Date?
+    private var requestedZoom: CGFloat = 1
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
@@ -86,7 +87,18 @@ final class CameraManager: NSObject, ObservableObject {
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.videoInput?.device else { return }
+            guard let self, let currentDevice = self.videoInput?.device else { return }
+            self.requestedZoom = requestedFactor
+            if !currentDevice.isVirtualDevice {
+                if self.movieOutput.isRecording {
+                    if requestedFactor < 1 && currentDevice.deviceType != .builtInUltraWideCamera {
+                        self.showError("Stop recording to switch to 0.5× at this quality.")
+                    }
+                } else if (requestedFactor < 1) != (currentDevice.deviceType == .builtInUltraWideCamera) {
+                    self.applySelectedFormat()
+                }
+            }
+            guard let device = self.videoInput?.device else { return }
             let factor = self.snappedZoomFactor(requestedFactor, for: device)
             do {
                 try device.lockForConfiguration()
@@ -258,6 +270,9 @@ final class CameraManager: NSObject, ObservableObject {
            devices.contains(where: { $0.uniqueID == wide.uniqueID }) == false {
             devices.append(wide)
         }
+        if let ultra = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position) {
+            devices.append(ultra)
+        }
         return devices
     }
 
@@ -290,6 +305,8 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func resetZoomToOne() {
+        requestedZoom = 1
+        applySelectedFormat()
         guard let device = videoInput?.device else { return }
         let oneX = min(max(1, minimumSupportedZoom(for: device)), maximumSupportedZoom(for: device))
         do {
@@ -306,6 +323,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func wideAngleDeviceZoomFactor(for device: AVCaptureDevice) -> CGFloat {
+        if device.deviceType == .builtInUltraWideCamera { return 2 }
         let hasUltraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
         guard hasUltraWide, let switchFactor = device.virtualDeviceSwitchOverVideoZoomFactors.first else {
             return 1
@@ -347,9 +365,13 @@ final class CameraManager: NSObject, ObservableObject {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let selection = validSelection(for: devices, availableResolutions: availableResolutions(for: devices))
-        guard let desiredDevice = devices.first(where: { device in
+        let supportedDevices = devices.filter { device in
             device.formats.contains { self.format($0, supports: selection.resolution, at: selection.frameRate) }
-        }) else {
+        }
+        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
+        guard let desiredDevice = supportedDevices.first(where: { $0.isVirtualDevice })
+            ?? supportedDevices.first(where: { $0.deviceType == desiredType })
+            ?? supportedDevices.first else {
             showError("This video quality isn’t available on this camera.")
             return
         }
@@ -384,6 +406,14 @@ final class CameraManager: NSObject, ObservableObject {
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
+            let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
+            let maximum = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
+            publish {
+                self.minimumZoomFactor = minimum
+                self.maximumZoomFactor = maximum
+                self.torchAvailable = device.hasTorch
+                self.isTorchOn = device.torchMode == .on
+            }
         } catch {
             showError("Couldn’t set the video quality.")
         }
