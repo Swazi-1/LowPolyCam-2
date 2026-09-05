@@ -150,13 +150,22 @@ struct CameraView: View {
                     onSelect: { camera.selectCaptureMode($0) }
                 )
 
-                if camera.captureMode == .video {
-                    RecordButton(isRecording: camera.isRecording) {
-                        camera.startOrStopRecording()
-                    }
-                } else {
+                if camera.captureMode == .photo {
                     PhotoButton(isCapturing: camera.isCapturingPhoto) {
                         camera.capturePhoto()
+                    }
+                } else {
+                    if camera.captureMode == .sloMo {
+                        Text(camera.selectedSlowMotionFrameRate.label.uppercased())
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.32), in: Capsule())
+                    }
+
+                    RecordButton(isRecording: camera.isRecording) {
+                        camera.startOrStopRecording()
                     }
                 }
             }

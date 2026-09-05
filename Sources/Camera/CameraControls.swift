@@ -145,9 +145,16 @@ struct ProToolsPopup: View {
                     Text("EV")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
+                    Button("Reset") {
+                        camera.setExposureBias(0)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .buttonStyle(.plain)
                     Text(evLabel)
                         .font(.system(.subheadline, design: .monospaced).weight(.semibold))
                         .foregroundStyle(.yellow)
+                        .frame(width: 42, alignment: .trailing)
                 }
 
                 Slider(
@@ -225,27 +232,23 @@ struct CameraLevelOverlay: View {
 
     var body: some View {
         ZStack {
-            HStack(spacing: 76) {
+            HStack(spacing: 104) {
                 Capsule()
-                    .fill(.white.opacity(0.65))
-                    .frame(width: 34, height: 2)
+                    .fill(.white.opacity(0.75))
+                    .frame(width: 42, height: 3)
                 Capsule()
-                    .fill(.white.opacity(0.65))
-                    .frame(width: 34, height: 2)
+                    .fill(.white.opacity(0.75))
+                    .frame(width: 42, height: 3)
             }
 
             Capsule()
                 .fill(isLevel ? .yellow : .white)
-                .frame(width: 64, height: isLevel ? 3 : 2)
-                .rotationEffect(.radians(angle))
-
-            Circle()
-                .fill(isLevel ? .yellow : .white.opacity(0.85))
-                .frame(width: 4, height: 4)
+                .frame(width: 82, height: isLevel ? 4 : 3)
+                // The horizon moves opposite the phone's roll. Using the inverse angle
+                // makes the meter follow the real world instead of feeling backwards.
+                .rotationEffect(.radians(-angle))
         }
-        .frame(width: 150, height: 44)
-        .padding(.horizontal, 8)
-        .background(.black.opacity(0.16), in: Capsule())
+        .frame(width: 210, height: 54)
         .opacity(isAvailable ? 1 : 0.35)
         .animation(.easeOut(duration: 0.12), value: isLevel)
         .accessibilityLabel(isLevel ? "Camera level" : "Camera not level")

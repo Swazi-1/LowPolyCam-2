@@ -6,8 +6,17 @@ final class CameraManager: NSObject, ObservableObject {
     enum CaptureMode: String, CaseIterable, Identifiable {
         case video = "VIDEO"
         case photo = "PHOTO"
+        case sloMo = "SLO-MO"
 
         var id: String { rawValue }
+    }
+
+    enum SlowMotionFrameRate: Int, CaseIterable, Identifiable {
+        case fps120 = 120
+        case fps240 = 240
+
+        var id: Int { rawValue }
+        var label: String { "\(rawValue) fps" }
     }
 
     enum CameraPosition {
@@ -31,10 +40,17 @@ final class CameraManager: NSObject, ObservableObject {
         var temperature: Float? {
             switch self {
             case .auto: return nil
-            case .daylight: return 5_200
+            case .daylight: return 5_600
             case .cloudy: return 6_500
             case .tungsten: return 3_200
-            case .fluorescent: return 4_000
+            case .fluorescent: return 4_300
+            }
+        }
+
+        var tint: Float {
+            switch self {
+            case .fluorescent: return 10
+            default: return 0
             }
         }
     }
@@ -49,6 +65,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var recordingDuration: TimeInterval = 0
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
+    @Published private(set) var supportedSlowMotionFrameRates: [SlowMotionFrameRate] = []
     @Published private(set) var cameraPosition: CameraPosition = .back
     @Published private(set) var torchAvailable = false
     @Published private(set) var isTorchOn = false
@@ -63,6 +80,9 @@ final class CameraManager: NSObject, ObservableObject {
     }
     @Published var selectedFrameRate: VideoFrameRate {
         didSet { UserDefaults.standard.set(selectedFrameRate.rawValue, forKey: Self.frameRateKey) }
+    }
+    @Published var selectedSlowMotionFrameRate: SlowMotionFrameRate {
+        didSet { UserDefaults.standard.set(selectedSlowMotionFrameRate.rawValue, forKey: Self.slowMotionFrameRateKey) }
     }
 
     let session = AVCaptureSession()
@@ -81,12 +101,15 @@ final class CameraManager: NSObject, ObservableObject {
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
+    private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
 
     override init() {
         let savedResolution = UserDefaults.standard.string(forKey: Self.resolutionKey)
         selectedResolution = VideoResolution(rawValue: savedResolution ?? "") ?? .p1080
         let savedFrameRate = UserDefaults.standard.integer(forKey: Self.frameRateKey)
         selectedFrameRate = VideoFrameRate(rawValue: savedFrameRate) ?? .fps30
+        let savedSlowMotionFrameRate = UserDefaults.standard.integer(forKey: Self.slowMotionFrameRateKey)
+        selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
         super.init()
     }
 
@@ -288,8 +311,14 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in self?.applySelectedFormat() }
     }
 
+    func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
+        selectedSlowMotionFrameRate = frameRate
+        guard captureMode == .sloMo else { return }
+        sessionQueue.async { [weak self] in self?.applySlowMotionFormat() }
+    }
+
     func startOrStopRecording() {
-        guard captureMode == .video else { return }
+        guard captureMode == .video || captureMode == .sloMo else { return }
         if isRecording {
             sessionQueue.async { [weak self] in self?.movieOutput.stopRecording() }
         } else {
@@ -341,9 +370,17 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func addVideoInput(for position: AVCaptureDevice.Position) -> Bool {
-        guard let device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position) else {
-            return false
+        let device: AVCaptureDevice?
+        switch captureMode {
+        case .sloMo:
+            device = cameraSupportingSlowMotion(for: position) ?? preferredCamera(for: position)
+        case .video:
+            device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
+        case .photo:
+            device = preferredCamera(for: position)
         }
+
+        guard let device else { return false }
         return addVideoInput(device)
     }
 
@@ -399,6 +436,10 @@ final class CameraManager: NSObject, ObservableObject {
         let devices = capabilityDevices(for: device.position)
         let supported = availableResolutions(for: devices)
         let selection = validSelection(for: devices, availableResolutions: supported)
+        let slowMotionRates = slowMotionFrameRates(for: devices)
+        let slowMotionSelection = slowMotionRates.contains(selectedSlowMotionFrameRate)
+            ? selectedSlowMotionFrameRate
+            : (slowMotionRates.last ?? .fps120)
         publish {
             self.supportedResolutions = supported
             self.torchAvailable = device.hasTorch
@@ -411,6 +452,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
+            self.supportedSlowMotionFrameRates = slowMotionRates
+            self.selectedSlowMotionFrameRate = slowMotionSelection
         }
     }
 
@@ -449,6 +492,22 @@ final class CameraManager: NSObject, ObservableObject {
         capabilityDevices(for: position).first { device in
             device.formats.contains { format($0, supports: selectedResolution, at: selectedFrameRate) }
         }
+    }
+
+    private func cameraSupportingSlowMotion(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        let devices = capabilityDevices(for: position)
+        let rates = slowMotionFrameRates(for: devices)
+        guard let rate = rates.contains(selectedSlowMotionFrameRate)
+            ? selectedSlowMotionFrameRate
+            : rates.last else { return nil }
+
+        let supported = devices.filter { bestSlowMotionFormat(for: $0, frameRate: rate) != nil }
+        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1
+            ? .builtInUltraWideCamera
+            : .builtInWideAngleCamera
+        return supported.first(where: { $0.isVirtualDevice })
+            ?? supported.first(where: { $0.deviceType == desiredType })
+            ?? supported.first
     }
 
     private func resetFocusAndExposureState() {
@@ -552,7 +611,7 @@ final class CameraManager: NSObject, ObservableObject {
                 return false
             }
 
-            let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: 0)
+            let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: preset.tint)
             var gains = device.deviceWhiteBalanceGains(for: values)
             let maximum = device.maxWhiteBalanceGain
             gains.redGain = min(max(gains.redGain, 1), maximum)
@@ -634,9 +693,12 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func applyActiveModeFormat() {
-        if captureMode == .photo {
+        switch captureMode {
+        case .photo:
             applyBestPhotoFormat()
-        } else {
+        case .sloMo:
+            applySlowMotionFormat()
+        case .video:
             applySelectedFormat()
         }
     }
@@ -887,6 +949,7 @@ final class CameraManager: NSObject, ObservableObject {
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
             configurePhotoOutputForActiveFormat(device)
+            configureMovieOutputSettings()
             let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
             let maximum = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
             publish {
@@ -900,6 +963,131 @@ final class CameraManager: NSObject, ObservableObject {
             }
         } catch {
             showError("Couldn’t set the video quality.")
+        }
+    }
+
+    private func applySlowMotionFormat() {
+        guard let currentDevice = videoInput?.device else { return }
+        let devices = capabilityDevices(for: currentDevice.position)
+        let availableRates = slowMotionFrameRates(for: devices)
+        guard !availableRates.isEmpty else {
+            showError("Slo-Mo isn’t available on this camera.")
+            return
+        }
+
+        let selectedRate = availableRates.contains(selectedSlowMotionFrameRate)
+            ? selectedSlowMotionFrameRate
+            : (availableRates.last ?? .fps120)
+        let requestedFPS = Double(selectedRate.rawValue)
+        let supportedDevices = devices.filter { device in
+            bestSlowMotionFormat(for: device, frameRate: selectedRate) != nil
+        }
+        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1
+            ? .builtInUltraWideCamera
+            : .builtInWideAngleCamera
+        guard let desiredDevice = supportedDevices.first(where: { $0.isVirtualDevice })
+            ?? supportedDevices.first(where: { $0.deviceType == desiredType })
+            ?? supportedDevices.first else {
+            showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this lens.")
+            return
+        }
+
+        let switchedPhysicalCamera = desiredDevice.uniqueID != currentDevice.uniqueID
+        if switchedPhysicalCamera, replaceVideoInput(with: desiredDevice) == false {
+            showError("Couldn’t switch cameras for Slo-Mo.")
+            return
+        }
+
+        guard let device = videoInput?.device,
+              let format = bestSlowMotionFormat(for: device, frameRate: selectedRate) else {
+            showError("Couldn’t configure Slo-Mo on this camera.")
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = format
+            let duration = CMTimeMakeWithSeconds(1.0 / requestedFPS, preferredTimescale: 60_000)
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
+            device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
+            device.unlockForConfiguration()
+
+            configureMovieOutputSettings()
+            let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
+            let maximum = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
+            publish {
+                self.selectedSlowMotionFrameRate = selectedRate
+                self.supportedSlowMotionFrameRates = availableRates
+                self.minimumZoomFactor = minimum
+                self.maximumZoomFactor = maximum
+                self.zoomFactor = displayedZoom
+                self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
+                self.torchAvailable = device.hasTorch
+                self.isTorchOn = device.torchMode == .on
+            }
+            if switchedPhysicalCamera {
+                resetFocusAndExposureState()
+            }
+        } catch {
+            showError("Couldn’t set the Slo-Mo frame rate.")
+        }
+    }
+
+    private func slowMotionFrameRates(for devices: [AVCaptureDevice]) -> [SlowMotionFrameRate] {
+        SlowMotionFrameRate.allCases.filter { rate in
+            devices.contains { bestSlowMotionFormat(for: $0, frameRate: rate) != nil }
+        }
+    }
+
+    private func bestSlowMotionFormat(for device: AVCaptureDevice, frameRate: SlowMotionFrameRate) -> AVCaptureDevice.Format? {
+        let requestedFPS = Double(frameRate.rawValue)
+        let candidates = device.formats.filter { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dimensions.width == 1920, dimensions.height == 1080 else { return false }
+            return format.videoSupportedFrameRateRanges.contains {
+                $0.minFrameRate <= requestedFPS + 0.5 && $0.maxFrameRate >= requestedFPS - 0.5
+            }
+        }
+
+        return candidates.max { lhs, rhs in
+            let lhsMax = lhs.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+            let rhsMax = rhs.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+            return lhsMax < rhsMax
+        }
+    }
+
+    private func configureMovieOutputSettings() {
+        guard let connection = movieOutput.connection(with: .video) else { return }
+
+        if connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = captureMode == .sloMo ? .off : .auto
+        }
+
+        let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
+        var settings: [String: Any] = [:]
+
+        let codec: AVVideoCodecType?
+        if movieOutput.availableVideoCodecTypes.contains(.hevc) {
+            codec = .hevc
+        } else if movieOutput.availableVideoCodecTypes.contains(.h264) {
+            codec = .h264
+        } else {
+            codec = nil
+        }
+
+        if let codec, supportedKeys.contains(AVVideoCodecKey) {
+            // Keep compression properties native. AVCaptureMovieFileOutput fills them from the
+            // active camera format, so bitrate can scale correctly for each iPhone/resolution/FPS
+            // instead of forcing one brittle fixed Mbps value.
+            settings[AVVideoCodecKey] = codec
+        }
+
+        if settings.isEmpty {
+            movieOutput.setOutputSettings(nil, for: connection)
+        } else {
+            movieOutput.setOutputSettings(settings, for: connection)
         }
     }
 
@@ -939,6 +1127,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func beginRecording() {
         guard session.isRunning, movieOutput.isRecording == false else { return }
+        configureMovieOutputSettings()
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mov")
