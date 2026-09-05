@@ -5,11 +5,9 @@ import UIKit
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     let isFocusExposureLocked: Bool
-    let exposureBias: Float
+    let stabilizationEnabled: Bool
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
-    let onExposureDragBegan: () -> Void
-    let onExposureDragChanged: (Float) -> Void
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
@@ -27,10 +25,8 @@ struct CameraPreview: UIViewRepresentable {
     private func configure(_ view: PreviewView) {
         view.onTapToFocus = onTapToFocus
         view.onLongPressToLock = onLongPressToLock
-        view.onExposureDragBegan = onExposureDragBegan
-        view.onExposureDragChanged = onExposureDragChanged
         view.setFocusExposureLocked(isFocusExposureLocked)
-        view.setExposureBias(exposureBias)
+        view.setStabilizationEnabled(stabilizationEnabled)
     }
 }
 
@@ -41,17 +37,12 @@ final class PreviewView: UIView {
 
     var onTapToFocus: ((CGPoint) -> Void)?
     var onLongPressToLock: ((CGPoint) -> Void)?
-    var onExposureDragBegan: (() -> Void)?
-    var onExposureDragChanged: ((Float) -> Void)?
 
     private let focusIndicator = UIView()
     private let lockLabel = UILabel()
-    private let exposureContainer = UIView()
-    private let exposureIcon = UIImageView(image: UIImage(systemName: "sun.max.fill"))
-    private let exposureLabel = UILabel()
     private var hideFocusWorkItem: DispatchWorkItem?
-    private var hideExposureWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
+    private var stabilizationEnabled = true
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -74,19 +65,16 @@ final class PreviewView: UIView {
             height: 30
         )
 
-        exposureContainer.frame = CGRect(
-            x: bounds.width - 82,
-            y: (bounds.height - 108) / 2,
-            width: 58,
-            height: 108
-        )
-        exposureIcon.frame = CGRect(x: 17, y: 14, width: 24, height: 24)
-        exposureLabel.frame = CGRect(x: 4, y: 48, width: 50, height: 42)
     }
 
     func enableStabilizationIfAvailable() {
         guard let connection = previewLayer.connection, connection.isVideoStabilizationSupported else { return }
-        connection.preferredVideoStabilizationMode = .auto
+        connection.preferredVideoStabilizationMode = stabilizationEnabled ? .auto : .off
+    }
+
+    func setStabilizationEnabled(_ enabled: Bool) {
+        stabilizationEnabled = enabled
+        enableStabilizationIfAvailable()
     }
 
     func setFocusExposureLocked(_ isLocked: Bool) {
@@ -100,14 +88,6 @@ final class PreviewView: UIView {
             UIView.animate(withDuration: 0.2) {
                 self.focusIndicator.alpha = 0
             }
-        }
-    }
-
-    func setExposureBias(_ bias: Float) {
-        if abs(bias) < 0.05 {
-            exposureLabel.text = "0.0\nEV"
-        } else {
-            exposureLabel.text = String(format: "%+.1f\nEV", bias)
         }
     }
 
@@ -129,22 +109,6 @@ final class PreviewView: UIView {
         lockLabel.clipsToBounds = true
         lockLabel.isHidden = true
         addSubview(lockLabel)
-
-        exposureContainer.isUserInteractionEnabled = false
-        exposureContainer.backgroundColor = UIColor.black.withAlphaComponent(0.48)
-        exposureContainer.layer.cornerRadius = 18
-        exposureContainer.alpha = 0
-        addSubview(exposureContainer)
-
-        exposureIcon.tintColor = .systemYellow
-        exposureIcon.contentMode = .scaleAspectFit
-        exposureContainer.addSubview(exposureIcon)
-
-        exposureLabel.textAlignment = .center
-        exposureLabel.numberOfLines = 2
-        exposureLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        exposureLabel.textColor = .white
-        exposureContainer.addSubview(exposureLabel)
     }
 
     private func configureGestures() {
@@ -157,10 +121,6 @@ final class PreviewView: UIView {
         addGestureRecognizer(longPress)
 
         tap.require(toFail: longPress)
-
-        let exposurePan = UIPanGestureRecognizer(target: self, action: #selector(handleExposurePan(_:)))
-        exposurePan.maximumNumberOfTouches = 1
-        addGestureRecognizer(exposurePan)
     }
 
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -177,23 +137,6 @@ final class PreviewView: UIView {
         showFocusIndicator(at: layerPoint, locked: true)
         let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
         onLongPressToLock?(devicePoint)
-    }
-
-    @objc private func handleExposurePan(_ recognizer: UIPanGestureRecognizer) {
-        switch recognizer.state {
-        case .began:
-            hideExposureWorkItem?.cancel()
-            exposureContainer.alpha = 1
-            onExposureDragBegan?()
-        case .changed:
-            let translation = recognizer.translation(in: self)
-            let deltaEV = Float(-translation.y / 120)
-            onExposureDragChanged?(deltaEV)
-        case .ended, .cancelled, .failed:
-            scheduleExposureIndicatorHide()
-        default:
-            break
-        }
     }
 
     private func showFocusIndicator(at point: CGPoint, locked: Bool) {
@@ -223,14 +166,5 @@ final class PreviewView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.15, execute: workItem)
     }
 
-    private func scheduleExposureIndicatorHide() {
-        hideExposureWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            UIView.animate(withDuration: 0.2) {
-                self?.exposureContainer.alpha = 0
-            }
-        }
-        hideExposureWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
-    }
+
 }

@@ -40,19 +40,14 @@ final class CameraManager: NSObject, ObservableObject {
         var temperature: Float? {
             switch self {
             case .auto: return nil
-            case .daylight: return 5_600
+            case .daylight: return 5_500
             case .cloudy: return 6_500
             case .tungsten: return 3_200
-            case .fluorescent: return 4_300
+            case .fluorescent: return 4_200
             }
         }
 
-        var tint: Float {
-            switch self {
-            case .fluorescent: return 10
-            default: return 0
-            }
-        }
+        var tint: Float { 0 }
     }
 
     @Published private(set) var isSessionRunning = false
@@ -65,6 +60,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var recordingDuration: TimeInterval = 0
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
+    @Published private(set) var supportedSlowMotionResolutions: [VideoResolution] = []
     @Published private(set) var supportedSlowMotionFrameRates: [SlowMotionFrameRate] = []
     @Published private(set) var cameraPosition: CameraPosition = .back
     @Published private(set) var torchAvailable = false
@@ -81,8 +77,14 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var selectedFrameRate: VideoFrameRate {
         didSet { UserDefaults.standard.set(selectedFrameRate.rawValue, forKey: Self.frameRateKey) }
     }
+    @Published var selectedSlowMotionResolution: VideoResolution {
+        didSet { UserDefaults.standard.set(selectedSlowMotionResolution.rawValue, forKey: Self.slowMotionResolutionKey) }
+    }
     @Published var selectedSlowMotionFrameRate: SlowMotionFrameRate {
         didSet { UserDefaults.standard.set(selectedSlowMotionFrameRate.rawValue, forKey: Self.slowMotionFrameRateKey) }
+    }
+    @Published var isVideoStabilizationEnabled: Bool {
+        didSet { UserDefaults.standard.set(isVideoStabilizationEnabled, forKey: Self.videoStabilizationKey) }
     }
 
     let session = AVCaptureSession()
@@ -94,22 +96,27 @@ final class CameraManager: NSObject, ObservableObject {
     private var recordingStartedAt: Date?
     private var requestedZoom: CGFloat = 1
     private var requestedExposureBias: Float = 0
-    private var exposureDragStartBias: Float = 0
+    private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
+    private static let slowMotionResolutionKey = "selectedSlowMotionResolution"
     private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
+    private static let videoStabilizationKey = "videoStabilizationEnabled"
 
     override init() {
         let savedResolution = UserDefaults.standard.string(forKey: Self.resolutionKey)
         selectedResolution = VideoResolution(rawValue: savedResolution ?? "") ?? .p1080
         let savedFrameRate = UserDefaults.standard.integer(forKey: Self.frameRateKey)
         selectedFrameRate = VideoFrameRate(rawValue: savedFrameRate) ?? .fps30
+        let savedSlowMotionResolution = UserDefaults.standard.string(forKey: Self.slowMotionResolutionKey)
+        selectedSlowMotionResolution = VideoResolution(rawValue: savedSlowMotionResolution ?? "") ?? .p1080
         let savedSlowMotionFrameRate = UserDefaults.standard.integer(forKey: Self.slowMotionFrameRateKey)
         selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
+        isVideoStabilizationEnabled = UserDefaults.standard.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
         super.init()
     }
 
@@ -179,7 +186,7 @@ final class CameraManager: NSObject, ObservableObject {
                         self.showError("Stop recording to switch to 0.5× at this quality.")
                     }
                 } else if (requestedFactor < 1) != (currentDevice.deviceType == .builtInUltraWideCamera) {
-                    self.applyActiveModeFormat()
+                    self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
                 }
             }
 
@@ -231,7 +238,7 @@ final class CameraManager: NSObject, ObservableObject {
         captureMode = mode
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.applyActiveModeFormat()
+            self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
             self.resetFocusAndExposureState()
         }
     }
@@ -257,20 +264,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func beginExposureAdjustment() {
-        sessionQueue.async { [weak self] in
-            guard let self, let device = self.videoInput?.device else { return }
-            self.exposureDragStartBias = device.exposureTargetBias
-        }
-    }
-
-    func adjustExposure(by deltaEV: Float) {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.applyExposureBias(self.exposureDragStartBias + deltaEV)
-        }
-    }
-
     func setExposureBias(_ bias: Float) {
         sessionQueue.async { [weak self] in
             self?.applyExposureBias(bias)
@@ -279,42 +272,75 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
         sessionQueue.async { [weak self] in
-            guard let self, let inputDevice = self.videoInput?.device else { return }
+            guard let self else { return }
+            let previousPreset = self.requestedWhiteBalancePreset
+            self.requestedWhiteBalancePreset = preset
 
-            let primaryDevice = self.primaryWhiteBalanceDevice(for: inputDevice)
-            let primaryApplied = self.applyWhiteBalancePreset(preset, to: primaryDevice)
-
-            // Pre-apply the same preset to the other physical lenses of a virtual camera so
-            // crossing 0.5×/1× doesn't silently return the newly active lens to Auto WB.
-            for device in self.whiteBalanceControlDevices(for: inputDevice)
-                where device.uniqueID != primaryDevice.uniqueID {
-                _ = self.applyWhiteBalancePreset(preset, to: device)
+            if preset == .auto {
+                self.restoreVirtualRearCameraIfPossible()
+                guard self.applyWhiteBalancePresetToCurrentCamera(.auto) else {
+                    self.requestedWhiteBalancePreset = previousPreset
+                    self.showError("Couldn’t enable Auto white balance.")
+                    return
+                }
+                self.publish { self.whiteBalancePreset = .auto }
+                return
             }
 
-            if primaryApplied {
-                self.publish { self.whiteBalancePreset = preset }
-            } else {
+            // Apple's virtual multi-camera devices don't support custom WB gains. For manual
+            // presets on the rear camera, use the currently requested physical lens instead.
+            if self.cameraPosition == .back, self.videoInput?.device.isVirtualDevice == true {
+                guard self.switchToPhysicalRearLensForManualWhiteBalance() else {
+                    self.requestedWhiteBalancePreset = previousPreset
+                    self.showError("Manual white balance isn’t available on this lens.")
+                    return
+                }
+            }
+
+            guard self.applyWhiteBalancePresetToCurrentCamera(preset) else {
+                self.requestedWhiteBalancePreset = previousPreset
+                if previousPreset == .auto { self.restoreVirtualRearCameraIfPossible() }
                 self.showError("Couldn’t change white balance on this camera.")
+                return
             }
+            self.publish { self.whiteBalancePreset = preset }
         }
     }
 
     func selectResolution(_ resolution: VideoResolution) {
         selectedResolution = resolution
         guard captureMode == .video else { return }
-        sessionQueue.async { [weak self] in self?.applySelectedFormat() }
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.applySelectedFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+        }
     }
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
         selectedFrameRate = frameRate
         guard captureMode == .video else { return }
-        sessionQueue.async { [weak self] in self?.applySelectedFormat() }
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.applySelectedFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+        }
+    }
+
+    func selectSlowMotionResolution(_ resolution: VideoResolution) {
+        selectedSlowMotionResolution = resolution
+        guard captureMode == .sloMo else { return }
+        sessionQueue.async { [weak self] in self?.applySlowMotionFormat() }
     }
 
     func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
         selectedSlowMotionFrameRate = frameRate
         guard captureMode == .sloMo else { return }
         sessionQueue.async { [weak self] in self?.applySlowMotionFormat() }
+    }
+
+    func setVideoStabilizationEnabled(_ enabled: Bool) {
+        isVideoStabilizationEnabled = enabled
+        guard captureMode == .video else { return }
+        sessionQueue.async { [weak self] in self?.configureMovieOutputSettings() }
     }
 
     func startOrStopRecording() {
@@ -348,7 +374,7 @@ final class CameraManager: NSObject, ObservableObject {
         session.addOutput(photoOutput)
 
         updateCapabilities()
-        applyActiveModeFormat()
+        applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         resetFocusAndExposureState()
     }
 
@@ -364,20 +390,40 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         updateCapabilities()
-        applyActiveModeFormat()
+        applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         resetFocusAndExposureState()
     }
 
     @discardableResult
     private func addVideoInput(for position: AVCaptureDevice.Position) -> Bool {
         let device: AVCaptureDevice?
-        switch captureMode {
-        case .sloMo:
-            device = cameraSupportingSlowMotion(for: position) ?? preferredCamera(for: position)
-        case .video:
-            device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
-        case .photo:
-            device = preferredCamera(for: position)
+        let shouldUsePhysicalRear = position == .back && requiresPhysicalWhiteBalanceInput
+
+        if shouldUsePhysicalRear {
+            let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
+            let physicalDevices = capabilityDevices(for: position).filter { !$0.isVirtualDevice }
+            switch captureMode {
+            case .video:
+                device = physicalDevices.first(where: { candidate in
+                    candidate.deviceType == desiredType &&
+                    candidate.formats.contains { format($0, supports: selectedResolution, at: selectedFrameRate) }
+                }) ?? physicalDevices.first(where: { candidate in
+                    candidate.formats.contains { format($0, supports: selectedResolution, at: selectedFrameRate) }
+                })
+            case .photo:
+                device = physicalDevices.first(where: { $0.deviceType == desiredType }) ?? physicalDevices.first
+            case .sloMo:
+                device = cameraSupportingSlowMotion(for: position)
+            }
+        } else {
+            switch captureMode {
+            case .sloMo:
+                device = cameraSupportingSlowMotion(for: position) ?? preferredCamera(for: position)
+            case .video:
+                device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
+            case .photo:
+                device = preferredCamera(for: position)
+            }
         }
 
         guard let device else { return false }
@@ -436,7 +482,11 @@ final class CameraManager: NSObject, ObservableObject {
         let devices = capabilityDevices(for: device.position)
         let supported = availableResolutions(for: devices)
         let selection = validSelection(for: devices, availableResolutions: supported)
-        let slowMotionRates = slowMotionFrameRates(for: devices)
+        let slowMotionResolutions = slowMotionResolutions(for: devices)
+        let slowMotionResolution = slowMotionResolutions.contains(selectedSlowMotionResolution)
+            ? selectedSlowMotionResolution
+            : (slowMotionResolutions.contains(.p1080) ? .p1080 : (slowMotionResolutions.first ?? .p1080))
+        let slowMotionRates = slowMotionFrameRates(for: devices, resolution: slowMotionResolution)
         let slowMotionSelection = slowMotionRates.contains(selectedSlowMotionFrameRate)
             ? selectedSlowMotionFrameRate
             : (slowMotionRates.last ?? .fps120)
@@ -452,6 +502,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
+            self.supportedSlowMotionResolutions = slowMotionResolutions
+            self.selectedSlowMotionResolution = slowMotionResolution
             self.supportedSlowMotionFrameRates = slowMotionRates
             self.selectedSlowMotionFrameRate = slowMotionSelection
         }
@@ -496,17 +548,22 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func cameraSupportingSlowMotion(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         let devices = capabilityDevices(for: position)
-        let rates = slowMotionFrameRates(for: devices)
+        let resolutions = slowMotionResolutions(for: devices)
+        guard !resolutions.isEmpty else { return nil }
+        let resolution = resolutions.contains(selectedSlowMotionResolution)
+            ? selectedSlowMotionResolution
+            : (resolutions.contains(.p1080) ? .p1080 : resolutions[0])
+        let rates = slowMotionFrameRates(for: devices, resolution: resolution)
         guard let rate = rates.contains(selectedSlowMotionFrameRate)
             ? selectedSlowMotionFrameRate
             : rates.last else { return nil }
 
-        let supported = devices.filter { bestSlowMotionFormat(for: $0, frameRate: rate) != nil }
+        let supported = devices.filter { bestSlowMotionFormat(for: $0, resolution: resolution, frameRate: rate) != nil }
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1
             ? .builtInUltraWideCamera
             : .builtInWideAngleCamera
-        return supported.first(where: { $0.isVirtualDevice })
-            ?? supported.first(where: { $0.deviceType == desiredType })
+        return supported.first(where: { $0.deviceType == desiredType })
+            ?? supported.first(where: { !$0.isVirtualDevice })
             ?? supported.first
     }
 
@@ -529,7 +586,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.isFocusExposureLocked = false
                 self.exposureBias = target
             }
-            applyWhiteBalancePresetToCurrentCamera(whiteBalancePreset)
+            _ = applyWhiteBalancePresetToCurrentCamera(requestedWhiteBalancePreset)
         } catch {
             showError("Couldn’t reset focus and exposure.")
         }
@@ -555,36 +612,57 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func primaryWhiteBalanceDevice(for inputDevice: AVCaptureDevice) -> AVCaptureDevice {
-        guard inputDevice.isVirtualDevice else { return inputDevice }
-
-        if let active = inputDevice.activePrimaryConstituent {
-            return active
-        }
-
-        let preferredType: AVCaptureDevice.DeviceType = requestedZoom < 1
-            ? .builtInUltraWideCamera
-            : .builtInWideAngleCamera
-        return inputDevice.constituentDevices.first(where: { $0.deviceType == preferredType })
-            ?? inputDevice.constituentDevices.first
-            ?? inputDevice
+    private var requiresPhysicalWhiteBalanceInput: Bool {
+        requestedWhiteBalancePreset != .auto && cameraPosition == .back && (captureMode == .video || captureMode == .photo)
     }
 
-    private func whiteBalanceControlDevices(for inputDevice: AVCaptureDevice) -> [AVCaptureDevice] {
-        guard inputDevice.isVirtualDevice, !inputDevice.constituentDevices.isEmpty else {
-            return [inputDevice]
-        }
+    @discardableResult
+    private func applyWhiteBalancePresetToCurrentCamera(_ preset: WhiteBalancePreset) -> Bool {
+        guard let device = videoInput?.device else { return false }
 
-        var devices = inputDevice.constituentDevices
-        devices.append(inputDevice)
-        return devices
+        // Auto WB is supported on virtual and physical cameras. Manual presets are only
+        // considered successful on the actual capture input so the UI can't claim a change
+        // that isn't visible in the rear Video/Photo stream.
+        let applied = applyWhiteBalancePreset(preset, to: device)
+
+        if device.isVirtualDevice {
+            for constituent in device.constituentDevices {
+                _ = applyWhiteBalancePreset(preset, to: constituent)
+            }
+        }
+        return applied
     }
 
-    private func applyWhiteBalancePresetToCurrentCamera(_ preset: WhiteBalancePreset) {
-        guard let inputDevice = videoInput?.device else { return }
-        for device in whiteBalanceControlDevices(for: inputDevice) {
-            _ = applyWhiteBalancePreset(preset, to: device)
+    private func switchToPhysicalRearLensForManualWhiteBalance() -> Bool {
+        guard cameraPosition == .back else { return true }
+        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
+        let devices = capabilityDevices(for: .back).filter { !$0.isVirtualDevice }
+        let desiredDevice = devices.first(where: { $0.deviceType == desiredType })
+            ?? devices.first(where: { $0.deviceType == .builtInWideAngleCamera })
+            ?? devices.first
+        guard let desiredDevice else { return false }
+
+        if videoInput?.device.uniqueID != desiredDevice.uniqueID, replaceVideoInput(with: desiredDevice) == false {
+            return false
         }
+        updateCapabilities()
+        applyActiveModeFormat(preferVirtualCamera: false)
+        resetFocusAndExposureState()
+        return true
+    }
+
+    private func restoreVirtualRearCameraIfPossible() {
+        guard cameraPosition == .back,
+              captureMode == .video || captureMode == .photo,
+              let currentDevice = videoInput?.device,
+              !currentDevice.isVirtualDevice,
+              let virtualDevice = preferredCamera(for: .back),
+              virtualDevice.isVirtualDevice else { return }
+
+        guard replaceVideoInput(with: virtualDevice) else { return }
+        updateCapabilities()
+        applyActiveModeFormat(preferVirtualCamera: true)
+        resetFocusAndExposureState()
     }
 
     @discardableResult
@@ -692,27 +770,31 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.asyncAfter(deadline: .now() + 0.45, execute: workItem)
     }
 
-    private func applyActiveModeFormat() {
+    private func applyActiveModeFormat(preferVirtualCamera: Bool = true) {
         switch captureMode {
         case .photo:
-            applyBestPhotoFormat()
+            applyBestPhotoFormat(preferVirtualCamera: preferVirtualCamera)
         case .sloMo:
             applySlowMotionFormat()
         case .video:
-            applySelectedFormat()
+            applySelectedFormat(preferVirtualCamera: preferVirtualCamera)
         }
     }
 
-    private func applyBestPhotoFormat() {
+    private func applyBestPhotoFormat(preferVirtualCamera: Bool = true) {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
         // Prefer a virtual multi-camera input so 0.5× <-> 1× stays inside one capture input.
         // Replacing AVCaptureDeviceInput is much slower and causes the visible one-second hitch.
-        let desiredDevice = devices.first(where: { $0.isVirtualDevice })
-            ?? devices.first(where: { $0.deviceType == desiredType })
-            ?? devices.first(where: { !$0.isVirtualDevice })
-            ?? devices.first
+        let desiredDevice = preferVirtualCamera
+            ? (devices.first(where: { $0.isVirtualDevice })
+                ?? devices.first(where: { $0.deviceType == desiredType })
+                ?? devices.first(where: { !$0.isVirtualDevice })
+                ?? devices.first)
+            : (devices.first(where: { !$0.isVirtualDevice && $0.deviceType == desiredType })
+                ?? devices.first(where: { !$0.isVirtualDevice })
+                ?? devices.first)
 
         guard let desiredDevice else {
             showError("Photo capture is unavailable on this camera.")
@@ -847,7 +929,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func resetZoomToOne() {
         requestedZoom = 1
-        applyActiveModeFormat()
+        applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         guard let device = videoInput?.device else { return }
         let oneX = min(max(1, minimumSupportedZoom(for: device)), maximumSupportedZoom(for: device))
         do {
@@ -902,7 +984,7 @@ final class CameraManager: NSObject, ObservableObject {
         return (resolution, frameRate, rates)
     }
 
-    private func applySelectedFormat() {
+    private func applySelectedFormat(preferVirtualCamera: Bool = true) {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let selection = validSelection(for: devices, availableResolutions: availableResolutions(for: devices))
@@ -910,9 +992,13 @@ final class CameraManager: NSObject, ObservableObject {
             device.formats.contains { self.format($0, supports: selection.resolution, at: selection.frameRate) }
         }
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
-        guard let desiredDevice = supportedDevices.first(where: { $0.isVirtualDevice })
-            ?? supportedDevices.first(where: { $0.deviceType == desiredType })
-            ?? supportedDevices.first else {
+        let desiredDevice = preferVirtualCamera
+            ? (supportedDevices.first(where: { $0.isVirtualDevice })
+                ?? supportedDevices.first(where: { $0.deviceType == desiredType })
+                ?? supportedDevices.first)
+            : (supportedDevices.first(where: { !$0.isVirtualDevice && $0.deviceType == desiredType })
+                ?? supportedDevices.first(where: { !$0.isVirtualDevice }))
+        guard let desiredDevice else {
             showError("This video quality isn’t available on this camera.")
             return
         }
@@ -969,9 +1055,18 @@ final class CameraManager: NSObject, ObservableObject {
     private func applySlowMotionFormat() {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
-        let availableRates = slowMotionFrameRates(for: devices)
-        guard !availableRates.isEmpty else {
+        let availableResolutions = slowMotionResolutions(for: devices)
+        guard !availableResolutions.isEmpty else {
             showError("Slo-Mo isn’t available on this camera.")
+            return
+        }
+
+        let resolution = availableResolutions.contains(selectedSlowMotionResolution)
+            ? selectedSlowMotionResolution
+            : (availableResolutions.contains(.p1080) ? .p1080 : availableResolutions[0])
+        let availableRates = slowMotionFrameRates(for: devices, resolution: resolution)
+        guard !availableRates.isEmpty else {
+            showError("Slo-Mo isn’t available at this resolution.")
             return
         }
 
@@ -980,13 +1075,15 @@ final class CameraManager: NSObject, ObservableObject {
             : (availableRates.last ?? .fps120)
         let requestedFPS = Double(selectedRate.rawValue)
         let supportedDevices = devices.filter { device in
-            bestSlowMotionFormat(for: device, frameRate: selectedRate) != nil
+            bestSlowMotionFormat(for: device, resolution: resolution, frameRate: selectedRate) != nil
         }
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1
             ? .builtInUltraWideCamera
             : .builtInWideAngleCamera
-        guard let desiredDevice = supportedDevices.first(where: { $0.isVirtualDevice })
-            ?? supportedDevices.first(where: { $0.deviceType == desiredType })
+
+        // Prefer a real physical camera for HFR. This also guarantees manual WB presets work.
+        guard let desiredDevice = supportedDevices.first(where: { !$0.isVirtualDevice && $0.deviceType == desiredType })
+            ?? supportedDevices.first(where: { !$0.isVirtualDevice })
             ?? supportedDevices.first else {
             showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this lens.")
             return
@@ -999,7 +1096,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         guard let device = videoInput?.device,
-              let format = bestSlowMotionFormat(for: device, frameRate: selectedRate) else {
+              let format = bestSlowMotionFormat(for: device, resolution: resolution, frameRate: selectedRate) else {
             showError("Couldn’t configure Slo-Mo on this camera.")
             return
         }
@@ -1015,11 +1112,14 @@ final class CameraManager: NSObject, ObservableObject {
             device.unlockForConfiguration()
 
             configureMovieOutputSettings()
+            let currentRates = slowMotionFrameRates(for: devices, resolution: resolution)
             let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
             let maximum = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
             publish {
+                self.supportedSlowMotionResolutions = availableResolutions
+                self.selectedSlowMotionResolution = resolution
                 self.selectedSlowMotionFrameRate = selectedRate
-                self.supportedSlowMotionFrameRates = availableRates
+                self.supportedSlowMotionFrameRates = currentRates
                 self.minimumZoomFactor = minimum
                 self.maximumZoomFactor = maximum
                 self.zoomFactor = displayedZoom
@@ -1027,25 +1127,31 @@ final class CameraManager: NSObject, ObservableObject {
                 self.torchAvailable = device.hasTorch
                 self.isTorchOn = device.torchMode == .on
             }
-            if switchedPhysicalCamera {
-                resetFocusAndExposureState()
-            }
+            resetFocusAndExposureState()
         } catch {
-            showError("Couldn’t set the Slo-Mo frame rate.")
+            showError("Couldn’t set the Slo-Mo quality.")
         }
     }
 
-    private func slowMotionFrameRates(for devices: [AVCaptureDevice]) -> [SlowMotionFrameRate] {
+    private func slowMotionResolutions(for devices: [AVCaptureDevice]) -> [VideoResolution] {
+        VideoResolution.allCases.filter { resolution in
+            SlowMotionFrameRate.allCases.contains { rate in
+                devices.contains { bestSlowMotionFormat(for: $0, resolution: resolution, frameRate: rate) != nil }
+            }
+        }
+    }
+
+    private func slowMotionFrameRates(for devices: [AVCaptureDevice], resolution: VideoResolution) -> [SlowMotionFrameRate] {
         SlowMotionFrameRate.allCases.filter { rate in
-            devices.contains { bestSlowMotionFormat(for: $0, frameRate: rate) != nil }
+            devices.contains { bestSlowMotionFormat(for: $0, resolution: resolution, frameRate: rate) != nil }
         }
     }
 
-    private func bestSlowMotionFormat(for device: AVCaptureDevice, frameRate: SlowMotionFrameRate) -> AVCaptureDevice.Format? {
+    private func bestSlowMotionFormat(for device: AVCaptureDevice, resolution: VideoResolution, frameRate: SlowMotionFrameRate) -> AVCaptureDevice.Format? {
         let requestedFPS = Double(frameRate.rawValue)
         let candidates = device.formats.filter { format in
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            guard dimensions.width == 1920, dimensions.height == 1080 else { return false }
+            guard dimensions.width == resolution.dimensions.width, dimensions.height == resolution.dimensions.height else { return false }
             return format.videoSupportedFrameRateRanges.contains {
                 $0.minFrameRate <= requestedFPS + 0.5 && $0.maxFrameRate >= requestedFPS - 0.5
             }
@@ -1062,7 +1168,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard let connection = movieOutput.connection(with: .video) else { return }
 
         if connection.isVideoStabilizationSupported {
-            connection.preferredVideoStabilizationMode = captureMode == .sloMo ? .off : .auto
+            let shouldStabilize = captureMode == .video && isVideoStabilizationEnabled
+            connection.preferredVideoStabilizationMode = shouldStabilize ? .auto : .off
         }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))

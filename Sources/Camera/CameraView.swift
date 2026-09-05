@@ -5,6 +5,7 @@ struct CameraView: View {
     @StateObject private var camera = CameraManager()
     @StateObject private var levelMonitor = CameraLevelMonitor()
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
+    @AppStorage("cameraGridEnabled") private var isGridEnabled = false
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
@@ -14,17 +15,21 @@ struct CameraView: View {
             CameraPreview(
                 session: camera.session,
                 isFocusExposureLocked: camera.isFocusExposureLocked,
-                exposureBias: camera.exposureBias,
+                stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
                 onTapToFocus: { camera.focusAndExpose(at: $0) },
-                onLongPressToLock: { camera.lockFocusAndExposure(at: $0) },
-                onExposureDragBegan: { camera.beginExposureAdjustment() },
-                onExposureDragChanged: { camera.adjustExposure(by: $0) }
+                onLongPressToLock: { camera.lockFocusAndExposure(at: $0) }
             )
             .ignoresSafeArea()
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
+
+            if isGridEnabled {
+                CameraGridOverlay()
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
 
             if isLevelMeterEnabled {
                 CameraLevelOverlay(
@@ -110,7 +115,8 @@ struct CameraView: View {
         }
         .sheet(isPresented: $isShowingSettings) {
             VideoSettingsView(camera: camera)
-                .presentationDetents([.medium])
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 

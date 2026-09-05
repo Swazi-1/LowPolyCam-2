@@ -232,26 +232,42 @@ struct CameraLevelOverlay: View {
 
     var body: some View {
         ZStack {
-            HStack(spacing: 104) {
+            HStack(spacing: 122) {
                 Capsule()
-                    .fill(.white.opacity(0.75))
-                    .frame(width: 42, height: 3)
+                    .fill(.white.opacity(0.72))
+                    .frame(width: 48, height: 3)
                 Capsule()
-                    .fill(.white.opacity(0.75))
-                    .frame(width: 42, height: 3)
+                    .fill(.white.opacity(0.72))
+                    .frame(width: 48, height: 3)
             }
 
             Capsule()
                 .fill(isLevel ? .yellow : .white)
-                .frame(width: 82, height: isLevel ? 4 : 3)
-                // The horizon moves opposite the phone's roll. Using the inverse angle
-                // makes the meter follow the real world instead of feeling backwards.
+                .frame(width: 94, height: isLevel ? 5 : 4)
                 .rotationEffect(.radians(-angle))
         }
-        .frame(width: 210, height: 54)
-        .opacity(isAvailable ? 1 : 0.35)
-        .animation(.easeOut(duration: 0.12), value: isLevel)
+        .frame(width: 246, height: 58)
+        .opacity(isAvailable ? 1 : 0.30)
+        .animation(.easeOut(duration: 0.10), value: isLevel)
         .accessibilityLabel(isLevel ? "Camera level" : "Camera not level")
+    }
+}
+
+struct CameraGridOverlay: View {
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                let width = geometry.size.width
+                let height = geometry.size.height
+                for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+                    path.move(to: CGPoint(x: width * fraction, y: 0))
+                    path.addLine(to: CGPoint(x: width * fraction, y: height))
+                    path.move(to: CGPoint(x: 0, y: height * fraction))
+                    path.addLine(to: CGPoint(x: width, y: height * fraction))
+                }
+            }
+            .stroke(.white.opacity(0.28), lineWidth: 0.8)
+        }
     }
 }
 
@@ -261,10 +277,9 @@ final class CameraLevelMonitor: ObservableObject {
 
     private let motionManager = CMMotionManager()
     private var hasInitialAngle = false
-    private var lastOrientation: UIInterfaceOrientation?
 
     var degrees: Double { angle * 180 / .pi }
-    var isLevel: Bool { isAvailable && abs(degrees) <= 1.25 }
+    var isLevel: Bool { isAvailable && abs(degrees) <= 1.5 }
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
@@ -282,8 +297,6 @@ final class CameraLevelMonitor: ObservableObject {
                 return
             }
 
-            // When the phone points almost perfectly straight up/down, a horizon roll angle
-            // is physically ambiguous. Hide the live result instead of showing a jittery value.
             let horizonStrength = hypot(gravity.x, gravity.y)
             guard horizonStrength > 0.06 else {
                 self.isAvailable = false
@@ -291,27 +304,23 @@ final class CameraLevelMonitor: ObservableObject {
                 return
             }
 
-            let orientation = self.currentInterfaceOrientation()
-            if orientation != self.lastOrientation {
-                self.lastOrientation = orientation
-                self.hasInitialAngle = false
-            }
+            // Portrait, both landscapes and upside-down are all valid level positions.
+            // Reduce the physical roll to the deviation from the nearest 90-degree turn,
+            // so the meter glows at 0°, 90°, 180° and 270° even if rotation lock is on.
+            let rawRoll = atan2(gravity.x, -gravity.y)
+            let quarterTurn = Double.pi / 2
+            let nearestRightAngle = (rawRoll / quarterTurn).rounded() * quarterTurn
+            var measured = rawRoll - nearestRightAngle
+            while measured > .pi / 4 { measured -= quarterTurn }
+            while measured < -.pi / 4 { measured += quarterTurn }
 
-            let measured = self.normalizedLevelAngle(for: gravity, orientation: orientation)
             self.isAvailable = true
-
             if !self.hasInitialAngle {
                 self.angle = measured
                 self.hasInitialAngle = true
             } else {
-                // A level line repeats every 180 degrees. Smooth using the nearest equivalent
-                // angle so rotating past +/-90 degrees never makes the meter jump across screen.
-                var delta = measured - self.angle
-                while delta > .pi / 2 { delta -= .pi }
-                while delta < -.pi / 2 { delta += .pi }
-                self.angle += delta * 0.28
-                while self.angle > .pi / 2 { self.angle -= .pi }
-                while self.angle < -.pi / 2 { self.angle += .pi }
+                let delta = measured - self.angle
+                self.angle += delta * 0.30
             }
         }
     }
@@ -319,32 +328,6 @@ final class CameraLevelMonitor: ObservableObject {
     func stop() {
         motionManager.stopDeviceMotionUpdates()
         hasInitialAngle = false
-        lastOrientation = nil
         isAvailable = false
-    }
-
-    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
-            .first ?? .portrait
-    }
-
-    private func normalizedLevelAngle(for gravity: CMAcceleration, orientation: UIInterfaceOrientation) -> Double {
-        let rawAngle: Double
-        switch orientation {
-        case .portraitUpsideDown:
-            rawAngle = atan2(-gravity.x, gravity.y)
-        case .landscapeLeft:
-            rawAngle = atan2(-gravity.y, gravity.x)
-        case .landscapeRight:
-            rawAngle = atan2(gravity.y, -gravity.x)
-        default:
-            rawAngle = atan2(gravity.x, -gravity.y)
-        }
-
-        var result = rawAngle
-        while result > .pi / 2 { result -= .pi }
-        while result < -.pi / 2 { result += .pi }
-        return result
     }
 }
