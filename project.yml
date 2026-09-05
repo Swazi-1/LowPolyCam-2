@@ -12,7 +12,6 @@ targets:
     platform: iOS
     sources:
       - Sources
-    resources:
       - Resources
     settings:
       base:

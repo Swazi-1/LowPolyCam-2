@@ -160,9 +160,14 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func addVideoInput(for position: AVCaptureDevice.Position) -> Bool {
-        guard let device = preferredCamera(for: position) else {
+        guard let device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position) else {
             return false
         }
+        return addVideoInput(device)
+    }
+
+    @discardableResult
+    private func addVideoInput(_ device: AVCaptureDevice) -> Bool {
         do {
             let input = try AVCaptureDeviceInput(device: device)
             guard session.canAddInput(input) else { return false }
@@ -180,6 +185,24 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func replaceVideoInput(with device: AVCaptureDevice) -> Bool {
+        guard let oldInput = videoInput else { return false }
+        session.beginConfiguration()
+        session.removeInput(oldInput)
+
+        if addVideoInput(device) {
+            session.commitConfiguration()
+            return true
+        }
+
+        if session.canAddInput(oldInput) {
+            session.addInput(oldInput)
+            videoInput = oldInput
+        }
+        session.commitConfiguration()
+        return false
+    }
+
     private func addAudioInput() {
         guard let device = AVCaptureDevice.default(for: .audio) else { return }
         do {
@@ -192,8 +215,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func updateCapabilities() {
         guard let device = videoInput?.device else { return }
-        let supported = availableResolutions(for: device)
-        let selection = validSelection(for: device, availableResolutions: supported)
+        let devices = capabilityDevices(for: device.position)
+        let supported = availableResolutions(for: devices)
+        let selection = validSelection(for: devices, availableResolutions: supported)
         publish {
             self.supportedResolutions = supported
             self.torchAvailable = device.hasTorch
@@ -223,6 +247,24 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
         return nil
+    }
+
+    private func capabilityDevices(for position: AVCaptureDevice.Position) -> [AVCaptureDevice] {
+        var devices: [AVCaptureDevice] = []
+        if let preferred = preferredCamera(for: position) {
+            devices.append(preferred)
+        }
+        if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+           devices.contains(where: { $0.uniqueID == wide.uniqueID }) == false {
+            devices.append(wide)
+        }
+        return devices
+    }
+
+    private func cameraSupportingCurrentQuality(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        capabilityDevices(for: position).first { device in
+            device.formats.contains { format($0, supports: selectedResolution, at: selectedFrameRate) }
+        }
     }
 
     private func minimumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
@@ -286,22 +328,39 @@ final class CameraManager: NSObject, ObservableObject {
             : String(format: "%.1f×", zoomFactor)
     }
 
-    private func availableResolutions(for device: AVCaptureDevice) -> [VideoResolution] {
+    private func availableResolutions(for devices: [AVCaptureDevice]) -> [VideoResolution] {
         VideoResolution.allCases.filter { resolution in
-            device.formats.contains { self.format($0, supports: resolution) }
+            devices.contains { device in
+                device.formats.contains { self.format($0, supports: resolution) }
+            }
         }
     }
 
-    private func validSelection(for device: AVCaptureDevice, availableResolutions: [VideoResolution]) -> (resolution: VideoResolution, frameRate: VideoFrameRate, supportedFrameRates: [VideoFrameRate]) {
+    private func validSelection(for devices: [AVCaptureDevice], availableResolutions: [VideoResolution]) -> (resolution: VideoResolution, frameRate: VideoFrameRate, supportedFrameRates: [VideoFrameRate]) {
         let resolution = availableResolutions.contains(selectedResolution) ? selectedResolution : (availableResolutions.first ?? .p1080)
-        let rates = frameRates(for: resolution, device: device)
+        let rates = frameRates(for: resolution, devices: devices)
         let frameRate = rates.contains(selectedFrameRate) ? selectedFrameRate : (rates.first ?? .fps30)
         return (resolution, frameRate, rates)
     }
 
     private func applySelectedFormat() {
+        guard let currentDevice = videoInput?.device else { return }
+        let devices = capabilityDevices(for: currentDevice.position)
+        let selection = validSelection(for: devices, availableResolutions: availableResolutions(for: devices))
+        guard let desiredDevice = devices.first(where: { device in
+            device.formats.contains { self.format($0, supports: selection.resolution, at: selection.frameRate) }
+        }) else {
+            showError("This video quality isn’t available on this camera.")
+            return
+        }
+
+        if desiredDevice.uniqueID != currentDevice.uniqueID,
+           replaceVideoInput(with: desiredDevice) == false {
+            showError("Couldn’t switch cameras for this video quality.")
+            return
+        }
+
         guard let device = videoInput?.device else { return }
-        let selection = validSelection(for: device, availableResolutions: availableResolutions(for: device))
         publish {
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
@@ -340,9 +399,11 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func frameRates(for resolution: VideoResolution, device: AVCaptureDevice) -> [VideoFrameRate] {
+    private func frameRates(for resolution: VideoResolution, devices: [AVCaptureDevice]) -> [VideoFrameRate] {
         VideoFrameRate.allCases.filter { rate in
-            device.formats.contains { format($0, supports: resolution, at: rate) }
+            devices.contains { device in
+                device.formats.contains { format($0, supports: resolution, at: rate) }
+            }
         }
     }
 
