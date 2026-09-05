@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 struct CameraIconButton: View {
     let symbol: String
@@ -41,11 +42,16 @@ struct RecordingTimer: View {
     let duration: TimeInterval
 
     var body: some View {
-        Text(duration, format: .time(pattern: .minuteSecond))
+        Text(timerText)
             .font(.system(.body, design: .monospaced).weight(.bold))
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
             .background(.red.opacity(0.92), in: Capsule())
             .foregroundStyle(.white)
+    }
+
+    private var timerText: String {
+        let totalSeconds = Int(duration)
+        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 }

@@ -30,6 +30,9 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Select Xcode 26
+        run: sudo xcode-select --switch /Applications/Xcode_26.0.1.app/Contents/Developer
+
       - name: Show build environment
         run: xcodebuild -version
 
@@ -61,4 +64,3 @@ jobs:
           path: build/LowPolyCam-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
-
