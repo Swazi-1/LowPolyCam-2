@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 private struct CameraTintKey: EnvironmentKey {
     static let defaultValue = Color(red: 0.65, green: 0.88, blue: 1)
@@ -31,12 +32,19 @@ enum VideoQuickPreset: String, CaseIterable, Identifiable {
 }
 
 enum CameraHaptics {
-    static func fire() {
+    private static let light = UIImpactFeedbackGenerator(style: .light)
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
+    static func fire(strength override: String? = nil) {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true else { return }
-        let strength = defaults.string(forKey: "hapticStrength") ?? "Medium"
-        let style: UIImpactFeedbackGenerator.FeedbackStyle = strength == "Low" ? .light : strength == "Strong" ? .heavy : .medium
-        UIImpactFeedbackGenerator(style: style).impactOccurred()
+        let strength = override ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
+        try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
+        let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
+        generator.prepare()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            generator.impactOccurred(intensity: strength == "Low" ? 0.45 : strength == "Strong" ? 1 : 0.7)
+        }
     }
 }
 
@@ -75,6 +83,10 @@ struct CapturePreferencesView: View {
     @AppStorage("recordingLock") private var recordingLock = false
     @AppStorage("lowStorageWarning") private var lowStorageWarning = true
     @AppStorage("thermalHUD") private var thermalHUD = false
+    @AppStorage("hudTextSize") private var hudTextSize = 10.0
+    @AppStorage("gridOpacity") private var gridOpacity = 1.0
+    @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
 
     var body: some View {
         Form {
@@ -92,8 +104,7 @@ struct CapturePreferencesView: View {
             }
             Section("Haptic Feedback") {
                 Toggle("Enabled", isOn: $haptics)
-                ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }).disabled(!haptics)
-                Button("Test Haptics") { CameraHaptics.fire() }.disabled(!haptics)
+                ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }, onSelect: { CameraHaptics.fire(strength: $0) }).disabled(!haptics)
             }
             Section("Zoom & Recording") {
                 ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
@@ -105,6 +116,14 @@ struct CapturePreferencesView: View {
                 Toggle("Thermal Status in HUD", isOn: $thermalHUD)
             }
             Section("Extras") {
+                ThemeMenu(title: "HUD Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
+                VStack(alignment: .leading) {
+                    Text("Grid Opacity")
+                    Slider(value: $gridOpacity, in: 0.2...1).accessibilityLabel("Grid opacity")
+                }.padding(.vertical, 4)
+                Toggle("Countdown Haptics", isOn: $countdownHaptics)
+                Toggle("Remember Last Camera Mode", isOn: $rememberCaptureMode)
+                Button("Reset Exposure & White Balance") { camera.setExposureBias(0); camera.selectWhiteBalancePreset(.auto) }
                 Toggle("Center Crosshair", isOn: $crosshair)
                 Toggle("Mirror Saved Selfies", isOn: $mirrorSelfies)
             }
@@ -121,21 +140,43 @@ struct ThemeMenu<Value: Hashable>: View {
     let title: String
     @Binding var selection: Value
     let options: [(Value, String)]
+    var onSelect: ((Value) -> Void)? = nil
     var body: some View {
-        Menu {
-            ForEach(options, id: \.0) { value, label in
-                Button { selection = value } label: {
-                    if selection == value { Label(label, systemImage: "checkmark") } else { Text(label) }
-                }
-            }
+        NavigationLink {
+            ThemeChoiceList(title: title, selection: $selection, options: options, onSelect: onSelect)
         } label: {
             HStack {
                 Text(title).foregroundStyle(.primary)
                 Spacer(minLength: 12)
                 Text(options.first { $0.0 == selection }?.1 ?? "—")
                     .foregroundStyle(theme).multilineTextAlignment(.trailing)
-                Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(theme)
-            }.frame(minHeight: 32).contentShape(Rectangle())
+            }.frame(minHeight: 44).contentShape(Rectangle())
         }.tint(theme)
+    }
+}
+
+private struct ThemeChoiceList<Value: Hashable>: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.cameraTint) private var theme
+    let title: String
+    @Binding var selection: Value
+    let options: [(Value, String)]
+    var onSelect: ((Value) -> Void)?
+    var body: some View {
+        List {
+            ForEach(options, id: \.0) { value, label in
+                Button {
+                    selection = value
+                    onSelect?(value)
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text(label).foregroundStyle(.primary)
+                        Spacer()
+                        if selection == value { Image(systemName: "checkmark").foregroundStyle(theme) }
+                    }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline).tint(theme)
     }
 }

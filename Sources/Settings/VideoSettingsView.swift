@@ -279,12 +279,12 @@ private struct CameraHUDSettingsMenu: View {
 
                 if isHUDEnabled {
                     SettingsCard(title: "HUD Information", symbol: "text.line.first.and.arrowtriangle.forward") {
-                        Toggle("Battery", isOn: $hudBattery)
-                        Toggle("Free Storage", isOn: $hudStorage)
+                        SettingsToggleRow(title: "Battery", subtitle: "Show the current battery percentage", isOn: $hudBattery)
+                        SettingsDivider()
+                        SettingsToggleRow(title: "Free Storage", subtitle: "Show available space on this iPhone", isOn: $hudStorage)
                         if camera.captureMode != .photo {
-                            Toggle("Dropped Frames / Frame Gaps", isOn: $hudDroppedFrames)
-                            Text("Gaps* estimates missing frame intervals in the last saved clip. It updates after saving, not live; — means no result. The movie recorder does not expose live encoder drops.")
-                                .font(.caption).foregroundStyle(.secondary)
+                            SettingsDivider()
+                            SettingsToggleRow(title: "Frame Gaps", subtitle: "Check the last saved clip for missing frame intervals; not a live counter", isOn: $hudDroppedFrames)
                         }
                         SettingsDivider()
                         SettingsToggleRow(
@@ -417,6 +417,7 @@ private struct SettingsToggleRow: View {
             }
         }
         .tint(theme)
+        .frame(minHeight: 52)
     }
 }
 

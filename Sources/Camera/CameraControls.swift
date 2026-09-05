@@ -144,6 +144,7 @@ struct CameraHUD: View {
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
     @State private var batteryLevel: Float = -1
     @AppStorage("thermalHUD") private var showThermal = false
+    @AppStorage("hudTextSize") private var hudTextSize = 10.0
     @State private var thermalState = ProcessInfo.processInfo.thermalState
     let showResolution: Bool
     let showFPS: Bool
@@ -192,7 +193,7 @@ struct CameraHUD: View {
             }
         }
       }
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .font(.system(size: hudTextSize, weight: .semibold, design: .rounded))
             .monospacedDigit()
             .foregroundStyle(theme)
             .padding(.horizontal, 10)

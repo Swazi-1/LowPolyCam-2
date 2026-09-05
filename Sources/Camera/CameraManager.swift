@@ -142,6 +142,9 @@ final class CameraManager: NSObject, ObservableObject {
         selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
         isVideoStabilizationEnabled = UserDefaults.standard.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
         super.init()
+        if UserDefaults.standard.bool(forKey: "rememberCaptureMode"),
+           let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
+           let mode = CaptureMode(rawValue: saved) { captureMode = mode }
     }
 
     var hudResolutionLabel: String {
@@ -343,6 +346,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectCaptureMode(_ mode: CaptureMode) {
         guard !isRecording, !isCapturingPhoto, captureMode != mode else { return }
         captureMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "lastCaptureMode")
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
@@ -779,7 +783,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private var requiresPhysicalWhiteBalanceInput: Bool {
-        requestedWhiteBalancePreset != .auto && cameraPosition == .back && (captureMode == .video || captureMode == .photo)
+        requestedWhiteBalancePreset != .auto && cameraPosition == .back
     }
 
     @discardableResult
@@ -791,11 +795,7 @@ final class CameraManager: NSObject, ObservableObject {
         // that isn't visible in the rear Video/Photo stream.
         let applied = applyWhiteBalancePreset(preset, to: device)
 
-        if device.isVirtualDevice {
-            for constituent in device.constituentDevices {
-                _ = applyWhiteBalancePreset(preset, to: constituent)
-            }
-        }
+        // Configure only the input actually owned by this capture session.
         return applied
     }
 
@@ -850,12 +850,16 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             guard let temperature = preset.temperature,
-                  device.isLockingWhiteBalanceWithCustomDeviceGainsSupported,
                   device.isWhiteBalanceModeSupported(.locked) else {
                 return false
             }
 
             let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: preset.tint)
+            if #available(iOS 26.0, *) {
+                device.setWhiteBalanceModeLocked(whiteBalanceTemperatureAndTintValues: values, handler: nil)
+                return true
+            }
+            guard device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else { return false }
             var gains = device.deviceWhiteBalanceGains(for: values)
             let maximum = device.maxWhiteBalanceGain
             gains.redGain = min(max(gains.redGain, 1), maximum)

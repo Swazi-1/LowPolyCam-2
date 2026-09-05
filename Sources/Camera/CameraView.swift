@@ -26,6 +26,8 @@ struct CameraView: View {
     @AppStorage("tapZoomReset") private var tapZoomReset = true
     @AppStorage("recordingLock") private var recordingLock = false
     @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+    @AppStorage("gridOpacity") private var gridOpacity = 1.0
+    @AppStorage("countdownHaptics") private var countdownHaptics = false
     @State private var warnedAboutStorage = false
     private var accent = CameraAccent()
 
@@ -47,6 +49,7 @@ struct CameraView: View {
 
             if isGridEnabled {
                 CameraGridOverlay()
+                    .opacity(gridOpacity)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
@@ -213,7 +216,7 @@ struct CameraView: View {
                 }
             }
         }
-        .frame(height: 102)
+        .frame(height: 116)
     }
 
     private var bottomControls: some View {
@@ -310,6 +313,7 @@ struct CameraView: View {
         shutterTask = Task { @MainActor in
             countdown = shutterDelay
             while countdown > 0 {
+                if countdownHaptics { CameraHaptics.fire() }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                 guard !Task.isCancelled else { return }
                 countdown -= 1
