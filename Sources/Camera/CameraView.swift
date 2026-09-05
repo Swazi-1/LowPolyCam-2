@@ -1,7 +1,10 @@
 import SwiftUI
 
 struct CameraView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
+    @StateObject private var levelMonitor = CameraLevelMonitor()
+    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
@@ -23,6 +26,16 @@ struct CameraView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
+            if isLevelMeterEnabled {
+                CameraLevelOverlay(
+                    angle: levelMonitor.angle,
+                    isAvailable: levelMonitor.isAvailable,
+                    isLevel: levelMonitor.isLevel
+                )
+                .offset(y: -8)
+                .allowsHitTesting(false)
+            }
+
             VStack {
                 topControls
                 Spacer()
@@ -43,7 +56,7 @@ struct CameraView: View {
                 VStack {
                     Spacer()
                     HStack {
-                        ProToolsPopup(camera: camera)
+                        ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
                         Spacer()
                     }
                 }
@@ -71,8 +84,30 @@ struct CameraView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .task { camera.start() }
-        .onDisappear { camera.stop() }
+        .task {
+            camera.start()
+            if isLevelMeterEnabled { levelMonitor.start() }
+        }
+        .onChange(of: isLevelMeterEnabled) { _, enabled in
+            if enabled, scenePhase == .active {
+                levelMonitor.start()
+            } else {
+                levelMonitor.stop()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                camera.appDidBecomeActive()
+                if isLevelMeterEnabled { levelMonitor.start() }
+            } else {
+                camera.appDidBecomeInactive()
+                levelMonitor.stop()
+            }
+        }
+        .onDisappear {
+            levelMonitor.stop()
+            camera.stop()
+        }
         .sheet(isPresented: $isShowingSettings) {
             VideoSettingsView(camera: camera)
                 .presentationDetents([.medium])

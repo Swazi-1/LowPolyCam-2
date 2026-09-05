@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import Photos
 
 final class CameraManager: NSObject, ObservableObject {
@@ -75,6 +76,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedExposureBias: Float = 0
     private var exposureDragStartBias: Float = 0
     private var pendingFocusLockWorkItem: DispatchWorkItem?
+    private let zoomRequestLock = NSLock()
+    private var latestZoomRequestID: UInt64 = 0
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
@@ -106,6 +109,23 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func appDidBecomeInactive() {
+        // iOS turns the torch off when the app is no longer active. Reflect that immediately
+        // so the UI never comes back showing a yellow torch button while the LED is off.
+        publish { self.isTorchOn = false }
+    }
+
+    func appDidBecomeActive() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if !self.session.isRunning, self.videoInput != nil {
+                self.session.startRunning()
+                self.publish { self.isSessionRunning = true }
+            }
+            self.synchronizeTorchState()
+        }
+    }
+
     func toggleTorch() {
         sessionQueue.async { [weak self] in
             guard let self, let device = self.videoInput?.device, device.hasTorch else { return }
@@ -122,8 +142,13 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
+        // Drag gestures can emit far more updates than camera hardware can apply. Give each
+        // request an ID so stale queued updates are discarded instead of building up latency.
+        let requestID = nextZoomRequestID()
         sessionQueue.async { [weak self] in
-            guard let self, let currentDevice = self.videoInput?.device else { return }
+            guard let self, self.isLatestZoomRequest(requestID),
+                  let currentDevice = self.videoInput?.device else { return }
+
             self.requestedZoom = requestedFactor
             if !currentDevice.isVirtualDevice {
                 if self.movieOutput.isRecording {
@@ -134,11 +159,20 @@ final class CameraManager: NSObject, ObservableObject {
                     self.applyActiveModeFormat()
                 }
             }
-            guard let device = self.videoInput?.device else { return }
+
+            guard self.isLatestZoomRequest(requestID),
+                  let device = self.videoInput?.device else { return }
             let factor = self.snappedZoomFactor(requestedFactor, for: device)
             do {
                 try device.lockForConfiguration()
-                device.ramp(toVideoZoomFactor: self.deviceZoomFactor(for: factor, device: device), withRate: 14)
+                let deviceFactor = self.deviceZoomFactor(for: factor, device: device)
+                // Snap real lens positions immediately. Intermediate zoom values can still ramp.
+                if abs(factor - 0.5) < 0.01 || abs(factor - 1.0) < 0.01 {
+                    device.cancelVideoZoomRamp()
+                    device.videoZoomFactor = deviceFactor
+                } else {
+                    device.ramp(toVideoZoomFactor: deviceFactor, withRate: 20)
+                }
                 device.unlockForConfiguration()
                 self.publish {
                     self.zoomFactor = factor
@@ -148,6 +182,19 @@ final class CameraManager: NSObject, ObservableObject {
                 self.showError("Couldn’t change the zoom.")
             }
         }
+    }
+
+    private func nextZoomRequestID() -> UInt64 {
+        zoomRequestLock.lock()
+        defer { zoomRequestLock.unlock() }
+        latestZoomRequestID &+= 1
+        return latestZoomRequestID
+    }
+
+    private func isLatestZoomRequest(_ requestID: UInt64) -> Bool {
+        zoomRequestLock.lock()
+        defer { zoomRequestLock.unlock() }
+        return requestID == latestZoomRequestID
     }
 
     func switchCamera() {
@@ -209,9 +256,22 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.videoInput?.device else { return }
-            if self.applyWhiteBalancePreset(preset, to: device) {
+            guard let self, let inputDevice = self.videoInput?.device else { return }
+
+            let primaryDevice = self.primaryWhiteBalanceDevice(for: inputDevice)
+            let primaryApplied = self.applyWhiteBalancePreset(preset, to: primaryDevice)
+
+            // Pre-apply the same preset to the other physical lenses of a virtual camera so
+            // crossing 0.5×/1× doesn't silently return the newly active lens to Auto WB.
+            for device in self.whiteBalanceControlDevices(for: inputDevice)
+                where device.uniqueID != primaryDevice.uniqueID {
+                _ = self.applyWhiteBalancePreset(preset, to: device)
+            }
+
+            if primaryApplied {
                 self.publish { self.whiteBalancePreset = preset }
+            } else {
+                self.showError("Couldn’t change white balance on this camera.")
             }
         }
     }
@@ -410,7 +470,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.isFocusExposureLocked = false
                 self.exposureBias = target
             }
-            applyWhiteBalancePreset(whiteBalancePreset, to: device)
+            applyWhiteBalancePresetToCurrentCamera(whiteBalancePreset)
         } catch {
             showError("Couldn’t reset focus and exposure.")
         }
@@ -436,6 +496,38 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func primaryWhiteBalanceDevice(for inputDevice: AVCaptureDevice) -> AVCaptureDevice {
+        guard inputDevice.isVirtualDevice else { return inputDevice }
+
+        if let active = inputDevice.activePrimaryConstituent {
+            return active
+        }
+
+        let preferredType: AVCaptureDevice.DeviceType = requestedZoom < 1
+            ? .builtInUltraWideCamera
+            : .builtInWideAngleCamera
+        return inputDevice.constituentDevices.first(where: { $0.deviceType == preferredType })
+            ?? inputDevice.constituentDevices.first
+            ?? inputDevice
+    }
+
+    private func whiteBalanceControlDevices(for inputDevice: AVCaptureDevice) -> [AVCaptureDevice] {
+        guard inputDevice.isVirtualDevice, !inputDevice.constituentDevices.isEmpty else {
+            return [inputDevice]
+        }
+
+        var devices = inputDevice.constituentDevices
+        devices.append(inputDevice)
+        return devices
+    }
+
+    private func applyWhiteBalancePresetToCurrentCamera(_ preset: WhiteBalancePreset) {
+        guard let inputDevice = videoInput?.device else { return }
+        for device in whiteBalanceControlDevices(for: inputDevice) {
+            _ = applyWhiteBalancePreset(preset, to: device)
+        }
+    }
+
     @discardableResult
     private func applyWhiteBalancePreset(_ preset: WhiteBalancePreset, to device: AVCaptureDevice) -> Bool {
         do {
@@ -451,13 +543,12 @@ final class CameraManager: NSObject, ObservableObject {
                     device.whiteBalanceMode = .autoWhiteBalance
                     return true
                 }
-                showError("Auto white balance isn’t supported on this camera.")
                 return false
             }
 
             guard let temperature = preset.temperature,
-                  device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else {
-                showError("White balance presets aren’t supported on this camera.")
+                  device.isLockingWhiteBalanceWithCustomDeviceGainsSupported,
+                  device.isWhiteBalanceModeSupported(.locked) else {
                 return false
             }
 
@@ -470,7 +561,6 @@ final class CameraManager: NSObject, ObservableObject {
             device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
             return true
         } catch {
-            showError("Couldn’t change white balance.")
             return false
         }
     }
@@ -555,7 +645,10 @@ final class CameraManager: NSObject, ObservableObject {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
-        let desiredDevice = devices.first(where: { $0.deviceType == desiredType })
+        // Prefer a virtual multi-camera input so 0.5× <-> 1× stays inside one capture input.
+        // Replacing AVCaptureDeviceInput is much slower and causes the visible one-second hitch.
+        let desiredDevice = devices.first(where: { $0.isVirtualDevice })
+            ?? devices.first(where: { $0.deviceType == desiredType })
             ?? devices.first(where: { !$0.isVirtualDevice })
             ?? devices.first
 
@@ -582,11 +675,11 @@ final class CameraManager: NSObject, ObservableObject {
             device.activeFormat = photoChoice.format
             if let range = photoChoice.format.videoSupportedFrameRateRanges.first(where: {
                 $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
-            }) {
-                let duration = CMTimeMakeWithSeconds(1.0 / 30.0, preferredTimescale: 60_000)
+            }) ?? photoChoice.format.videoSupportedFrameRateRanges.first {
+                let actualRate = min(max(30.0, range.minFrameRate), range.maxFrameRate)
+                let duration = CMTimeMakeWithSeconds(1.0 / actualRate, preferredTimescale: 60_000)
                 device.activeVideoMinFrameDuration = duration
                 device.activeVideoMaxFrameDuration = duration
-                _ = range
             }
             let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
             device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
@@ -616,19 +709,45 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func bestPhotoFormat(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions)? {
-        var best: (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions, pixels: Int64)?
+        struct Candidate {
+            let format: AVCaptureDevice.Format
+            let photoDimensions: CMVideoDimensions
+            let photoPixels: Int64
+            let previewPixels: Int64
+            let supports30FPS: Bool
+        }
 
+        var best: Candidate?
         for format in device.formats {
-            for dimensions in format.supportedMaxPhotoDimensions {
-                let pixels = Int64(dimensions.width) * Int64(dimensions.height)
-                if best == nil || pixels > best!.pixels {
-                    best = (format, dimensions, pixels)
-                }
+            guard let photoDimensions = format.supportedMaxPhotoDimensions.max(by: { lhs, rhs in
+                Int64(lhs.width) * Int64(lhs.height) < Int64(rhs.width) * Int64(rhs.height)
+            }) else { continue }
+
+            let videoDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let candidate = Candidate(
+                format: format,
+                photoDimensions: photoDimensions,
+                photoPixels: Int64(photoDimensions.width) * Int64(photoDimensions.height),
+                previewPixels: Int64(videoDimensions.width) * Int64(videoDimensions.height),
+                supports30FPS: format.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }
+            )
+
+            guard let current = best else {
+                best = candidate
+                continue
+            }
+
+            // Max still-photo resolution always wins. For formats that produce the same
+            // max-resolution photo, prefer 30 fps and then the sharpest live-preview format.
+            if candidate.photoPixels > current.photoPixels ||
+                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS && !current.supports30FPS) ||
+                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS == current.supports30FPS && candidate.previewPixels > current.previewPixels) {
+                best = candidate
             }
         }
 
         guard let best else { return nil }
-        return (best.format, best.dimensions)
+        return (best.format, best.photoDimensions)
     }
 
     private func configurePhotoOutputForActiveFormat(_ device: AVCaptureDevice) {
@@ -824,6 +943,20 @@ final class CameraManager: NSObject, ObservableObject {
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("mov")
         movieOutput.startRecording(to: url, recordingDelegate: self)
+    }
+
+    private func synchronizeTorchState() {
+        guard let device = videoInput?.device else {
+            publish {
+                self.torchAvailable = false
+                self.isTorchOn = false
+            }
+            return
+        }
+        publish {
+            self.torchAvailable = device.hasTorch
+            self.isTorchOn = device.hasTorch && device.torchMode == .on
+        }
     }
 
     private func publish(_ update: @escaping () -> Void) {

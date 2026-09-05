@@ -1,5 +1,7 @@
 import SwiftUI
 import Foundation
+import CoreMotion
+import UIKit
 
 struct CameraIconButton: View {
     let symbol: String
@@ -128,13 +130,9 @@ struct RecordingTimer: View {
     }
 }
 
-import SwiftUI
-import CoreMotion
-import UIKit
-
 struct ProToolsPopup: View {
     @ObservedObject var camera: CameraManager
-    @StateObject private var levelMonitor = LevelMonitor()
+    @Binding var isLevelMeterEnabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -166,49 +164,53 @@ struct ProToolsPopup: View {
             Divider()
                 .overlay(.white.opacity(0.15))
 
-            HStack {
+            HStack(spacing: 12) {
                 Text("White Balance")
                     .font(.subheadline.weight(.semibold))
-                Spacer()
-                Picker("White Balance", selection: Binding(
-                    get: { camera.whiteBalancePreset },
-                    set: { camera.selectWhiteBalancePreset($0) }
-                )) {
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Menu {
                     ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
-                        Text(preset.rawValue).tag(preset)
+                        Button {
+                            camera.selectWhiteBalancePreset(preset)
+                        } label: {
+                            if camera.whiteBalancePreset == preset {
+                                Label(preset.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(preset.rawValue)
+                            }
+                        }
                     }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(camera.whiteBalancePreset.rawValue)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .frame(minWidth: 105, alignment: .trailing)
+                    .foregroundStyle(.yellow)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .tint(.yellow)
             }
 
             Divider()
                 .overlay(.white.opacity(0.15))
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Level")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Text(levelMonitor.statusText)
-                        .font(.system(.caption, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(levelMonitor.isLevel ? .green : .white.opacity(0.7))
-                }
-
-                LevelMeterView(angle: levelMonitor.angle, isLevel: levelMonitor.isLevel)
-            }
+            Toggle("Level Meter", isOn: $isLevelMeterEnabled)
+                .font(.subheadline.weight(.semibold))
+                .tint(.yellow)
         }
         .foregroundStyle(.white)
         .padding(16)
-        .frame(width: 260)
+        .frame(width: 300)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         }
-        .onAppear { levelMonitor.start() }
-        .onDisappear { levelMonitor.stop() }
     }
 
     private var evLabel: String {
@@ -216,76 +218,115 @@ struct ProToolsPopup: View {
     }
 }
 
-private struct LevelMeterView: View {
+struct CameraLevelOverlay: View {
     let angle: Double
+    let isAvailable: Bool
     let isLevel: Bool
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
+        ZStack {
+            HStack(spacing: 76) {
                 Capsule()
-                    .fill(.white.opacity(0.18))
-                    .frame(height: 2)
-
+                    .fill(.white.opacity(0.65))
+                    .frame(width: 34, height: 2)
                 Capsule()
-                    .fill(isLevel ? .green : .yellow)
-                    .frame(width: min(proxy.size.width * 0.62, 130), height: 3)
-                    .rotationEffect(.radians(angle))
-
-                Circle()
-                    .fill(.white)
-                    .frame(width: 5, height: 5)
+                    .fill(.white.opacity(0.65))
+                    .frame(width: 34, height: 2)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
+
+            Capsule()
+                .fill(isLevel ? .yellow : .white)
+                .frame(width: 64, height: isLevel ? 3 : 2)
+                .rotationEffect(.radians(angle))
+
+            Circle()
+                .fill(isLevel ? .yellow : .white.opacity(0.85))
+                .frame(width: 4, height: 4)
         }
-        .frame(height: 38)
+        .frame(width: 150, height: 44)
+        .padding(.horizontal, 8)
+        .background(.black.opacity(0.16), in: Capsule())
+        .opacity(isAvailable ? 1 : 0.35)
+        .animation(.easeOut(duration: 0.12), value: isLevel)
+        .accessibilityLabel(isLevel ? "Camera level" : "Camera not level")
     }
 }
 
-private final class LevelMonitor: ObservableObject {
+final class CameraLevelMonitor: ObservableObject {
     @Published private(set) var angle: Double = 0
     @Published private(set) var isAvailable = false
 
     private let motionManager = CMMotionManager()
+    private var hasInitialAngle = false
+    private var lastOrientation: UIInterfaceOrientation?
 
     var degrees: Double { angle * 180 / .pi }
-    var isLevel: Bool { isAvailable && abs(degrees) <= 1.5 }
-
-    var statusText: String {
-        guard isAvailable else { return "—" }
-        return isLevel ? "LEVEL" : String(format: "%+.1f°", degrees)
-    }
+    var isLevel: Bool { isAvailable && abs(degrees) <= 1.25 }
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
             isAvailable = false
             return
         }
+        guard !motionManager.isDeviceMotionActive else { return }
 
-        motionManager.deviceMotionUpdateInterval = 1.0 / 12.0
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-            guard let self, let gravity = motion?.gravity else { return }
-            let flatness = hypot(gravity.x, gravity.y)
-            guard flatness > 0.18 else {
+        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
+        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, error in
+            guard let self else { return }
+            guard error == nil, let gravity = motion?.gravity else {
                 self.isAvailable = false
+                self.hasInitialAngle = false
                 return
             }
 
+            // When the phone points almost perfectly straight up/down, a horizon roll angle
+            // is physically ambiguous. Hide the live result instead of showing a jittery value.
+            let horizonStrength = hypot(gravity.x, gravity.y)
+            guard horizonStrength > 0.06 else {
+                self.isAvailable = false
+                self.hasInitialAngle = false
+                return
+            }
+
+            let orientation = self.currentInterfaceOrientation()
+            if orientation != self.lastOrientation {
+                self.lastOrientation = orientation
+                self.hasInitialAngle = false
+            }
+
+            let measured = self.normalizedLevelAngle(for: gravity, orientation: orientation)
             self.isAvailable = true
-            self.angle = self.normalizedLevelAngle(for: gravity)
+
+            if !self.hasInitialAngle {
+                self.angle = measured
+                self.hasInitialAngle = true
+            } else {
+                // A level line repeats every 180 degrees. Smooth using the nearest equivalent
+                // angle so rotating past +/-90 degrees never makes the meter jump across screen.
+                var delta = measured - self.angle
+                while delta > .pi / 2 { delta -= .pi }
+                while delta < -.pi / 2 { delta += .pi }
+                self.angle += delta * 0.28
+                while self.angle > .pi / 2 { self.angle -= .pi }
+                while self.angle < -.pi / 2 { self.angle += .pi }
+            }
         }
     }
 
     func stop() {
         motionManager.stopDeviceMotionUpdates()
+        hasInitialAngle = false
+        lastOrientation = nil
+        isAvailable = false
     }
 
-    private func normalizedLevelAngle(for gravity: CMAcceleration) -> Double {
-        let orientation = UIApplication.shared.connectedScenes
+    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
+        UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
             .first ?? .portrait
+    }
 
+    private func normalizedLevelAngle(for gravity: CMAcceleration, orientation: UIInterfaceOrientation) -> Double {
         let rawAngle: Double
         switch orientation {
         case .portraitUpsideDown:
@@ -304,4 +345,3 @@ private final class LevelMonitor: ObservableObject {
         return result
     }
 }
-
