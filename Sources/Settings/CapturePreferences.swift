@@ -1,6 +1,16 @@
 import SwiftUI
 import UIKit
 
+private struct CameraTintKey: EnvironmentKey {
+    static let defaultValue = Color(red: 0.65, green: 0.88, blue: 1)
+}
+extension EnvironmentValues {
+    var cameraTint: Color {
+        get { self[CameraTintKey.self] }
+        set { self[CameraTintKey.self] = newValue }
+    }
+}
+
 enum VideoCompression: String, CaseIterable, Identifiable {
     case dataSaver = "Data Saver", medium = "Medium", high = "High"
     var id: String { rawValue }
@@ -60,6 +70,11 @@ struct CapturePreferencesView: View {
     @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     private var accent = CameraAccent()
+    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
+    @AppStorage("tapZoomReset") private var tapZoomReset = true
+    @AppStorage("recordingLock") private var recordingLock = false
+    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+    @AppStorage("thermalHUD") private var thermalHUD = false
 
     var body: some View {
         Form {
@@ -90,17 +105,16 @@ struct CapturePreferencesView: View {
                 }.disabled(!haptics)
                 Button("Test Haptics") { CameraHaptics.fire() }.disabled(!haptics)
             }
-            Section("Icon Appearance") {
-                Picker("Color", selection: $appearance) {
-                    ForEach(["Ice", "Sunset", "Mint", "Lavender", "Custom"], id: \.self) { Text($0).tag($0) }
+            Section("Zoom & Recording") {
+                Picker("Zoom Speed", selection: $zoomSpeed) {
+                    Text("Slow").tag(0.5); Text("Normal").tag(1.0); Text("Fast").tag(1.5)
                 }
-                if appearance == "Custom" {
-                    ColorPicker("Custom Color", selection: Binding(get: { accent.color }, set: { color in
-                        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
-                        red = Double(r); green = Double(g); blue = Double(b)
-                    }), supportsOpacity: false)
-                }
+                Toggle("Tap Zoom to Reset to 1×", isOn: $tapZoomReset)
+                Toggle("Lock Recording Controls", isOn: $recordingLock)
+                Text("When locked, hold the shutter for one second to stop.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Low Storage Warning", isOn: $lowStorageWarning)
+                Toggle("Thermal Status in HUD", isOn: $thermalHUD)
             }
             Section("Extras") {
                 Toggle("Center Crosshair", isOn: $crosshair)
@@ -108,7 +122,8 @@ struct CapturePreferencesView: View {
             }
         }
         .tint(accent.color)
-        .navigationTitle("Capture & Appearance")
+        .accentColor(accent.color)
+        .navigationTitle("Capture Controls")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -4,6 +4,7 @@ import CoreMotion
 import UIKit
 
 struct CameraIconButton: View {
+    @Environment(\.cameraTint) private var theme
     let symbol: String
     let isEnabled: Bool
     let color: Color
@@ -32,6 +33,7 @@ struct CameraIconButton: View {
 }
 
 struct RecordButton: View {
+    @Environment(\.cameraTint) private var theme
     let isRecording: Bool
     let action: () -> Void
 
@@ -51,6 +53,7 @@ struct RecordButton: View {
 }
 
 struct PhotoButton: View {
+    @Environment(\.cameraTint) private var theme
     let isCapturing: Bool
     let action: () -> Void
 
@@ -73,6 +76,7 @@ struct PhotoButton: View {
 }
 
 struct CaptureModeSelector: View {
+    @Environment(\.cameraTint) private var theme
     let selectedMode: CameraManager.CaptureMode
     let isEnabled: Bool
     let onSelect: (CameraManager.CaptureMode) -> Void
@@ -85,7 +89,7 @@ struct CaptureModeSelector: View {
                 } label: {
                     Text(mode.rawValue)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(selectedMode == mode ? .yellow : .white.opacity(0.65))
+                        .foregroundStyle(selectedMode == mode ? theme : .white.opacity(0.65))
                 }
                 .disabled(!isEnabled)
             }
@@ -98,6 +102,7 @@ struct CaptureModeSelector: View {
 }
 
 struct ZoomIndicator: View {
+    @Environment(\.cameraTint) private var theme
     let label: String
 
     var body: some View {
@@ -113,6 +118,7 @@ struct ZoomIndicator: View {
 }
 
 struct RecordingTimer: View {
+    @Environment(\.cameraTint) private var theme
     let duration: TimeInterval
 
     var body: some View {
@@ -131,11 +137,14 @@ struct RecordingTimer: View {
 }
 
 struct CameraHUD: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDBattery") private var showBattery = false
     @AppStorage("cameraHUDStorage") private var showStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
     @State private var batteryLevel: Float = -1
+    @AppStorage("thermalHUD") private var showThermal = false
+    @State private var thermalState = ProcessInfo.processInfo.thermalState
     let showResolution: Bool
     let showFPS: Bool
     let showRemaining: Bool
@@ -163,23 +172,36 @@ struct CameraHUD: View {
     }
 
     var body: some View {
+      VStack(spacing: 6) {
+        HStack(spacing: 5) {
+            Circle().fill(camera.isRecording ? Color.red : theme).frame(width: 5, height: 5)
+            Text(camera.isRecording ? "REC" : camera.captureMode.rawValue)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundStyle(theme)
+        }
         ViewThatFits(in: .horizontal) {
-            Text(displayText).fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 8) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    Label(item, systemImage: symbol(for: item))
+                }
+            }.fixedSize(horizontal: true, vertical: false)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    Text(item).lineLimit(1).minimumScaleFactor(0.75)
+                    Label(item, systemImage: symbol(for: item)).lineLimit(1).minimumScaleFactor(0.75)
                 }
             }
         }
+      }
             .font(.system(size: 10, weight: .semibold, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.white)
+            .foregroundStyle(theme)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .frame(maxWidth: maxWidth)
-            .background(.black.opacity(0.90), in: Capsule())
+            .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
+            .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
             .overlay {
-                Capsule().stroke(.white.opacity(0.10), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 20).stroke(theme.opacity(0.35), lineWidth: 1)
             }
             // Keep the black pill only as wide as its content. The outer frame centers it in the
             // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
@@ -191,6 +213,9 @@ struct CameraHUD: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
                 batteryLevel = UIDevice.current.batteryLevel
+            }
+            .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+                thermalState = ProcessInfo.processInfo.thermalState
             }
     }
 
@@ -206,6 +231,15 @@ struct CameraHUD: View {
         if showWhiteBalance { result.append(whiteBalanceShortLabel) }
         if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
         if showStorage { result.append(String(format: "%.1f GB", Double(camera.availableStorageBytes) / 1_000_000_000)) }
+        if showThermal {
+            switch thermalState {
+            case .nominal: result.append("Cool")
+            case .fair: result.append("Warm")
+            case .serious: result.append("Hot")
+            case .critical: result.append("Critical")
+            @unknown default: result.append("Temp —")
+            }
+        }
         if showDroppedFrames, camera.captureMode != .photo {
             result.append(camera.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
         }
@@ -222,9 +256,21 @@ struct CameraHUD: View {
         case .fluorescent: return "Fluor"
         }
     }
+
+    private func symbol(for item: String) -> String {
+        if item.contains("fps") { return "speedometer" }
+        if item.hasPrefix("BAT") { return "battery.100percent" }
+        if item.contains("GB") { return "internaldrive" }
+        if item.hasPrefix("Gaps") { return "waveform.path" }
+        if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
+        if item.hasPrefix("~") { return "clock" }
+        if item == whiteBalanceShortLabel { return "sun.max" }
+        return "viewfinder"
+    }
 }
 
 struct ProToolsPopup: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @Binding var isLevelMeterEnabled: Bool
 
@@ -247,7 +293,7 @@ struct ProToolsPopup: View {
                     .buttonStyle(.plain)
                     Text(evLabel)
                         .font(.system(.subheadline, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(theme)
                         .frame(width: 42, alignment: .trailing)
                 }
 
@@ -259,7 +305,7 @@ struct ProToolsPopup: View {
                     in: -2...2,
                     step: 0.1
                 )
-                .tint(.yellow)
+                .tint(theme)
             }
 
             Divider()
@@ -293,7 +339,7 @@ struct ProToolsPopup: View {
                             .font(.system(size: 10, weight: .semibold))
                     }
                     .frame(minWidth: 112, alignment: .trailing)
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(theme)
                 }
             }
 
@@ -302,7 +348,7 @@ struct ProToolsPopup: View {
 
             Toggle("Level Meter", isOn: $isLevelMeterEnabled)
                 .font(.subheadline.weight(.semibold))
-                .tint(.yellow)
+                .tint(theme)
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -320,6 +366,7 @@ struct ProToolsPopup: View {
 }
 
 struct CameraLevelOverlay: View {
+    @Environment(\.cameraTint) private var theme
     let angle: Double
     let isAvailable: Bool
     let isLevel: Bool
@@ -336,7 +383,7 @@ struct CameraLevelOverlay: View {
             }
 
             Capsule()
-                .fill(isLevel ? .yellow : .white)
+                .fill(isLevel ? theme : .white)
                 .frame(width: 104, height: isLevel ? 5 : 4)
                 .rotationEffect(.radians(-angle))
         }
@@ -348,6 +395,7 @@ struct CameraLevelOverlay: View {
 }
 
 struct CameraGridOverlay: View {
+    @Environment(\.cameraTint) private var theme
     var body: some View {
         GeometryReader { geometry in
             Path { path in

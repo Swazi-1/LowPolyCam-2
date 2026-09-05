@@ -22,6 +22,11 @@ struct CameraView: View {
     @State private var zoomWidth: CGFloat = 320
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("centerCrosshair") private var crosshair = false
+    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
+    @AppStorage("tapZoomReset") private var tapZoomReset = true
+    @AppStorage("recordingLock") private var recordingLock = false
+    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+    @State private var warnedAboutStorage = false
     private var accent = CameraAccent()
 
     var body: some View {
@@ -170,6 +175,13 @@ struct CameraView: View {
                 .presentationDragIndicator(.visible)
         }
         .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
+        .onChange(of: camera.availableStorageBytes) { _, bytes in
+            if bytes > 1_000_000_000 { warnedAboutStorage = false }
+            if lowStorageWarning, bytes > 0, bytes < 1_000_000_000, !warnedAboutStorage {
+                warnedAboutStorage = true
+                camera.statusMessage = "Storage is below 1 GB. Long recordings may stop early."
+            }
+        }
         .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
     }
 
@@ -179,7 +191,7 @@ struct CameraView: View {
 
             ZStack {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? .yellow : accent.color) {
+                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
                         camera.toggleTorch()
                     }
                     Spacer()
@@ -201,7 +213,7 @@ struct CameraView: View {
                 }
             }
         }
-        .frame(height: 82)
+        .frame(height: 102)
     }
 
     private var bottomControls: some View {
@@ -235,6 +247,15 @@ struct CameraView: View {
                     PhotoButton(isCapturing: camera.isCapturingPhoto) {
                         shutterPressed()
                     }
+                } else if camera.isRecording && recordingLock {
+                    Image(systemName: "lock.fill")
+                        .font(.title2).foregroundStyle(accent.color)
+                        .frame(width: 76, height: 76)
+                        .background(.black.opacity(0.6), in: Circle())
+                        .overlay(Circle().stroke(.red, lineWidth: 3))
+                        .onLongPressGesture(minimumDuration: 1) { camera.startOrStopRecording() }
+                        .accessibilityLabel("Recording locked. Hold to stop")
+                        .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
                     RecordButton(isRecording: camera.isRecording) {
                         shutterPressed()
@@ -258,10 +279,13 @@ struct CameraView: View {
                 guard let dragStartZoom else { return }
                 let screenWidth = max(zoomWidth, 1)
                 let zoomRange = camera.maximumZoomFactor - camera.minimumZoomFactor
-                let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange)
+                let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange * zoomSpeed)
                 camera.setZoomFactor(requestedZoom)
             }
-            .onEnded { _ in
+            .onEnded { value in
+                if tapZoomReset, abs(value.translation.width) < 4, abs(value.translation.height) < 4 {
+                    camera.setZoomFactor(1)
+                }
                 dragStartZoom = nil
             }
     }

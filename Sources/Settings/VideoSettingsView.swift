@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct VideoSettingsView: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
 
@@ -19,11 +20,21 @@ struct VideoSettingsView: View {
                         photoSettings
                     }
 
-                    SettingsCard(title: "More Settings", symbol: "slider.horizontal.3") {
+                    SettingsCard(title: "Settings", symbol: "slider.horizontal.3") {
+                        if camera.captureMode == .video {
+                            NavigationLink { VideoPresetsView(camera: camera) } label: {
+                                SettingsNavigationRow(title: "Video Presets", subtitle: "Choose a ready-to-shoot setup", symbol: "wand.and.stars")
+                            }.buttonStyle(.plain)
+                            SettingsDivider()
+                        }
+                        NavigationLink { AppearanceSettingsView() } label: {
+                            SettingsNavigationRow(title: "Appearance", subtitle: "Theme and custom accent color", symbol: "paintpalette.fill")
+                        }.buttonStyle(.plain)
+                        SettingsDivider()
                         NavigationLink {
                             CapturePreferencesView(camera: camera)
                         } label: {
-                            SettingsNavigationRow(title: "Capture & Appearance", subtitle: "Timer, compression, split clips, haptics and colors", symbol: "paintpalette.fill")
+                            SettingsNavigationRow(title: "Capture Controls", subtitle: "Timer, zoom, recording and haptics", symbol: "paintpalette.fill")
                         }.buttonStyle(.plain)
                         SettingsDivider()
                         NavigationLink {
@@ -55,6 +66,8 @@ struct VideoSettingsView: View {
                 .padding(.vertical, 14)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .tint(theme)
+            .accentColor(theme)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -71,13 +84,13 @@ struct VideoSettingsView: View {
             Image(systemName: modeSymbol)
                 .font(.system(size: 20, weight: .semibold))
                 .frame(width: 42, height: 42)
-                .background(.yellow.opacity(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .foregroundStyle(.yellow)
+                .background(theme.opacity(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(theme)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(camera.captureMode.rawValue)
                     .font(.headline)
-                Text("Only settings available for this mode and camera are shown.")
+                Text("Camera settings")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -89,16 +102,6 @@ struct VideoSettingsView: View {
 
     private var videoQualitySettings: some View {
         VStack(spacing: 18) {
-          SettingsCard(title: "Video Quick Presets", symbol: "wand.and.stars") {
-            ForEach(VideoQuickPreset.allCases) { preset in
-                Button { camera.applyQuickPreset(preset) } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(preset.rawValue).font(.subheadline.weight(.semibold))
-                        Text(preset.detail).font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-                }.buttonStyle(.plain)
-            }
-          }
           SettingsCard(title: "Video Quality", symbol: "video.fill") {
             SettingsPickerRow(
                 title: "Resolution",
@@ -169,10 +172,10 @@ struct VideoSettingsView: View {
                 Spacer()
                 Text(camera.currentPhotoResolutionLabel)
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(theme)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(.yellow.opacity(0.13), in: Capsule())
+                    .background(theme.opacity(0.13), in: Capsule())
             }
         }
     }
@@ -187,6 +190,7 @@ struct VideoSettingsView: View {
 }
 
 private struct CameraSettingsMenu: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
@@ -251,6 +255,7 @@ private struct CameraSettingsMenu: View {
 }
 
 private struct CameraHUDSettingsMenu: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
@@ -319,12 +324,15 @@ private struct CameraHUDSettingsMenu: View {
             .padding(.vertical, 14)
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .tint(theme)
+        .accentColor(theme)
         .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
 
 private struct SettingsNavigationRow: View {
+    @Environment(\.cameraTint) private var theme
     let title: String
     let subtitle: String
     let symbol: String
@@ -333,9 +341,9 @@ private struct SettingsNavigationRow: View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.yellow)
+                .foregroundStyle(theme)
                 .frame(width: 34, height: 34)
-                .background(.yellow.opacity(0.13), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(theme.opacity(0.13), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -357,6 +365,7 @@ private struct SettingsNavigationRow: View {
 }
 
 private struct SettingsCard<Content: View>: View {
+    @Environment(\.cameraTint) private var theme
     let title: String
     let symbol: String
     let content: Content
@@ -385,12 +394,14 @@ private struct SettingsCard<Content: View>: View {
 }
 
 private struct SettingsDivider: View {
+    @Environment(\.cameraTint) private var theme
     var body: some View {
         Divider().opacity(0.55)
     }
 }
 
 private struct SettingsToggleRow: View {
+    @Environment(\.cameraTint) private var theme
     let title: String
     let subtitle: String
     @Binding var isOn: Bool
@@ -405,11 +416,12 @@ private struct SettingsToggleRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .tint(.yellow)
+        .tint(theme)
     }
 }
 
 private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
+    @Environment(\.cameraTint) private var theme
     let title: String
     let options: [Option]
     let selection: Option
@@ -433,7 +445,7 @@ private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
                             .background(
-                                selection == option ? Color.yellow : Color.primary.opacity(0.07),
+                                selection == option ? theme : Color.primary.opacity(0.07),
                                 in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                             )
                             .foregroundStyle(selection == option ? .black : .primary)

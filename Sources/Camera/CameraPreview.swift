@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 
 struct CameraPreview: UIViewRepresentable {
+    @Environment(\.cameraTint) private var theme
     let session: AVCaptureSession
     let isFocusExposureLocked: Bool
     let stabilizationEnabled: Bool
@@ -24,6 +25,7 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     private func configure(_ view: PreviewView) {
+        view.tintColor = UIColor(theme)
         view.onTapToFocus = onTapToFocus
         view.onLongPressToLock = onLongPressToLock
         view.setFocusExposureLocked(isFocusExposureLocked)
@@ -56,6 +58,12 @@ final class PreviewView: UIView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        focusIndicator.layer.borderColor = tintColor.cgColor
+        lockLabel.textColor = tintColor
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -113,7 +121,7 @@ final class PreviewView: UIView {
         let wasLocked = focusExposureLocked
         focusExposureLocked = isLocked
         lockLabel.isHidden = !isLocked
-        focusIndicator.layer.borderColor = UIColor.systemYellow.cgColor
+        focusIndicator.layer.borderColor = tintColor.cgColor
         if isLocked {
             hideFocusWorkItem?.cancel()
         } else if wasLocked {
@@ -126,7 +134,7 @@ final class PreviewView: UIView {
     private func configureOverlays() {
         focusIndicator.isUserInteractionEnabled = false
         focusIndicator.layer.borderWidth = 2
-        focusIndicator.layer.borderColor = UIColor.systemYellow.cgColor
+        focusIndicator.layer.borderColor = tintColor.cgColor
         focusIndicator.layer.cornerRadius = 7
         focusIndicator.alpha = 0
         addSubview(focusIndicator)
@@ -135,7 +143,7 @@ final class PreviewView: UIView {
         lockLabel.text = "AE/AF LOCK"
         lockLabel.textAlignment = .center
         lockLabel.font = .systemFont(ofSize: 13, weight: .bold)
-        lockLabel.textColor = .systemYellow
+        lockLabel.textColor = tintColor
         lockLabel.backgroundColor = UIColor.black.withAlphaComponent(0.52)
         lockLabel.layer.cornerRadius = 15
         lockLabel.clipsToBounds = true

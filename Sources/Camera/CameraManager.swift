@@ -118,6 +118,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
     private var isUsingSmoothPreviewFallback = false
+    private var isUsingSlowMotionPreview = false
     private var recordingRequested = false
     private var segmentTimer: DispatchWorkItem?
     private var continuingSegment = false
@@ -1339,7 +1340,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func applySlowMotionFormat() {
+    private func applySlowMotionFormat(allowPreview: Bool = true) {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
         let availableResolutions = slowMotionResolutions(for: devices)
@@ -1361,6 +1362,40 @@ final class CameraManager: NSObject, ObservableObject {
             ? selectedSlowMotionFrameRate
             : (availableRates.last ?? .fps120)
         let requestedFPS = Double(selectedRate.rawValue)
+        if allowPreview, !movieOutput.isRecording, !requiresPhysicalWhiteBalanceInput,
+           let virtual = devices.first(where: { $0.isVirtualDevice }),
+           let previewFormat = smoothPreviewFormat(for: virtual, preferredFrameRate: .fps60) {
+            if virtual.uniqueID != currentDevice.uniqueID, !replaceVideoInput(with: virtual) { return }
+            do {
+                try virtual.lockForConfiguration()
+                virtual.activeFormat = previewFormat
+                let range = previewFormat.videoSupportedFrameRateRanges.first { $0.maxFrameRate >= 59.5 }
+                let fps = min(60, range?.maxFrameRate ?? 60)
+                let duration = CMTimeMakeWithSeconds(1 / fps, preferredTimescale: 60_000)
+                virtual.activeVideoMinFrameDuration = duration
+                virtual.activeVideoMaxFrameDuration = duration
+                let displayed = snappedZoomFactor(requestedZoom, for: virtual)
+                virtual.cancelVideoZoomRamp()
+                virtual.videoZoomFactor = deviceZoomFactor(for: displayed, device: virtual)
+                virtual.unlockForConfiguration()
+                isUsingSlowMotionPreview = true
+                publish {
+                    self.supportedSlowMotionResolutions = availableResolutions
+                    self.supportedSlowMotionFrameRates = availableRates
+                    self.selectedSlowMotionResolution = resolution
+                    self.selectedSlowMotionFrameRate = selectedRate
+                    self.minimumZoomFactor = self.minimumSupportedZoom(for: virtual)
+                    self.maximumZoomFactor = self.maximumSupportedZoom(for: virtual)
+                    self.zoomFactor = displayed
+                    self.zoomLabel = self.formattedZoomLabel(for: displayed)
+                    self.torchAvailable = virtual.hasTorch
+                    self.isTorchOn = virtual.torchMode == .on
+                }
+                resetFocusAndExposureState()
+                return
+            } catch { showError("Couldn’t prepare the smooth Slo-Mo preview.") }
+        }
+        isUsingSlowMotionPreview = false
         let supportedDevices = devices.filter { device in
             bestSlowMotionFormat(for: device, resolution: resolution, frameRate: selectedRate) != nil
         }
@@ -1558,6 +1593,18 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
+        if captureMode == .sloMo {
+            applySlowMotionFormat(allowPreview: false)
+            guard let device = videoInput?.device,
+                  bestSlowMotionFormat(for: device, resolution: selectedSlowMotionResolution, frameRate: selectedSlowMotionFrameRate) != nil,
+                  !isUsingSlowMotionPreview,
+                  abs(1 / device.activeVideoMinFrameDuration.seconds - Double(selectedSlowMotionFrameRate.rawValue)) < 1 else {
+                recordingRequested = false
+                publish { self.isRecording = false }
+                showError("Couldn’t start the selected Slo-Mo frame rate.")
+                return
+            }
+        }
         configureMovieOutputSettings()
         publish { self.isRecording = true }
         refreshAvailableStorage()
@@ -1644,6 +1691,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 self.recordingRequested = false
                 if self.captureMode == .video {
                     self.applySelectedFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput, allowSmoothPreviewFallback: true)
+                } else if self.captureMode == .sloMo {
+                    self.applySlowMotionFormat()
                 }
             }
         }
