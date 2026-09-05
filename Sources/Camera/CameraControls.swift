@@ -130,6 +130,59 @@ struct RecordingTimer: View {
     }
 }
 
+struct CameraHUD: View {
+    @ObservedObject var camera: CameraManager
+    let showResolution: Bool
+    let showFPS: Bool
+    let showRemaining: Bool
+    let showZoom: Bool
+    let showWhiteBalance: Bool
+    let maxWidth: CGFloat
+
+    var body: some View {
+        Text(displayText)
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.62)
+            .allowsTightening(true)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 13)
+            .frame(height: 34)
+            .frame(maxWidth: maxWidth)
+            .background(.black.opacity(0.86), in: Capsule())
+            .overlay {
+                Capsule().stroke(.white.opacity(0.08), lineWidth: 1)
+            }
+            .accessibilityLabel(items.joined(separator: ", "))
+    }
+
+    private var displayText: String {
+        items.joined(separator: "  ·  ")
+    }
+
+    private var items: [String] {
+        var result: [String] = []
+        if showResolution { result.append(camera.hudResolutionLabel) }
+        if showFPS, let fps = camera.hudFrameRateLabel { result.append("\(fps)fps") }
+        if showRemaining { result.append(camera.hudRemainingLabel) }
+        if showZoom { result.append(camera.zoomLabel) }
+        if showWhiteBalance { result.append(whiteBalanceShortLabel) }
+        if result.isEmpty { result.append(camera.captureMode.rawValue) }
+        return result
+    }
+
+    private var whiteBalanceShortLabel: String {
+        switch camera.whiteBalancePreset {
+        case .auto: return "AWB"
+        case .daylight: return "Day"
+        case .cloudy: return "Cloud"
+        case .tungsten: return "Tung"
+        case .fluorescent: return "Fluor"
+        }
+    }
+}
+
 struct ProToolsPopup: View {
     @ObservedObject var camera: CameraManager
     @Binding var isLevelMeterEnabled: Bool
@@ -194,11 +247,11 @@ struct ProToolsPopup: View {
                     HStack(spacing: 5) {
                         Text(camera.whiteBalancePreset.rawValue)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .minimumScaleFactor(0.82)
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 10, weight: .semibold))
                     }
-                    .frame(minWidth: 105, alignment: .trailing)
+                    .frame(minWidth: 112, alignment: .trailing)
                     .foregroundStyle(.yellow)
                 }
             }
@@ -212,7 +265,7 @@ struct ProToolsPopup: View {
         }
         .foregroundStyle(.white)
         .padding(16)
-        .frame(width: 300)
+        .frame(width: 310)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -232,21 +285,21 @@ struct CameraLevelOverlay: View {
 
     var body: some View {
         ZStack {
-            HStack(spacing: 122) {
+            HStack(spacing: 132) {
                 Capsule()
                     .fill(.white.opacity(0.72))
-                    .frame(width: 48, height: 3)
+                    .frame(width: 52, height: 3)
                 Capsule()
                     .fill(.white.opacity(0.72))
-                    .frame(width: 48, height: 3)
+                    .frame(width: 52, height: 3)
             }
 
             Capsule()
                 .fill(isLevel ? .yellow : .white)
-                .frame(width: 94, height: isLevel ? 5 : 4)
+                .frame(width: 104, height: isLevel ? 5 : 4)
                 .rotationEffect(.radians(-angle))
         }
-        .frame(width: 246, height: 58)
+        .frame(width: 260, height: 72)
         .opacity(isAvailable ? 1 : 0.30)
         .animation(.easeOut(duration: 0.10), value: isLevel)
         .accessibilityLabel(isLevel ? "Camera level" : "Camera not level")
@@ -274,12 +327,16 @@ struct CameraGridOverlay: View {
 final class CameraLevelMonitor: ObservableObject {
     @Published private(set) var angle: Double = 0
     @Published private(set) var isAvailable = false
+    @Published private(set) var levelDeviation: Double = .infinity
 
     private let motionManager = CMMotionManager()
-    private var hasInitialAngle = false
+    private var lastRawRoll: Double?
+    private var unwrappedRoll: Double = 0
 
-    var degrees: Double { angle * 180 / .pi }
-    var isLevel: Bool { isAvailable && abs(degrees) <= 1.5 }
+    var isLevel: Bool {
+        let tolerance = 1.5 * Double.pi / 180
+        return isAvailable && levelDeviation <= tolerance
+    }
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
@@ -292,42 +349,43 @@ final class CameraLevelMonitor: ObservableObject {
         motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, error in
             guard let self else { return }
             guard error == nil, let gravity = motion?.gravity else {
-                self.isAvailable = false
-                self.hasInitialAngle = false
+                self.resetMeasurement()
                 return
             }
 
             let horizonStrength = hypot(gravity.x, gravity.y)
             guard horizonStrength > 0.06 else {
-                self.isAvailable = false
-                self.hasInitialAngle = false
+                self.resetMeasurement()
                 return
             }
 
-            // Portrait, both landscapes and upside-down are all valid level positions.
-            // Reduce the physical roll to the deviation from the nearest 90-degree turn,
-            // so the meter glows at 0°, 90°, 180° and 270° even if rotation lock is on.
             let rawRoll = atan2(gravity.x, -gravity.y)
-            let quarterTurn = Double.pi / 2
-            let nearestRightAngle = (rawRoll / quarterTurn).rounded() * quarterTurn
-            var measured = rawRoll - nearestRightAngle
-            while measured > .pi / 4 { measured -= quarterTurn }
-            while measured < -.pi / 4 { measured += quarterTurn }
-
-            self.isAvailable = true
-            if !self.hasInitialAngle {
-                self.angle = measured
-                self.hasInitialAngle = true
+            if let lastRawRoll = self.lastRawRoll {
+                // Unwrap the -π/+π boundary so the indicator keeps rotating continuously.
+                let delta = atan2(sin(rawRoll - lastRawRoll), cos(rawRoll - lastRawRoll))
+                self.unwrappedRoll += delta
+                self.angle += (self.unwrappedRoll - self.angle) * 0.50
             } else {
-                let delta = measured - self.angle
-                self.angle += delta * 0.30
+                self.unwrappedRoll = rawRoll
+                self.angle = rawRoll
             }
+            self.lastRawRoll = rawRoll
+            let quarterTurn = Double.pi / 2
+            let nearestLevel = (self.unwrappedRoll / quarterTurn).rounded() * quarterTurn
+            self.levelDeviation = abs(self.unwrappedRoll - nearestLevel)
+            self.isAvailable = true
         }
     }
 
     func stop() {
         motionManager.stopDeviceMotionUpdates()
-        hasInitialAngle = false
+        resetMeasurement()
+    }
+
+    private func resetMeasurement() {
+        lastRawRoll = nil
+        unwrappedRoll = 0
+        levelDeviation = .infinity
         isAvailable = false
     }
 }

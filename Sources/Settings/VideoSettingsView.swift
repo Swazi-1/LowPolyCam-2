@@ -4,6 +4,14 @@ struct VideoSettingsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
+    @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
+    @AppStorage("cameraHUDResolution") private var hudResolution = true
+    @AppStorage("cameraHUDFPS") private var hudFPS = true
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
+    @AppStorage("cameraHUDZoom") private var hudZoom = false
+    @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
+    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
+    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
 
     var body: some View {
         NavigationStack {
@@ -20,11 +28,29 @@ struct VideoSettingsView: View {
                         photoSettings
                     }
 
+                    hudSettings
+
                     SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
                         SettingsToggleRow(
                             title: "Grid",
                             subtitle: "Show a 3×3 composition grid",
                             isOn: $isGridEnabled
+                        )
+                    }
+
+                    SettingsCard(title: "Camera Experience", symbol: "sparkles") {
+                        SettingsToggleRow(
+                            title: "Haptic Capture",
+                            subtitle: camera.captureMode == .photo ? "Feel a tap when taking a photo" : "Feel a tap when starting or stopping recording",
+                            isOn: $isHapticCaptureEnabled
+                        )
+
+                        SettingsDivider()
+
+                        SettingsToggleRow(
+                            title: "Keep Screen Awake",
+                            subtitle: "Prevent Auto-Lock while LowPolyCam is open",
+                            isOn: $keepScreenAwakeEnabled
                         )
                     }
                 }
@@ -138,12 +164,65 @@ struct VideoSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("MAX")
+                Text(camera.currentPhotoResolutionLabel)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.yellow)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(.yellow.opacity(0.13), in: Capsule())
+            }
+        }
+    }
+
+    private var hudSettings: some View {
+        SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
+            SettingsToggleRow(
+                title: "Show Camera HUD",
+                subtitle: "Compact live info between the flash and Settings buttons",
+                isOn: $isHUDEnabled
+            )
+
+            if isHUDEnabled {
+                SettingsDivider()
+
+                SettingsToggleRow(
+                    title: "Resolution",
+                    subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show current video resolution",
+                    isOn: $hudResolution
+                )
+
+                if camera.captureMode != .photo {
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "FPS",
+                        subtitle: camera.captureMode == .sloMo ? "Show the selected Slo-Mo frame rate" : "Show the selected video frame rate",
+                        isOn: $hudFPS
+                    )
+                }
+
+                SettingsDivider()
+
+                SettingsToggleRow(
+                    title: camera.captureMode == .photo ? "Photos Remaining" : "Recording Time Remaining",
+                    subtitle: camera.captureMode == .photo ? "Estimate how many more photos fit on the device" : "Estimate recording time from available storage and current quality",
+                    isOn: $hudRemaining
+                )
+
+                SettingsDivider()
+
+                SettingsToggleRow(
+                    title: "Zoom",
+                    subtitle: "Show the current zoom value",
+                    isOn: $hudZoom
+                )
+
+                SettingsDivider()
+
+                SettingsToggleRow(
+                    title: "White Balance",
+                    subtitle: "Show the active white-balance preset",
+                    isOn: $hudWhiteBalance
+                )
             }
         }
     }

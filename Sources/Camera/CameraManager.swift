@@ -47,7 +47,12 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
-        var tint: Float { 0 }
+        var tint: Float {
+            switch self {
+            case .fluorescent: return 8
+            default: return 0
+            }
+        }
     }
 
     @Published private(set) var isSessionRunning = false
@@ -57,7 +62,11 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isFocusExposureLocked = false
     @Published private(set) var exposureBias: Float = 0
     @Published private(set) var whiteBalancePreset: WhiteBalancePreset = .auto
+    @Published private(set) var isPreviewTransitioning = false
     @Published private(set) var recordingDuration: TimeInterval = 0
+    @Published private(set) var availableStorageBytes: Int64 = 0
+    @Published private(set) var currentPhotoResolutionLabel = "MAX"
+    @Published private(set) var currentPhotoPixelCount: Int64 = 12_000_000
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
     @Published private(set) var supportedSlowMotionResolutions: [VideoResolution] = []
@@ -98,6 +107,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var pendingFocusLockWorkItem: DispatchWorkItem?
+    private var pendingPhotoFilename: String?
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
 
@@ -106,6 +116,7 @@ final class CameraManager: NSObject, ObservableObject {
     private static let slowMotionResolutionKey = "selectedSlowMotionResolution"
     private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
     private static let videoStabilizationKey = "videoStabilizationEnabled"
+    private static let mediaSequenceKey = "lowPolyCamMediaSequence"
 
     override init() {
         let savedResolution = UserDefaults.standard.string(forKey: Self.resolutionKey)
@@ -120,10 +131,75 @@ final class CameraManager: NSObject, ObservableObject {
         super.init()
     }
 
+    var hudResolutionLabel: String {
+        switch captureMode {
+        case .video: return selectedResolution.rawValue
+        case .sloMo: return selectedSlowMotionResolution.rawValue
+        case .photo: return currentPhotoResolutionLabel
+        }
+    }
+
+    var hudFrameRateLabel: String? {
+        switch captureMode {
+        case .video: return "\(selectedFrameRate.rawValue)"
+        case .sloMo: return "\(selectedSlowMotionFrameRate.rawValue)"
+        case .photo: return nil
+        }
+    }
+
+    var hudRemainingLabel: String {
+        let reserve: Int64 = 250 * 1_024 * 1_024
+        let usable = max(availableStorageBytes - reserve, 0)
+        guard usable > 0 else { return captureMode == .photo ? "~0" : "~0m" }
+
+        if captureMode == .photo {
+            let bytesPerPhoto = estimatedBytesPerPhoto
+            guard bytesPerPhoto > 0 else { return "—" }
+            let count = Int64(Double(usable) / bytesPerPhoto)
+            if count >= 10_000 { return "~10k+" }
+            return "~\(max(count, 0))"
+        }
+
+        let bitsPerSecond = estimatedVideoBitsPerSecond
+        guard bitsPerSecond > 0 else { return "—" }
+        let seconds = Int(Double(usable) * 8.0 / bitsPerSecond)
+        if seconds >= 3_600 {
+            return String(format: "~%dh%02dm", seconds / 3_600, (seconds % 3_600) / 60)
+        }
+        return "~\(max(seconds / 60, 0))m"
+    }
+
+    func refreshAvailableStorage() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let homeURL = URL(fileURLWithPath: NSHomeDirectory())
+            let values = try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            let bytes = values?.volumeAvailableCapacityForImportantUsage ?? 0
+            self.publish { self.availableStorageBytes = max(bytes, 0) }
+        }
+    }
+
+
+    private var estimatedVideoBitsPerSecond: Double {
+        let resolution = captureMode == .sloMo ? selectedSlowMotionResolution : selectedResolution
+        let fps: Double = captureMode == .sloMo
+            ? Double(selectedSlowMotionFrameRate.rawValue)
+            : Double(selectedFrameRate.rawValue)
+        let pixels = Double(resolution.dimensions.width) * Double(resolution.dimensions.height)
+        // HUD estimate only; recording quality still comes from AVCaptureMovieFileOutput.
+        return max(pixels * fps * 0.12, 4_000_000)
+    }
+
+    private var estimatedBytesPerPhoto: Double {
+        let pixels = max(Double(currentPhotoPixelCount), 1)
+        return max(pixels * 0.35, 1_500_000)
+    }
+
     func start() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.configureSessionIfNeeded()
+            self.refreshAvailableStorage()
             self.resetZoomToOne()
             guard self.session.isRunning == false else { return }
             self.session.startRunning()
@@ -276,35 +352,57 @@ final class CameraManager: NSObject, ObservableObject {
             let previousPreset = self.requestedWhiteBalancePreset
             self.requestedWhiteBalancePreset = preset
 
-            if preset == .auto {
-                self.restoreVirtualRearCameraIfPossible()
-                guard self.applyWhiteBalancePresetToCurrentCamera(.auto) else {
-                    self.requestedWhiteBalancePreset = previousPreset
-                    self.showError("Couldn’t enable Auto white balance.")
-                    return
-                }
-                self.publish { self.whiteBalancePreset = .auto }
-                return
-            }
+            let currentDevice = self.videoInput?.device
+            let rearVideoOrPhoto = self.cameraPosition == .back && (self.captureMode == .video || self.captureMode == .photo)
+            let needsInputSwap = rearVideoOrPhoto && (
+                (preset != .auto && currentDevice?.isVirtualDevice == true) ||
+                (preset == .auto && currentDevice?.isVirtualDevice == false)
+            )
 
-            // Apple's virtual multi-camera devices don't support custom WB gains. For manual
-            // presets on the rear camera, use the currently requested physical lens instead.
-            if self.cameraPosition == .back, self.videoInput?.device.isVirtualDevice == true {
-                guard self.switchToPhysicalRearLensForManualWhiteBalance() else {
-                    self.requestedWhiteBalancePreset = previousPreset
-                    self.showError("Manual white balance isn’t available on this lens.")
-                    return
+            if needsInputSwap {
+                // Input replacement can briefly blank AVCaptureVideoPreviewLayer. Freeze the last
+                // visible preview frame over the swap, then cross-fade it away.
+                self.publish { self.isPreviewTransitioning = true }
+                self.sessionQueue.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                    guard let self else { return }
+                    self.applyWhiteBalanceSelection(preset, previousPreset: previousPreset)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+                        self?.isPreviewTransitioning = false
+                    }
                 }
+            } else {
+                self.applyWhiteBalanceSelection(preset, previousPreset: previousPreset)
             }
-
-            guard self.applyWhiteBalancePresetToCurrentCamera(preset) else {
-                self.requestedWhiteBalancePreset = previousPreset
-                if previousPreset == .auto { self.restoreVirtualRearCameraIfPossible() }
-                self.showError("Couldn’t change white balance on this camera.")
-                return
-            }
-            self.publish { self.whiteBalancePreset = preset }
         }
+    }
+
+    private func applyWhiteBalanceSelection(_ preset: WhiteBalancePreset, previousPreset: WhiteBalancePreset) {
+        if preset == .auto {
+            restoreVirtualRearCameraIfPossible()
+            guard applyWhiteBalancePresetToCurrentCamera(.auto) else {
+                requestedWhiteBalancePreset = previousPreset
+                showError("Couldn’t enable Auto white balance.")
+                return
+            }
+            publish { self.whiteBalancePreset = .auto }
+            return
+        }
+
+        if cameraPosition == .back, videoInput?.device.isVirtualDevice == true {
+            guard switchToPhysicalRearLensForManualWhiteBalance() else {
+                requestedWhiteBalancePreset = previousPreset
+                showError("Manual white balance isn’t available on this lens.")
+                return
+            }
+        }
+
+        guard applyWhiteBalancePresetToCurrentCamera(preset) else {
+            requestedWhiteBalancePreset = previousPreset
+            if previousPreset == .auto { restoreVirtualRearCameraIfPossible() }
+            showError("Couldn’t change white balance on this camera.")
+            return
+        }
+        publish { self.whiteBalancePreset = preset }
     }
 
     func selectResolution(_ resolution: VideoResolution) {
@@ -843,6 +941,8 @@ final class CameraManager: NSObject, ObservableObject {
                 self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
                 self.torchAvailable = device.hasTorch
                 self.isTorchOn = device.torchMode == .on
+                self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: photoChoice.dimensions)
+                self.currentPhotoPixelCount = Int64(photoChoice.dimensions.width) * Int64(photoChoice.dimensions.height)
             }
             if switchedPhysicalCamera {
                 resetFocusAndExposureState()
@@ -903,6 +1003,19 @@ final class CameraManager: NSObject, ObservableObject {
             photoOutput.maxPhotoDimensions.height != largest.height {
             photoOutput.maxPhotoDimensions = largest
         }
+        publish {
+            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: largest)
+            self.currentPhotoPixelCount = Int64(largest.width) * Int64(largest.height)
+        }
+    }
+
+    private func photoResolutionLabel(for dimensions: CMVideoDimensions) -> String {
+        let megapixels = Double(dimensions.width) * Double(dimensions.height) / 1_000_000.0
+        let rounded = megapixels.rounded()
+        if abs(megapixels - rounded) < 0.35 {
+            return "\(Int(rounded)) MP"
+        }
+        return String(format: "%.1f MP", megapixels)
     }
 
     private func minimumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
@@ -1223,22 +1336,36 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        let settings = AVCapturePhotoSettings()
+        let useHEIC = photoOutput.availablePhotoCodecTypes.contains(.hevc)
+        let settings = useHEIC
+            ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.photoQualityPrioritization = .quality
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
         }
+        pendingPhotoFilename = nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg")
+        refreshAvailableStorage()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
     private func beginRecording() {
         guard session.isRunning, movieOutput.isRecording == false else { return }
         configureMovieOutputSettings()
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mov")
+        refreshAvailableStorage()
+        let filename = nextMediaFilename(fileExtension: "mov")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         movieOutput.startRecording(to: url, recordingDelegate: self)
+    }
+
+    private func nextMediaFilename(fileExtension: String) -> String {
+        let defaults = UserDefaults.standard
+        var number = defaults.integer(forKey: Self.mediaSequenceKey)
+        if number < 1 || number > 9_999 { number = 1 }
+        let filename = String(format: "img_%04d.%@", number, fileExtension.lowercased())
+        defaults.set(number == 9_999 ? 1 : number + 1, forKey: Self.mediaSequenceKey)
+        return filename
     }
 
     private func synchronizeTorchState() {
@@ -1292,9 +1419,14 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         }
 
         PHPhotoLibrary.shared().performChanges({
-            PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
+            let request = PHAssetCreationRequest.forAsset()
+            let options = PHAssetResourceCreationOptions()
+            options.originalFilename = outputFileURL.lastPathComponent
+            options.shouldMoveFile = false
+            request.addResource(with: .video, fileURL: outputFileURL, options: options)
         }) { [weak self] success, error in
             try? FileManager.default.removeItem(at: outputFileURL)
+            self?.refreshAvailableStorage()
             if success {
                 self?.publish { self?.statusMessage = "Saved to Photos" }
             } else {
@@ -1317,10 +1449,15 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             return
         }
 
+        let filename = pendingPhotoFilename ?? nextMediaFilename(fileExtension: "jpg")
+        pendingPhotoFilename = nil
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCreationRequest.forAsset()
-            request.addResource(with: .photo, data: data, options: nil)
+            let options = PHAssetResourceCreationOptions()
+            options.originalFilename = filename
+            request.addResource(with: .photo, data: data, options: options)
         }) { [weak self] success, error in
+            self?.refreshAvailableStorage()
             if success {
                 self?.publish { self?.statusMessage = "Photo saved to Photos" }
             } else {

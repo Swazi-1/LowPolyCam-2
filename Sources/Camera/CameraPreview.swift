@@ -6,6 +6,7 @@ struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     let isFocusExposureLocked: Bool
     let stabilizationEnabled: Bool
+    let isPreviewTransitioning: Bool
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
 
@@ -27,6 +28,7 @@ struct CameraPreview: UIViewRepresentable {
         view.onLongPressToLock = onLongPressToLock
         view.setFocusExposureLocked(isFocusExposureLocked)
         view.setStabilizationEnabled(stabilizationEnabled)
+        view.setPreviewTransitioning(isPreviewTransitioning)
     }
 }
 
@@ -43,6 +45,8 @@ final class PreviewView: UIView {
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
     private var stabilizationEnabled = true
+    private var transitionSnapshot: UIView?
+    private var previewTransitioning = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -56,6 +60,7 @@ final class PreviewView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         enableStabilizationIfAvailable()
+        transitionSnapshot?.frame = bounds
 
         lockLabel.sizeToFit()
         lockLabel.frame = CGRect(
@@ -64,7 +69,6 @@ final class PreviewView: UIView {
             width: lockLabel.bounds.width + 24,
             height: 30
         )
-
     }
 
     func enableStabilizationIfAvailable() {
@@ -75,6 +79,31 @@ final class PreviewView: UIView {
     func setStabilizationEnabled(_ enabled: Bool) {
         stabilizationEnabled = enabled
         enableStabilizationIfAvailable()
+    }
+
+    func setPreviewTransitioning(_ transitioning: Bool) {
+        guard transitioning != previewTransitioning else { return }
+        previewTransitioning = transitioning
+
+        if transitioning {
+            transitionSnapshot?.removeFromSuperview()
+            transitionSnapshot = nil
+            guard bounds.width > 0, bounds.height > 0,
+                  let snapshot = snapshotView(afterScreenUpdates: false) else { return }
+            snapshot.frame = bounds
+            snapshot.isUserInteractionEnabled = false
+            addSubview(snapshot)
+            transitionSnapshot = snapshot
+        } else if let snapshot = transitionSnapshot {
+            UIView.animate(withDuration: 0.14, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                snapshot.alpha = 0
+            } completion: { [weak self, weak snapshot] _ in
+                snapshot?.removeFromSuperview()
+                if self?.transitionSnapshot === snapshot {
+                    self?.transitionSnapshot = nil
+                }
+            }
+        }
     }
 
     func setFocusExposureLocked(_ isLocked: Bool) {
@@ -165,6 +194,4 @@ final class PreviewView: UIView {
         hideFocusWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.15, execute: workItem)
     }
-
-
 }
