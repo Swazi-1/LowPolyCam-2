@@ -191,7 +191,7 @@ struct CameraView: View {
 
             ZStack {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
+                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
                         camera.toggleTorch()
                     }
                     Spacer()
@@ -231,6 +231,7 @@ struct CameraView: View {
                         .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
                 })
                 .gesture(zoomGesture)
+                .allowsHitTesting(!(camera.isRecording && recordingLock))
 
                 CaptureModeSelector(
                     selectedMode: camera.captureMode,
@@ -253,7 +254,7 @@ struct CameraView: View {
                         .frame(width: 76, height: 76)
                         .background(.black.opacity(0.6), in: Circle())
                         .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { camera.startOrStopRecording() }
+                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {

@@ -79,36 +79,24 @@ struct CapturePreferencesView: View {
     var body: some View {
         Form {
             Section("Shutter") {
-                Picker("Timer", selection: $shutterDelay) {
-                    Text("Off").tag(0); Text("3 seconds").tag(3); Text("10 seconds").tag(10)
-                }
+                ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (10, "10 seconds")])
             }
             if camera.captureMode != .photo {
                 Section {
                     LabeledContent("Video Codec", value: "HEVC (H.265)")
-                    Picker("Compression", selection: $camera.videoCompression) {
-                        ForEach(VideoCompression.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    Picker("Split Recording", selection: $splitMinutes) {
-                        Text("Off").tag(0); Text("Every 15 minutes").tag(15)
-                        Text("Every 30 minutes").tag(30); Text("Every hour").tag(60)
-                        Text("Every 2 hours").tag(120)
-                    }
+                    ThemeMenu(title: "Compression", selection: $camera.videoCompression, options: VideoCompression.allCases.map { ($0, $0.rawValue) })
+                    ThemeMenu(title: "Split Recording", selection: $splitMinutes, options: [(0, "Off"), (15, "Every 15 minutes"), (30, "Every 30 minutes"), (60, "Every hour"), (120, "Every 2 hours")])
                 } footer: {
                     Text("Each segment saves separately. Starting the next file introduces a brief gap. HEVC is used when supported; otherwise H.264 is used.")
                 }
             }
             Section("Haptic Feedback") {
                 Toggle("Enabled", isOn: $haptics)
-                Picker("Strength", selection: $strength) {
-                    ForEach(["Low", "Medium", "Strong"], id: \.self) { Text($0).tag($0) }
-                }.disabled(!haptics)
+                ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }).disabled(!haptics)
                 Button("Test Haptics") { CameraHaptics.fire() }.disabled(!haptics)
             }
             Section("Zoom & Recording") {
-                Picker("Zoom Speed", selection: $zoomSpeed) {
-                    Text("Slow").tag(0.5); Text("Normal").tag(1.0); Text("Fast").tag(1.5)
-                }
+                ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
                 Toggle("Tap Zoom to Reset to 1×", isOn: $tapZoomReset)
                 Toggle("Lock Recording Controls", isOn: $recordingLock)
                 Text("When locked, hold the shutter for one second to stop.")
@@ -125,5 +113,29 @@ struct CapturePreferencesView: View {
         .accentColor(accent.color)
         .navigationTitle("Capture Controls")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct ThemeMenu<Value: Hashable>: View {
+    @Environment(\.cameraTint) private var theme
+    let title: String
+    @Binding var selection: Value
+    let options: [(Value, String)]
+    var body: some View {
+        Menu {
+            ForEach(options, id: \.0) { value, label in
+                Button { selection = value } label: {
+                    if selection == value { Label(label, systemImage: "checkmark") } else { Text(label) }
+                }
+            }
+        } label: {
+            HStack {
+                Text(title).foregroundStyle(.primary)
+                Spacer(minLength: 12)
+                Text(options.first { $0.0 == selection }?.1 ?? "—")
+                    .foregroundStyle(theme).multilineTextAlignment(.trailing)
+                Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(theme)
+            }.frame(minHeight: 32).contentShape(Rectangle())
+        }.tint(theme)
     }
 }
