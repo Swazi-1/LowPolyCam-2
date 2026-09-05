@@ -127,3 +127,181 @@ struct RecordingTimer: View {
         return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 }
+
+import SwiftUI
+import CoreMotion
+import UIKit
+
+struct ProToolsPopup: View {
+    @ObservedObject var camera: CameraManager
+    @StateObject private var levelMonitor = LevelMonitor()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("PRO TOOLS")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.75))
+
+            VStack(spacing: 8) {
+                HStack {
+                    Text("EV")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(evLabel)
+                        .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(.yellow)
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { Double(camera.exposureBias) },
+                        set: { camera.setExposureBias(Float($0)) }
+                    ),
+                    in: -2...2,
+                    step: 0.1
+                )
+                .tint(.yellow)
+            }
+
+            Divider()
+                .overlay(.white.opacity(0.15))
+
+            HStack {
+                Text("White Balance")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("White Balance", selection: Binding(
+                    get: { camera.whiteBalancePreset },
+                    set: { camera.selectWhiteBalancePreset($0) }
+                )) {
+                    ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
+                        Text(preset.rawValue).tag(preset)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(.yellow)
+            }
+
+            Divider()
+                .overlay(.white.opacity(0.15))
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Level")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(levelMonitor.statusText)
+                        .font(.system(.caption, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(levelMonitor.isLevel ? .green : .white.opacity(0.7))
+                }
+
+                LevelMeterView(angle: levelMonitor.angle, isLevel: levelMonitor.isLevel)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(16)
+        .frame(width: 260)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
+        .onAppear { levelMonitor.start() }
+        .onDisappear { levelMonitor.stop() }
+    }
+
+    private var evLabel: String {
+        abs(camera.exposureBias) < 0.05 ? "0.0" : String(format: "%+.1f", camera.exposureBias)
+    }
+}
+
+private struct LevelMeterView: View {
+    let angle: Double
+    let isLevel: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+                    .frame(height: 2)
+
+                Capsule()
+                    .fill(isLevel ? .green : .yellow)
+                    .frame(width: min(proxy.size.width * 0.62, 130), height: 3)
+                    .rotationEffect(.radians(angle))
+
+                Circle()
+                    .fill(.white)
+                    .frame(width: 5, height: 5)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+        }
+        .frame(height: 38)
+    }
+}
+
+private final class LevelMonitor: ObservableObject {
+    @Published private(set) var angle: Double = 0
+    @Published private(set) var isAvailable = false
+
+    private let motionManager = CMMotionManager()
+
+    var degrees: Double { angle * 180 / .pi }
+    var isLevel: Bool { isAvailable && abs(degrees) <= 1.5 }
+
+    var statusText: String {
+        guard isAvailable else { return "—" }
+        return isLevel ? "LEVEL" : String(format: "%+.1f°", degrees)
+    }
+
+    func start() {
+        guard motionManager.isDeviceMotionAvailable else {
+            isAvailable = false
+            return
+        }
+
+        motionManager.deviceMotionUpdateInterval = 1.0 / 12.0
+        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
+            guard let self, let gravity = motion?.gravity else { return }
+            let flatness = hypot(gravity.x, gravity.y)
+            guard flatness > 0.18 else {
+                self.isAvailable = false
+                return
+            }
+
+            self.isAvailable = true
+            self.angle = self.normalizedLevelAngle(for: gravity)
+        }
+    }
+
+    func stop() {
+        motionManager.stopDeviceMotionUpdates()
+    }
+
+    private func normalizedLevelAngle(for gravity: CMAcceleration) -> Double {
+        let orientation = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
+            .first ?? .portrait
+
+        let rawAngle: Double
+        switch orientation {
+        case .portraitUpsideDown:
+            rawAngle = atan2(-gravity.x, gravity.y)
+        case .landscapeLeft:
+            rawAngle = atan2(-gravity.y, gravity.x)
+        case .landscapeRight:
+            rawAngle = atan2(gravity.y, -gravity.x)
+        default:
+            rawAngle = atan2(gravity.x, -gravity.y)
+        }
+
+        var result = rawAngle
+        while result > .pi / 2 { result -= .pi }
+        while result < -.pi / 2 { result += .pi }
+        return result
+    }
+}
+
