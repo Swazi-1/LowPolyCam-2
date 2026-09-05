@@ -70,10 +70,14 @@ struct CameraView: View {
             Color.clear.frame(width: 48, height: 48)
             Spacer()
             VStack(spacing: 26) {
-                ZoomIndicator(label: camera.zoomLabel)
-                    .contentShape(Rectangle())
-                    .frame(width: 150, height: 58)
-                    .gesture(zoomGesture)
+                ZStack {
+                    Color.clear
+                    ZoomIndicator(label: camera.zoomLabel)
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .gesture(zoomGesture)
                 RecordButton(isRecording: camera.isRecording) {
                     camera.startOrStopRecording()
                 }
@@ -93,8 +97,9 @@ struct CameraView: View {
                     dragStartZoom = camera.zoomFactor
                 }
                 guard let dragStartZoom else { return }
-                // The swipe area is narrow, so a full swipe across it should still reach 8×.
-                let requestedZoom = dragStartZoom - (value.translation.width * 0.047)
+                let screenWidth = max(UIScreen.main.bounds.width, 1)
+                let zoomRange = camera.maximumZoomFactor - camera.minimumZoomFactor
+                let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange)
                 camera.setZoomFactor(requestedZoom)
             }
             .onEnded { _ in

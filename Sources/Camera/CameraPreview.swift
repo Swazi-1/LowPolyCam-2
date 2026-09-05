@@ -12,6 +12,7 @@ struct CameraPreview: UIViewRepresentable {
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
         uiView.previewLayer.session = session
+        uiView.enableStabilizationIfAvailable()
     }
 }
 
@@ -26,4 +27,14 @@ final class PreviewView: UIView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        enableStabilizationIfAvailable()
+    }
+
+    func enableStabilizationIfAvailable() {
+        guard let connection = previewLayer.connection, connection.isVideoStabilizationSupported else { return }
+        connection.preferredVideoStabilizationMode = .auto
+    }
 }

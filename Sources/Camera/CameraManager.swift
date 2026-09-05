@@ -90,7 +90,7 @@ final class CameraManager: NSObject, ObservableObject {
             let factor = self.snappedZoomFactor(requestedFactor, for: device)
             do {
                 try device.lockForConfiguration()
-                device.videoZoomFactor = self.deviceZoomFactor(for: factor, device: device)
+                device.ramp(toVideoZoomFactor: self.deviceZoomFactor(for: factor, device: device), withRate: 14)
                 device.unlockForConfiguration()
                 self.publish {
                     self.zoomFactor = factor
@@ -166,6 +166,11 @@ final class CameraManager: NSObject, ObservableObject {
         do {
             let input = try AVCaptureDeviceInput(device: device)
             guard session.canAddInput(input) else { return false }
+            try device.lockForConfiguration()
+            if device.isGeometricDistortionCorrectionSupported {
+                device.isGeometricDistortionCorrectionEnabled = true
+            }
+            device.unlockForConfiguration()
             session.addInput(input)
             videoInput = input
             return true
