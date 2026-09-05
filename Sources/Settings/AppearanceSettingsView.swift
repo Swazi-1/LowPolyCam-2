@@ -17,8 +17,8 @@ struct AppearanceSettingsView: View {
                             Text(name).foregroundStyle(.primary)
                             Spacer()
                             if appearance == name { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent.color) }
-                        }.contentShape(Rectangle())
-                    }
+                        }.frame(minHeight: 44).contentShape(Rectangle())
+                    }.buttonStyle(.plain)
                 }
                 if appearance == "Custom" {
                     ColorPicker("Accent Color", selection: Binding(get: { accent.color }, set: { value in

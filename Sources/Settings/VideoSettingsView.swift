@@ -154,10 +154,7 @@ struct VideoSettingsView: View {
 
     private var photoSettings: some View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
-            Picker("Save Format", selection: $camera.photoFileFormat) {
-                Text("HEIC").tag("HEIC")
-                Text("JPEG").tag("JPEG")
-            }
+            ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
             Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
                 .font(.caption).foregroundStyle(.secondary)
             SettingsDivider()

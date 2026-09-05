@@ -35,10 +35,10 @@ enum CameraHaptics {
     private static let light = UIImpactFeedbackGenerator(style: .light)
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
-    static func fire(strength override: String? = nil) {
+    static func fire(strength selectedStrength: String? = nil) {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true else { return }
-        let strength = override ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
+        let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
         try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
         generator.prepare()
