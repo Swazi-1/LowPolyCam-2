@@ -18,6 +18,10 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
     @Published private(set) var cameraPosition: CameraPosition = .back
     @Published private(set) var torchAvailable = false
+    @Published private(set) var isTorchOn = false
+    @Published private(set) var minimumZoomFactor: CGFloat = 1
+    @Published private(set) var maximumZoomFactor: CGFloat = 1
+    @Published private(set) var zoomFactor: CGFloat = 1
     @Published var statusMessage: String?
 
     @Published var selectedResolution: VideoResolution {
@@ -69,9 +73,26 @@ final class CameraManager: NSObject, ObservableObject {
             do {
                 try device.lockForConfiguration()
                 device.torchMode = device.torchMode == .on ? .off : .on
+                let isOn = device.torchMode == .on
                 device.unlockForConfiguration()
+                self.publish { self.isTorchOn = isOn }
             } catch {
                 self.showError("Couldn’t change the torch.")
+            }
+        }
+    }
+
+    func setZoomFactor(_ requestedFactor: CGFloat) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let factor = self.snappedZoomFactor(requestedFactor, for: device)
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = factor
+                device.unlockForConfiguration()
+                self.publish { self.zoomFactor = factor }
+            } catch {
+                self.showError("Couldn’t change the zoom.")
             }
         }
     }
@@ -134,7 +155,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func addVideoInput(for position: AVCaptureDevice.Position) -> Bool {
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+        guard let device = preferredCamera(for: position) else {
             return false
         }
         do {
@@ -166,10 +187,52 @@ final class CameraManager: NSObject, ObservableObject {
         publish {
             self.supportedResolutions = supported
             self.torchAvailable = device.hasTorch
+            self.isTorchOn = device.torchMode == .on
+            self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
+            self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
+            self.zoomFactor = device.videoZoomFactor
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
         }
+    }
+
+    private func preferredCamera(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        let deviceTypes: [AVCaptureDevice.DeviceType] = [
+            .builtInTripleCamera,
+            .builtInDualWideCamera,
+            .builtInDualCamera,
+            .builtInWideAngleCamera
+        ]
+
+        for type in deviceTypes {
+            if let device = AVCaptureDevice.default(type, for: .video, position: position) {
+                return device
+            }
+        }
+        return nil
+    }
+
+    private func minimumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
+        max(0.5, device.minAvailableVideoZoomFactor)
+    }
+
+    private func maximumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
+        min(8, device.maxAvailableVideoZoomFactor)
+    }
+
+    private func snappedZoomFactor(_ requestedFactor: CGFloat, for device: AVCaptureDevice) -> CGFloat {
+        let minimum = minimumSupportedZoom(for: device)
+        let maximum = maximumSupportedZoom(for: device)
+        let clamped = min(max(requestedFactor, minimum), maximum)
+
+        if minimum <= 0.5, abs(clamped - 0.5) < 0.10 {
+            return 0.5
+        }
+        if abs(clamped - 1) < 0.16 {
+            return 1
+        }
+        return clamped
     }
 
     private func availableResolutions(for device: AVCaptureDevice) -> [VideoResolution] {

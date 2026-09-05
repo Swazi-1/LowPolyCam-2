@@ -3,11 +3,13 @@ import SwiftUI
 struct CameraView: View {
     @StateObject private var camera = CameraManager()
     @State private var isShowingSettings = false
+    @State private var dragStartZoom: CGFloat?
 
     var body: some View {
         ZStack {
             CameraPreview(session: camera.session)
                 .ignoresSafeArea()
+                .gesture(zoomGesture)
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
@@ -54,7 +56,7 @@ struct CameraView: View {
 
     private var topControls: some View {
         HStack {
-            CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable) {
+            CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable, color: camera.isTorchOn ? .yellow : .white) {
                 camera.toggleTorch()
             }
             Spacer()
@@ -68,8 +70,11 @@ struct CameraView: View {
         HStack {
             Color.clear.frame(width: 48, height: 48)
             Spacer()
-            RecordButton(isRecording: camera.isRecording) {
-                camera.startOrStopRecording()
+            VStack(spacing: 12) {
+                ZoomIndicator(zoomFactor: camera.zoomFactor)
+                RecordButton(isRecording: camera.isRecording) {
+                    camera.startOrStopRecording()
+                }
             }
             Spacer()
             CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording) {
@@ -77,5 +82,21 @@ struct CameraView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+
+    private var zoomGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if dragStartZoom == nil {
+                    dragStartZoom = camera.zoomFactor
+                }
+                guard let dragStartZoom else { return }
+                let screenWidth = max(UIScreen.main.bounds.width, 1)
+                let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * 4)
+                camera.setZoomFactor(requestedZoom)
+            }
+            .onEnded { _ in
+                dragStartZoom = nil
+            }
     }
 }

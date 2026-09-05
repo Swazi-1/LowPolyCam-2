@@ -4,6 +4,7 @@ import Foundation
 struct CameraIconButton: View {
     let symbol: String
     let isEnabled: Bool
+    let color: Color
     let action: () -> Void
 
     var body: some View {
@@ -13,7 +14,7 @@ struct CameraIconButton: View {
                 .frame(width: 48, height: 48)
                 .background(.black.opacity(0.28), in: Circle())
         }
-        .foregroundStyle(isEnabled ? .white : .white.opacity(0.35))
+        .foregroundStyle(isEnabled ? color : .white.opacity(0.35))
         .disabled(!isEnabled)
         .accessibilityLabel(symbol == "bolt.fill" ? "Torch" : symbol == "gearshape.fill" ? "Settings" : "Switch camera")
     }
@@ -35,6 +36,27 @@ struct RecordButton: View {
             }
         }
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+    }
+}
+
+struct ZoomIndicator: View {
+    let zoomFactor: CGFloat
+
+    var body: some View {
+        Text(zoomText)
+            .font(.system(.subheadline, design: .rounded).weight(.bold))
+            .monospacedDigit()
+            .padding(.horizontal, 13)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.42), in: Capsule())
+            .foregroundStyle(.white)
+            .accessibilityLabel("Zoom \(zoomText)")
+    }
+
+    private var zoomText: String {
+        if abs(zoomFactor - 1) < 0.01 { return "1×" }
+        if abs(zoomFactor - 0.5) < 0.01 { return "0.5×" }
+        return String(format: "%.1f×", zoomFactor)
     }
 }
 
