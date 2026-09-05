@@ -20,6 +20,8 @@ struct VideoSettingsView: View {
                         photoSettings
                     }
 
+                    QuickCameraSettings(camera: camera)
+
                     SettingsCard(title: "Settings", symbol: "slider.horizontal.3") {
                         if camera.captureMode == .video {
                             NavigationLink { VideoPresetsView(camera: camera) } label: {
@@ -197,34 +199,7 @@ private struct CameraSettingsMenu: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
-                    SettingsToggleRow(
-                        title: "Grid",
-                        subtitle: "Show a 3×3 composition grid",
-                        isOn: $isGridEnabled
-                    )
-
-                    SettingsDivider()
-
-                    SettingsToggleRow(
-                        title: "Level Meter",
-                        subtitle: "Show the live horizon level in the preview",
-                        isOn: $isLevelMeterEnabled
-                    )
-                }
-
-                if camera.captureMode == .video {
-                    SettingsCard(title: "Recording", symbol: "record.circle") {
-                        SettingsToggleRow(
-                            title: "Stabilization",
-                            subtitle: "Use automatic video stabilization when supported",
-                            isOn: Binding(
-                                get: { camera.isVideoStabilizationEnabled },
-                                set: { camera.setVideoStabilizationEnabled($0) }
-                            )
-                        )
-                    }
-                }
+                QuickCameraSettings(camera: camera)
 
                 SettingsCard(title: "Camera Experience", symbol: "sparkles") {
                     SettingsToggleRow(
@@ -361,7 +336,7 @@ private struct SettingsNavigationRow: View {
     }
 }
 
-private struct SettingsCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     @Environment(\.cameraTint) private var theme
     let title: String
     let symbol: String
@@ -390,14 +365,14 @@ private struct SettingsCard<Content: View>: View {
     }
 }
 
-private struct SettingsDivider: View {
+struct SettingsDivider: View {
     @Environment(\.cameraTint) private var theme
     var body: some View {
         Divider().opacity(0.55)
     }
 }
 
-private struct SettingsToggleRow: View {
+struct SettingsToggleRow: View {
     @Environment(\.cameraTint) private var theme
     let title: String
     let subtitle: String

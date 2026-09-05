@@ -80,6 +80,9 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var zoomLabel = "1×"
     @Published var statusMessage: String?
     @Published private(set) var lastFrameGaps: Int?
+    @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
+        didSet { UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec") }
+    }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
         didSet { UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat") }
     }
@@ -505,6 +508,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.selectedResolution = preset.resolution
                 self.selectedFrameRate = preset.frameRate
                 self.videoCompression = preset.compression
+                self.selectedVideoCodec = "HEVC"
                 self.sessionQueue.async { self.applySelectedFormat() }
             }
         }
@@ -1507,7 +1511,10 @@ final class CameraManager: NSObject, ObservableObject {
         var settings: [String: Any] = [:]
 
         let codec: AVVideoCodecType?
-        if movieOutput.availableVideoCodecTypes.contains(.hevc) {
+        let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
+        if movieOutput.availableVideoCodecTypes.contains(preferred) {
+            codec = preferred
+        } else if movieOutput.availableVideoCodecTypes.contains(.hevc) {
             codec = .hevc
         } else if movieOutput.availableVideoCodecTypes.contains(.h264) {
             codec = .h264
@@ -1609,6 +1616,11 @@ final class CameraManager: NSObject, ObservableObject {
         }
         configureMovieOutputSettings()
         publish { self.isRecording = true }
+        if let connection = movieOutput.connection(with: .video),
+           let actual = movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String,
+           actual != (selectedVideoCodec == "H264" ? AVVideoCodecType.h264.rawValue : AVVideoCodecType.hevc.rawValue) {
+            showError("Selected codec isn’t supported at this quality; using \(actual == AVVideoCodecType.hevc.rawValue ? "HEVC" : "H.264").")
+        }
         refreshAvailableStorage()
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)

@@ -89,24 +89,23 @@ struct CapturePreferencesView: View {
     @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
 
     var body: some View {
-        Form {
-            Section("Shutter") {
+        SettingsPage {
+            SettingsCard(title: "Shutter", symbol: "timer") {
                 ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (10, "10 seconds")])
             }
             if camera.captureMode != .photo {
-                Section {
-                    LabeledContent("Video Codec", value: "HEVC (H.265)")
+                SettingsCard(title: "Recording", symbol: "video.fill") {
+                    ThemeMenu(title: "Video Codec", selection: $camera.selectedVideoCodec, options: [("HEVC", "HEVC / H.265"), ("H264", "H.264")])
                     ThemeMenu(title: "Compression", selection: $camera.videoCompression, options: VideoCompression.allCases.map { ($0, $0.rawValue) })
                     ThemeMenu(title: "Split Recording", selection: $splitMinutes, options: [(0, "Off"), (15, "Every 15 minutes"), (30, "Every 30 minutes"), (60, "Every hour"), (120, "Every 2 hours")])
-                } footer: {
-                    Text("Each segment saves separately. Starting the next file introduces a brief gap. HEVC is used when supported; otherwise H.264 is used.")
+                    Text("Split clips save separately with a brief gap between files. Codec availability depends on the selected camera format.").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Section("Haptic Feedback") {
+            SettingsCard(title: "Haptic Feedback", symbol: "waveform") {
                 Toggle("Enabled", isOn: $haptics)
                 ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }, onSelect: { CameraHaptics.fire(strength: $0) }).disabled(!haptics)
             }
-            Section("Zoom & Recording") {
+            SettingsCard(title: "Zoom & Recording", symbol: "plus.magnifyingglass") {
                 ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
                 Toggle("Tap Zoom to Reset to 1×", isOn: $tapZoomReset)
                 Toggle("Lock Recording Controls", isOn: $recordingLock)
@@ -115,12 +114,8 @@ struct CapturePreferencesView: View {
                 Toggle("Low Storage Warning", isOn: $lowStorageWarning)
                 Toggle("Thermal Status in HUD", isOn: $thermalHUD)
             }
-            Section("Extras") {
+            SettingsCard(title: "More Controls", symbol: "slider.horizontal.3") {
                 ThemeMenu(title: "HUD Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
-                VStack(alignment: .leading) {
-                    Text("Grid Opacity")
-                    Slider(value: $gridOpacity, in: 0.2...1).accessibilityLabel("Grid opacity")
-                }.padding(.vertical, 4)
                 Toggle("Countdown Haptics", isOn: $countdownHaptics)
                 Toggle("Remember Last Camera Mode", isOn: $rememberCaptureMode)
                 Button("Reset Exposure & White Balance") { camera.setExposureBias(0); camera.selectWhiteBalancePreset(.auto) }
@@ -142,41 +137,40 @@ struct ThemeMenu<Value: Hashable>: View {
     let options: [(Value, String)]
     var onSelect: ((Value) -> Void)? = nil
     var body: some View {
-        NavigationLink {
-            ThemeChoiceList(title: title, selection: $selection, options: options, onSelect: onSelect)
-        } label: {
-            HStack {
-                Text(title).foregroundStyle(.primary)
-                Spacer(minLength: 12)
-                Text(options.first { $0.0 == selection }?.1 ?? "—")
-                    .foregroundStyle(theme).multilineTextAlignment(.trailing)
-            }.frame(minHeight: 44).contentShape(Rectangle())
-        }.tint(theme)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.subheadline.weight(.semibold))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: min(3, max(1, options.count))), spacing: 8) {
+                ForEach(options, id: \.0) { value, label in
+                    Button {
+                        selection = value
+                        onSelect?(value)
+                    } label: {
+                        Text(label)
+                            .font(.caption.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .padding(.horizontal, 4)
+                            .background(selection == value ? theme : Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                            .foregroundStyle(selection == value ? Color.black : Color.primary)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                    .accessibilityAddTraits(selection == value ? .isSelected : [])
+                }
+            }
+        }
     }
 }
 
-private struct ThemeChoiceList<Value: Hashable>: View {
-    @Environment(\.dismiss) private var dismiss
+struct SettingsPage<Content: View>: View {
     @Environment(\.cameraTint) private var theme
-    let title: String
-    @Binding var selection: Value
-    let options: [(Value, String)]
-    var onSelect: ((Value) -> Void)?
+    let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
     var body: some View {
-        List {
-            ForEach(options, id: \.0) { value, label in
-                Button {
-                    selection = value
-                    onSelect?(value)
-                    dismiss()
-                } label: {
-                    HStack {
-                        Text(label).foregroundStyle(.primary)
-                        Spacer()
-                        if selection == value { Image(systemName: "checkmark").foregroundStyle(theme) }
-                    }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-                }.buttonStyle(.plain)
-            }
-        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline).tint(theme)
+        ScrollView {
+            VStack(spacing: 18) { content }
+                .padding(.horizontal, 16).padding(.vertical, 14)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .tint(theme)
     }
 }
