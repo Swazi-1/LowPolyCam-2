@@ -90,7 +90,7 @@ final class CameraManager: NSObject, ObservableObject {
             let factor = self.snappedZoomFactor(requestedFactor, for: device)
             do {
                 try device.lockForConfiguration()
-                device.videoZoomFactor = factor
+                device.videoZoomFactor = self.deviceZoomFactor(for: factor, device: device)
                 device.unlockForConfiguration()
                 self.publish {
                     self.zoomFactor = factor
@@ -195,8 +195,9 @@ final class CameraManager: NSObject, ObservableObject {
             self.isTorchOn = device.torchMode == .on
             self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
             self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
-            self.zoomFactor = device.videoZoomFactor
-            self.zoomLabel = self.formattedZoomLabel(for: device.videoZoomFactor)
+            let displayedZoom = self.displayedZoomFactor(for: device.videoZoomFactor, device: device)
+            self.zoomFactor = displayedZoom
+            self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
@@ -220,11 +221,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func minimumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
-        max(0.5, device.minAvailableVideoZoomFactor)
+        max(0.5, displayedZoomFactor(for: device.minAvailableVideoZoomFactor, device: device))
     }
 
     private func maximumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
-        min(8, device.maxAvailableVideoZoomFactor)
+        min(8, displayedZoomFactor(for: device.maxAvailableVideoZoomFactor, device: device))
     }
 
     private func snappedZoomFactor(_ requestedFactor: CGFloat, for device: AVCaptureDevice) -> CGFloat {
@@ -246,7 +247,7 @@ final class CameraManager: NSObject, ObservableObject {
         let oneX = min(max(1, minimumSupportedZoom(for: device)), maximumSupportedZoom(for: device))
         do {
             try device.lockForConfiguration()
-            device.videoZoomFactor = oneX
+            device.videoZoomFactor = deviceZoomFactor(for: oneX, device: device)
             device.unlockForConfiguration()
             publish {
                 self.zoomFactor = oneX
@@ -255,6 +256,23 @@ final class CameraManager: NSObject, ObservableObject {
         } catch {
             showError("Couldn’t reset the zoom.")
         }
+    }
+
+    private func wideAngleDeviceZoomFactor(for device: AVCaptureDevice) -> CGFloat {
+        let hasUltraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+        guard hasUltraWide, let switchFactor = device.virtualDeviceSwitchOverVideoZoomFactors.first else {
+            return 1
+        }
+        return CGFloat(switchFactor.doubleValue)
+    }
+
+    private func displayedZoomFactor(for deviceZoomFactor: CGFloat, device: AVCaptureDevice) -> CGFloat {
+        deviceZoomFactor / wideAngleDeviceZoomFactor(for: device)
+    }
+
+    private func deviceZoomFactor(for displayedZoomFactor: CGFloat, device: AVCaptureDevice) -> CGFloat {
+        let requested = displayedZoomFactor * wideAngleDeviceZoomFactor(for: device)
+        return min(max(requested, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
     }
 
     private func formattedZoomLabel(for zoomFactor: CGFloat) -> String {
