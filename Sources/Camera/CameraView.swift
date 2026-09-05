@@ -9,7 +9,6 @@ struct CameraView: View {
         ZStack {
             CameraPreview(session: camera.session)
                 .ignoresSafeArea()
-                .gesture(zoomGesture)
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
@@ -70,8 +69,11 @@ struct CameraView: View {
         HStack {
             Color.clear.frame(width: 48, height: 48)
             Spacer()
-            VStack(spacing: 12) {
-                ZoomIndicator(zoomFactor: camera.zoomFactor)
+            VStack(spacing: 26) {
+                ZoomIndicator(label: camera.activeLensLabel)
+                    .contentShape(Rectangle())
+                    .frame(width: 150, height: 58)
+                    .gesture(zoomGesture)
                 RecordButton(isRecording: camera.isRecording) {
                     camera.startOrStopRecording()
                 }

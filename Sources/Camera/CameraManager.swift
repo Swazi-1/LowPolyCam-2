@@ -22,6 +22,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var minimumZoomFactor: CGFloat = 1
     @Published private(set) var maximumZoomFactor: CGFloat = 1
     @Published private(set) var zoomFactor: CGFloat = 1
+    @Published private(set) var activeLensLabel = "1×"
     @Published var statusMessage: String?
 
     @Published var selectedResolution: VideoResolution {
@@ -90,7 +91,11 @@ final class CameraManager: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 device.videoZoomFactor = factor
                 device.unlockForConfiguration()
-                self.publish { self.zoomFactor = factor }
+                let lensLabel = self.lensLabel(for: factor, minimumZoom: self.minimumSupportedZoom(for: device))
+                self.publish {
+                    self.zoomFactor = factor
+                    self.activeLensLabel = lensLabel
+                }
             } catch {
                 self.showError("Couldn’t change the zoom.")
             }
@@ -191,6 +196,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
             self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
             self.zoomFactor = device.videoZoomFactor
+            self.activeLensLabel = self.lensLabel(for: device.videoZoomFactor, minimumZoom: self.minimumSupportedZoom(for: device))
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
@@ -233,6 +239,10 @@ final class CameraManager: NSObject, ObservableObject {
             return 1
         }
         return clamped
+    }
+
+    private func lensLabel(for zoomFactor: CGFloat, minimumZoom: CGFloat) -> String {
+        minimumZoom <= 0.5 && zoomFactor < 0.75 ? "0.5×" : "1×"
     }
 
     private func availableResolutions(for device: AVCaptureDevice) -> [VideoResolution] {

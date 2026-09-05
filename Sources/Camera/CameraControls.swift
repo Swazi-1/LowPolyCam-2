@@ -40,23 +40,17 @@ struct RecordButton: View {
 }
 
 struct ZoomIndicator: View {
-    let zoomFactor: CGFloat
+    let label: String
 
     var body: some View {
-        Text(zoomText)
+        Text(label)
             .font(.system(.subheadline, design: .rounded).weight(.bold))
             .monospacedDigit()
             .padding(.horizontal, 13)
             .padding(.vertical, 7)
             .background(.black.opacity(0.42), in: Capsule())
             .foregroundStyle(.white)
-            .accessibilityLabel("Zoom \(zoomText)")
-    }
-
-    private var zoomText: String {
-        if abs(zoomFactor - 1) < 0.01 { return "1×" }
-        if abs(zoomFactor - 0.5) < 0.01 { return "0.5×" }
-        return String(format: "%.1f×", zoomFactor)
+            .accessibilityLabel("Active camera lens \(label)")
     }
 }
 
