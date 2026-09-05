@@ -39,6 +39,53 @@ struct RecordButton: View {
     }
 }
 
+struct PhotoButton: View {
+    let isCapturing: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .stroke(.white, lineWidth: 4)
+                    .frame(width: 76, height: 76)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 62, height: 62)
+                    .scaleEffect(isCapturing ? 0.86 : 1)
+            }
+            .animation(.easeOut(duration: 0.12), value: isCapturing)
+        }
+        .disabled(isCapturing)
+        .accessibilityLabel("Take photo")
+    }
+}
+
+struct CaptureModeSelector: View {
+    let selectedMode: CameraManager.CaptureMode
+    let isEnabled: Bool
+    let onSelect: (CameraManager.CaptureMode) -> Void
+
+    var body: some View {
+        HStack(spacing: 22) {
+            ForEach(CameraManager.CaptureMode.allCases) { mode in
+                Button {
+                    onSelect(mode)
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(selectedMode == mode ? .yellow : .white.opacity(0.65))
+                }
+                .disabled(!isEnabled)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+        .background(.black.opacity(0.34), in: Capsule())
+        .opacity(isEnabled ? 1 : 0.7)
+    }
+}
+
 struct ZoomIndicator: View {
     let label: String
 

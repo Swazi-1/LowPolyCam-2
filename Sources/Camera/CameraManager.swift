@@ -2,6 +2,13 @@ import AVFoundation
 import Photos
 
 final class CameraManager: NSObject, ObservableObject {
+    enum CaptureMode: String, CaseIterable, Identifiable {
+        case video = "VIDEO"
+        case photo = "PHOTO"
+
+        var id: String { rawValue }
+    }
+
     enum CameraPosition {
         case back
         case front
@@ -13,6 +20,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     @Published private(set) var isSessionRunning = false
     @Published private(set) var isRecording = false
+    @Published private(set) var isCapturingPhoto = false
+    @Published private(set) var captureMode: CaptureMode = .video
+    @Published private(set) var isFocusExposureLocked = false
+    @Published private(set) var exposureBias: Float = 0
     @Published private(set) var recordingDuration: TimeInterval = 0
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
@@ -35,10 +46,13 @@ final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.swazi.lowpolycam.camera")
     private let movieOutput = AVCaptureMovieFileOutput()
+    private let photoOutput = AVCapturePhotoOutput()
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
     private var recordingStartedAt: Date?
     private var requestedZoom: CGFloat = 1
+    private var exposureDragStartBias: Float = 0
+    private var pendingFocusLockWorkItem: DispatchWorkItem?
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
@@ -115,9 +129,59 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera() {
-        guard !isRecording else { return }
+        guard !isRecording, !isCapturingPhoto else { return }
         cameraPosition = cameraPosition == .back ? .front : .back
         sessionQueue.async { [weak self] in self?.reconfigureCamera() }
+    }
+
+    func selectCaptureMode(_ mode: CaptureMode) {
+        guard !isRecording, !isCapturingPhoto, captureMode != mode else { return }
+        captureMode = mode
+    }
+
+    func capturePhoto() {
+        guard captureMode == .photo, !isRecording, !isCapturingPhoto else { return }
+        isCapturingPhoto = true
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.beginPhotoCapture()
+        }
+    }
+
+    func focusAndExpose(at point: CGPoint) {
+        sessionQueue.async { [weak self] in
+            self?.configureFocusAndExposure(at: point, lockAfterFocusing: false)
+        }
+    }
+
+    func lockFocusAndExposure(at point: CGPoint) {
+        sessionQueue.async { [weak self] in
+            self?.configureFocusAndExposure(at: point, lockAfterFocusing: true)
+        }
+    }
+
+    func beginExposureAdjustment() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            self.exposureDragStartBias = device.exposureTargetBias
+        }
+    }
+
+    func adjustExposure(by deltaEV: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let target = min(max(self.exposureDragStartBias + deltaEV, device.minExposureTargetBias), device.maxExposureTargetBias)
+            do {
+                try device.lockForConfiguration()
+                device.setExposureTargetBias(target, completionHandler: nil)
+                device.unlockForConfiguration()
+                self.publish {
+                    self.exposureBias = target
+                }
+            } catch {
+                self.showError("Couldn’t adjust the exposure.")
+            }
+        }
     }
 
     func selectResolution(_ resolution: VideoResolution) {
@@ -131,6 +195,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func startOrStopRecording() {
+        guard captureMode == .video else { return }
         if isRecording {
             sessionQueue.async { [weak self] in self?.movieOutput.stopRecording() }
         } else {
@@ -151,8 +216,17 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         session.addOutput(movieOutput)
+
+        guard session.canAddOutput(photoOutput) else {
+            showError("Photo capture is unavailable on this device.")
+            return
+        }
+        photoOutput.maxPhotoQualityPrioritization = .quality
+        session.addOutput(photoOutput)
+
         updateCapabilities()
         applySelectedFormat()
+        resetFocusAndExposureState()
     }
 
     private func reconfigureCamera() {
@@ -168,6 +242,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         updateCapabilities()
         applySelectedFormat()
+        resetFocusAndExposureState()
     }
 
     @discardableResult
@@ -279,6 +354,108 @@ final class CameraManager: NSObject, ObservableObject {
     private func cameraSupportingCurrentQuality(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         capabilityDevices(for: position).first { device in
             device.formats.contains { format($0, supports: selectedResolution, at: selectedFrameRate) }
+        }
+    }
+
+    private func resetFocusAndExposureState() {
+        pendingFocusLockWorkItem?.cancel()
+        pendingFocusLockWorkItem = nil
+        guard let device = videoInput?.device else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.setExposureTargetBias(0, completionHandler: nil)
+            device.unlockForConfiguration()
+            publish {
+                self.isFocusExposureLocked = false
+                self.exposureBias = 0
+            }
+        } catch {
+            showError("Couldn’t reset focus and exposure.")
+        }
+    }
+
+    private func configureFocusAndExposure(at point: CGPoint, lockAfterFocusing: Bool) {
+        guard let device = videoInput?.device else { return }
+        pendingFocusLockWorkItem?.cancel()
+        pendingFocusLockWorkItem = nil
+
+        let clampedPoint = CGPoint(
+            x: min(max(point.x, 0), 1),
+            y: min(max(point.y, 0), 1)
+        )
+
+        do {
+            try device.lockForConfiguration()
+
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = clampedPoint
+            }
+            if device.isFocusModeSupported(.autoFocus) {
+                device.focusMode = .autoFocus
+            } else if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = clampedPoint
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            } else if device.isExposureModeSupported(.autoExpose) {
+                device.exposureMode = .autoExpose
+            }
+
+            device.unlockForConfiguration()
+            publish {
+                self.isFocusExposureLocked = false
+            }
+        } catch {
+            showError("Couldn’t set focus and exposure.")
+            return
+        }
+
+        guard lockAfterFocusing else { return }
+
+        let deviceID = device.uniqueID
+        let workItem = DispatchWorkItem { [weak self, weak device] in
+            guard let self, let device,
+                  self.videoInput?.device.uniqueID == deviceID else { return }
+            do {
+                try device.lockForConfiguration()
+                let canLockFocus = device.isFocusModeSupported(.locked)
+                let canLockExposure = device.isExposureModeSupported(.locked)
+                if canLockFocus {
+                    device.focusMode = .locked
+                }
+                if canLockExposure {
+                    device.exposureMode = .locked
+                }
+                device.unlockForConfiguration()
+                self.publish {
+                    self.isFocusExposureLocked = canLockFocus || canLockExposure
+                }
+            } catch {
+                self.showError("Couldn’t lock focus and exposure.")
+            }
+        }
+        pendingFocusLockWorkItem = workItem
+        sessionQueue.asyncAfter(deadline: .now() + 0.45, execute: workItem)
+    }
+
+    private func configurePhotoOutputForActiveFormat(_ device: AVCaptureDevice) {
+        guard let largest = device.activeFormat.supportedMaxPhotoDimensions.max(by: { lhs, rhs in
+            Int64(lhs.width) * Int64(lhs.height) < Int64(rhs.width) * Int64(rhs.height)
+        }) else { return }
+
+        if photoOutput.maxPhotoDimensions.width != largest.width ||
+            photoOutput.maxPhotoDimensions.height != largest.height {
+            photoOutput.maxPhotoDimensions = largest
         }
     }
 
@@ -406,6 +583,7 @@ final class CameraManager: NSObject, ObservableObject {
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
             device.unlockForConfiguration()
+            configurePhotoOutputForActiveFormat(device)
             let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
             let maximum = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
             publish {
@@ -435,6 +613,22 @@ final class CameraManager: NSObject, ObservableObject {
                 device.formats.contains { format($0, supports: resolution, at: rate) }
             }
         }
+    }
+
+    private func beginPhotoCapture() {
+        guard session.isRunning else {
+            publish { self.isCapturingPhoto = false }
+            showError("Camera isn’t ready yet.")
+            return
+        }
+
+        let settings = AVCapturePhotoSettings()
+        settings.photoQualityPrioritization = .quality
+        let dimensions = photoOutput.maxPhotoDimensions
+        if dimensions.width > 0, dimensions.height > 0 {
+            settings.maxPhotoDimensions = dimensions
+        }
+        photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
     private func beginRecording() {
@@ -490,6 +684,42 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             } else {
                 self?.showError(error?.localizedDescription ?? "Couldn’t save the video to Photos.")
             }
+        }
+    }
+}
+
+
+extension CameraManager: AVCapturePhotoCaptureDelegate {
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        if let error {
+            showError("Photo failed: \(error.localizedDescription)")
+            return
+        }
+
+        guard let data = photo.fileDataRepresentation() else {
+            showError("Couldn’t create the photo file.")
+            return
+        }
+
+        PHPhotoLibrary.shared().performChanges({
+            let request = PHAssetCreationRequest.forAsset()
+            request.addResource(with: .photo, data: data, options: nil)
+        }) { [weak self] success, error in
+            if success {
+                self?.publish { self?.statusMessage = "Photo saved to Photos" }
+            } else {
+                self?.showError(error?.localizedDescription ?? "Couldn’t save the photo to Photos.")
+            }
+        }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        publish {
+            self.isCapturingPhoto = false
+        }
+
+        if let error {
+            showError("Photo capture failed: \(error.localizedDescription)")
         }
     }
 }

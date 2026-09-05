@@ -7,8 +7,16 @@ struct CameraView: View {
 
     var body: some View {
         ZStack {
-            CameraPreview(session: camera.session)
-                .ignoresSafeArea()
+            CameraPreview(
+                session: camera.session,
+                isFocusExposureLocked: camera.isFocusExposureLocked,
+                exposureBias: camera.exposureBias,
+                onTapToFocus: { camera.focusAndExpose(at: $0) },
+                onLongPressToLock: { camera.lockFocusAndExposure(at: $0) },
+                onExposureDragBegan: { camera.beginExposureAdjustment() },
+                onExposureDragChanged: { camera.adjustExposure(by: $0) }
+            )
+            .ignoresSafeArea()
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
@@ -35,7 +43,7 @@ struct CameraView: View {
                         .padding(.vertical, 11)
                         .background(.black.opacity(0.75), in: Capsule())
                         .foregroundStyle(.white)
-                        .padding(.bottom, 132)
+                        .padding(.bottom, 176)
                 }
                 .transition(.opacity)
                 .task(id: message) {
@@ -59,7 +67,7 @@ struct CameraView: View {
                 camera.toggleTorch()
             }
             Spacer()
-            CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording, color: .white) {
+            CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
                 isShowingSettings = true
             }
         }
@@ -69,7 +77,7 @@ struct CameraView: View {
         HStack {
             Color.clear.frame(width: 48, height: 48)
             Spacer()
-            VStack(spacing: 26) {
+            VStack(spacing: 16) {
                 ZStack {
                     Color.clear
                     ZoomIndicator(label: camera.zoomLabel)
@@ -78,12 +86,25 @@ struct CameraView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 48)
                 .gesture(zoomGesture)
-                RecordButton(isRecording: camera.isRecording) {
-                    camera.startOrStopRecording()
+
+                CaptureModeSelector(
+                    selectedMode: camera.captureMode,
+                    isEnabled: !camera.isRecording && !camera.isCapturingPhoto,
+                    onSelect: { camera.selectCaptureMode($0) }
+                )
+
+                if camera.captureMode == .video {
+                    RecordButton(isRecording: camera.isRecording) {
+                        camera.startOrStopRecording()
+                    }
+                } else {
+                    PhotoButton(isCapturing: camera.isCapturingPhoto) {
+                        camera.capturePhoto()
+                    }
                 }
             }
             Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording, color: .white) {
+            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isCapturingPhoto, color: .white) {
                 camera.switchCamera()
             }
         }

@@ -22,9 +22,9 @@ targets:
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSCameraUsageDescription: LowPolyCam uses the camera to record your videos.
+        INFOPLIST_KEY_NSCameraUsageDescription: LowPolyCam uses the camera to take photos and record videos.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: LowPolyCam uses the microphone to record audio with your videos.
-        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: LowPolyCam saves your recorded videos to Photos.
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: LowPolyCam saves your photos and recorded videos to Photos.
         TARGETED_DEVICE_FAMILY: "1"
     scheme:
       testTargets: []
