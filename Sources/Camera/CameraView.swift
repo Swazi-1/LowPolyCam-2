@@ -93,8 +93,8 @@ struct CameraView: View {
                     dragStartZoom = camera.zoomFactor
                 }
                 guard let dragStartZoom else { return }
-                let screenWidth = max(UIScreen.main.bounds.width, 1)
-                let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * 4)
+                // The swipe area is narrow, so a full swipe across it should still reach 8×.
+                let requestedZoom = dragStartZoom - (value.translation.width * 0.047)
                 camera.setZoomFactor(requestedZoom)
             }
             .onEnded { _ in
