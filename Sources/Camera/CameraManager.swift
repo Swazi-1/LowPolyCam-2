@@ -22,7 +22,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var minimumZoomFactor: CGFloat = 1
     @Published private(set) var maximumZoomFactor: CGFloat = 1
     @Published private(set) var zoomFactor: CGFloat = 1
-    @Published private(set) var activeLensLabel = "1×"
+    @Published private(set) var zoomLabel = "1×"
     @Published var statusMessage: String?
 
     @Published var selectedResolution: VideoResolution {
@@ -54,6 +54,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.configureSessionIfNeeded()
+            self.resetZoomToOne()
             guard self.session.isRunning == false else { return }
             self.session.startRunning()
             self.publish { self.isSessionRunning = true }
@@ -91,10 +92,9 @@ final class CameraManager: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 device.videoZoomFactor = factor
                 device.unlockForConfiguration()
-                let lensLabel = self.lensLabel(for: factor, minimumZoom: self.minimumSupportedZoom(for: device))
                 self.publish {
                     self.zoomFactor = factor
-                    self.activeLensLabel = lensLabel
+                    self.zoomLabel = self.formattedZoomLabel(for: factor)
                 }
             } catch {
                 self.showError("Couldn’t change the zoom.")
@@ -196,7 +196,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
             self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
             self.zoomFactor = device.videoZoomFactor
-            self.activeLensLabel = self.lensLabel(for: device.videoZoomFactor, minimumZoom: self.minimumSupportedZoom(for: device))
+            self.zoomLabel = self.formattedZoomLabel(for: device.videoZoomFactor)
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
@@ -241,8 +241,26 @@ final class CameraManager: NSObject, ObservableObject {
         return clamped
     }
 
-    private func lensLabel(for zoomFactor: CGFloat, minimumZoom: CGFloat) -> String {
-        minimumZoom <= 0.5 && zoomFactor < 0.75 ? "0.5×" : "1×"
+    private func resetZoomToOne() {
+        guard let device = videoInput?.device else { return }
+        let oneX = min(max(1, minimumSupportedZoom(for: device)), maximumSupportedZoom(for: device))
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = oneX
+            device.unlockForConfiguration()
+            publish {
+                self.zoomFactor = oneX
+                self.zoomLabel = self.formattedZoomLabel(for: oneX)
+            }
+        } catch {
+            showError("Couldn’t reset the zoom.")
+        }
+    }
+
+    private func formattedZoomLabel(for zoomFactor: CGFloat) -> String {
+        abs(zoomFactor.rounded() - zoomFactor) < 0.01
+            ? "\(Int(zoomFactor.rounded()))×"
+            : String(format: "%.1f×", zoomFactor)
     }
 
     private func availableResolutions(for device: AVCaptureDevice) -> [VideoResolution] {

@@ -70,7 +70,7 @@ struct CameraView: View {
             Color.clear.frame(width: 48, height: 48)
             Spacer()
             VStack(spacing: 26) {
-                ZoomIndicator(label: camera.activeLensLabel)
+                ZoomIndicator(label: camera.zoomLabel)
                     .contentShape(Rectangle())
                     .frame(width: 150, height: 58)
                     .gesture(zoomGesture)
