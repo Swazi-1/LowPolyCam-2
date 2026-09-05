@@ -60,7 +60,7 @@ struct CameraView: View {
                 camera.toggleTorch()
             }
             Spacer()
-            CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording) {
+            CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording, color: .white) {
                 isShowingSettings = true
             }
         }
@@ -77,7 +77,7 @@ struct CameraView: View {
                 }
             }
             Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording) {
+            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording, color: .white) {
                 camera.switchCamera()
             }
         }
