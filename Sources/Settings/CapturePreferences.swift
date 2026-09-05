@@ -48,6 +48,7 @@ struct CameraAccent: DynamicProperty {
 
 struct CapturePreferencesView: View {
     @ObservedObject var camera: CameraManager
+    init(camera: CameraManager) { self.camera = camera }
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("splitMinutes") private var splitMinutes = 0
     @AppStorage("hapticCaptureEnabled") private var haptics = true

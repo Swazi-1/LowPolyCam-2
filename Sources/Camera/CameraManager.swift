@@ -215,6 +215,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.resetZoomToOne()
             guard self.session.isRunning == false else { return }
             self.session.startRunning()
+            try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
         }
     }
@@ -245,6 +246,7 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self else { return }
             if !self.session.isRunning, self.videoInput != nil {
                 self.session.startRunning()
+                try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
                 self.publish { self.isSessionRunning = true }
             }
             self.synchronizeTorchState()
