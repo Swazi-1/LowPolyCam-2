@@ -110,6 +110,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingPhotoFilename: String?
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
+    private var isUsingSmoothPreviewFallback = false
 
     private static let resolutionKey = "selectedVideoResolution"
     private static let frameRateKey = "selectedVideoFrameRate"
@@ -518,7 +519,18 @@ final class CameraManager: NSObject, ObservableObject {
             case .sloMo:
                 device = cameraSupportingSlowMotion(for: position) ?? preferredCamera(for: position)
             case .video:
-                device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
+                if position == .back,
+                   requestedWhiteBalancePreset == .auto,
+                   let preferred = preferredCamera(for: position),
+                   preferred.isVirtualDevice {
+                    // Keep the rear virtual camera attached while idle. If the selected recording
+                    // quality isn't available on the virtual device (notably 4K60 on some iPhones),
+                    // applySelectedFormat uses a smooth 1080p60 preview and switches to the true
+                    // recording format only when recording begins.
+                    device = preferred
+                } else {
+                    device = cameraSupportingCurrentQuality(for: position) ?? preferredCamera(for: position)
+                }
             case .photo:
                 device = preferredCamera(for: position)
             }
@@ -1097,13 +1109,83 @@ final class CameraManager: NSObject, ObservableObject {
         return (resolution, frameRate, rates)
     }
 
-    private func applySelectedFormat(preferVirtualCamera: Bool = true) {
+    private func applySelectedFormat(preferVirtualCamera: Bool = true, allowSmoothPreviewFallback: Bool = true) {
         guard let currentDevice = videoInput?.device else { return }
         let devices = capabilityDevices(for: currentDevice.position)
-        let selection = validSelection(for: devices, availableResolutions: availableResolutions(for: devices))
+        let available = availableResolutions(for: devices)
+        let selection = validSelection(for: devices, availableResolutions: available)
         let supportedDevices = devices.filter { device in
             device.formats.contains { self.format($0, supports: selection.resolution, at: selection.frameRate) }
         }
+
+        publish {
+            self.selectedResolution = selection.resolution
+            self.selectedFrameRate = selection.frameRate
+            self.supportedFrameRates = selection.supportedFrameRates
+        }
+
+        // 4K60 is expensive enough that lens changes can stall the live preview even when the
+        // selected quality is otherwise valid. Replacing wide <-> ultra-wide inputs is worse.
+        // While idle, deliberately use the same virtual-camera/1080p60 preview path that was
+        // smooth in 1080p60, then switch once to the true selected format before recording.
+        let forceSmooth4K60Preview = selection.resolution == .p4k && selection.frameRate == .fps60
+
+        if allowSmoothPreviewFallback,
+           preferVirtualCamera,
+           !movieOutput.isRecording,
+           currentDevice.position == .back,
+           requestedWhiteBalancePreset == .auto,
+           let virtualDevice = devices.first(where: { $0.isVirtualDevice }),
+           forceSmooth4K60Preview ||
+               supportedDevices.contains(where: { $0.uniqueID == virtualDevice.uniqueID }) == false,
+           let previewFormat = smoothPreviewFormat(for: virtualDevice, preferredFrameRate: selection.frameRate) {
+
+            let switchedDevice = virtualDevice.uniqueID != currentDevice.uniqueID
+            if switchedDevice, replaceVideoInput(with: virtualDevice) == false {
+                showError("Couldn’t prepare the smooth camera preview.")
+                return
+            }
+
+            guard let device = videoInput?.device else { return }
+            let requestedRate = Double(selection.frameRate.rawValue)
+            let range = previewFormat.videoSupportedFrameRateRanges.first {
+                $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
+            }
+            let actualRate = min(max(requestedRate, range?.minFrameRate ?? requestedRate), range?.maxFrameRate ?? requestedRate)
+
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = previewFormat
+                let duration = CMTimeMakeWithSeconds(1 / actualRate, preferredTimescale: 60_000)
+                device.activeVideoMinFrameDuration = duration
+                device.activeVideoMaxFrameDuration = duration
+                let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
+                device.cancelVideoZoomRamp()
+                device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
+                device.unlockForConfiguration()
+
+                isUsingSmoothPreviewFallback = true
+                configureMovieOutputSettings()
+                publish {
+                    self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
+                    self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
+                    self.zoomFactor = displayedZoom
+                    self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
+                    self.torchAvailable = device.hasTorch
+                    self.isTorchOn = device.torchMode == .on
+                }
+                if switchedDevice {
+                    resetFocusAndExposureState()
+                }
+                return
+            } catch {
+                showError("Couldn’t configure the smooth camera preview.")
+                return
+            }
+        }
+
+        isUsingSmoothPreviewFallback = false
+
         let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1 ? .builtInUltraWideCamera : .builtInWideAngleCamera
         let desiredDevice = preferVirtualCamera
             ? (supportedDevices.first(where: { $0.isVirtualDevice })
@@ -1123,30 +1205,31 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        guard let device = videoInput?.device else { return }
-        publish {
-            self.selectedResolution = selection.resolution
-            self.selectedFrameRate = selection.frameRate
-            self.supportedFrameRates = selection.supportedFrameRates
-        }
-        guard let format = device.formats.first(where: {
-            self.format($0, supports: selection.resolution, at: selection.frameRate)
-        }) else {
+        guard let device = videoInput?.device,
+              let format = device.formats.first(where: {
+                  self.format($0, supports: selection.resolution, at: selection.frameRate)
+              }) else {
             showError("This video quality isn’t available on this camera.")
             return
         }
+
         do {
-            try device.lockForConfiguration()
-            device.activeFormat = format
             let requestedRate = Double(selection.frameRate.rawValue)
             let range = format.videoSupportedFrameRateRanges.first {
                 $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
             }
             let actualRate = min(max(requestedRate, range?.minFrameRate ?? requestedRate), range?.maxFrameRate ?? requestedRate)
+
+            try device.lockForConfiguration()
+            device.activeFormat = format
             let duration = CMTimeMakeWithSeconds(1 / actualRate, preferredTimescale: 60_000)
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
+            let displayedZoom = snappedZoomFactor(requestedZoom, for: device)
+            device.cancelVideoZoomRamp()
+            device.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: device)
             device.unlockForConfiguration()
+
             configurePhotoOutputForActiveFormat(device)
             configureMovieOutputSettings()
             let minimum = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
@@ -1154,6 +1237,8 @@ final class CameraManager: NSObject, ObservableObject {
             publish {
                 self.minimumZoomFactor = minimum
                 self.maximumZoomFactor = maximum
+                self.zoomFactor = displayedZoom
+                self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
                 self.torchAvailable = device.hasTorch
                 self.isTorchOn = device.torchMode == .on
             }
@@ -1162,6 +1247,40 @@ final class CameraManager: NSObject, ObservableObject {
             }
         } catch {
             showError("Couldn’t set the video quality.")
+        }
+    }
+
+    private func smoothPreviewFormat(for device: AVCaptureDevice, preferredFrameRate: VideoFrameRate) -> AVCaptureDevice.Format? {
+        let requestedRate = Double(preferredFrameRate.rawValue)
+
+        // Match the smooth 1080p path first. The phone display doesn't need a 4K live preview;
+        // keeping this at the selected frame rate avoids the 4K60 physical-input swap jitter.
+        for resolution in [VideoResolution.p1080, .p720] {
+            if let format = device.formats.first(where: {
+                self.format($0, supports: resolution, at: preferredFrameRate)
+            }) {
+                return format
+            }
+        }
+
+        // Last-resort virtual preview: keep the requested FPS even if the device exposes a
+        // nonstandard preview size.
+        return device.formats.first(where: { format in
+            format.videoSupportedFrameRateRanges.contains {
+                $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
+            }
+        })
+    }
+
+    private func activeVideoFormatMatchesSelection() -> Bool {
+        guard let device = videoInput?.device else { return false }
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard dimensions.width == selectedResolution.dimensions.width,
+              dimensions.height == selectedResolution.dimensions.height else { return false }
+
+        let requestedRate = Double(selectedFrameRate.rawValue)
+        return device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
         }
     }
 
@@ -1352,6 +1471,18 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func beginRecording() {
         guard session.isRunning, movieOutput.isRecording == false else { return }
+
+        if captureMode == .video, isUsingSmoothPreviewFallback {
+            applySelectedFormat(
+                preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
+                allowSmoothPreviewFallback: false
+            )
+            guard activeVideoFormatMatchesSelection() else {
+                showError("Couldn’t prepare the selected recording quality.")
+                return
+            }
+        }
+
         configureMovieOutputSettings()
         refreshAvailableStorage()
         let filename = nextMediaFilename(fileExtension: "mov")
@@ -1410,6 +1541,16 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             self.recordingDuration = 0
             self.recordingStartedAt = nil
             self.durationTimer?.invalidate()
+        }
+
+        if captureMode == .video {
+            sessionQueue.async { [weak self] in
+                guard let self, !self.movieOutput.isRecording else { return }
+                self.applySelectedFormat(
+                    preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput,
+                    allowSmoothPreviewFallback: true
+                )
+            }
         }
 
         if let error {

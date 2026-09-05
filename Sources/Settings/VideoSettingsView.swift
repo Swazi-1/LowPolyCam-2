@@ -3,15 +3,6 @@ import SwiftUI
 struct VideoSettingsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("cameraGridEnabled") private var isGridEnabled = false
-    @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
-    @AppStorage("cameraHUDResolution") private var hudResolution = true
-    @AppStorage("cameraHUDFPS") private var hudFPS = true
-    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
-    @AppStorage("cameraHUDZoom") private var hudZoom = false
-    @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
-    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
-    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
 
     var body: some View {
         NavigationStack {
@@ -21,37 +12,37 @@ struct VideoSettingsView: View {
 
                     switch camera.captureMode {
                     case .video:
-                        videoSettings
+                        videoQualitySettings
                     case .sloMo:
                         slowMotionSettings
                     case .photo:
                         photoSettings
                     }
 
-                    hudSettings
-
-                    SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
-                        SettingsToggleRow(
-                            title: "Grid",
-                            subtitle: "Show a 3×3 composition grid",
-                            isOn: $isGridEnabled
-                        )
-                    }
-
-                    SettingsCard(title: "Camera Experience", symbol: "sparkles") {
-                        SettingsToggleRow(
-                            title: "Haptic Capture",
-                            subtitle: camera.captureMode == .photo ? "Feel a tap when taking a photo" : "Feel a tap when starting or stopping recording",
-                            isOn: $isHapticCaptureEnabled
-                        )
+                    SettingsCard(title: "More Settings", symbol: "slider.horizontal.3") {
+                        NavigationLink {
+                            CameraSettingsMenu(camera: camera)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Camera",
+                                subtitle: "Viewfinder, stabilization and camera behavior",
+                                symbol: "camera.fill"
+                            )
+                        }
+                        .buttonStyle(.plain)
 
                         SettingsDivider()
 
-                        SettingsToggleRow(
-                            title: "Keep Screen Awake",
-                            subtitle: "Prevent Auto-Lock while LowPolyCam is open",
-                            isOn: $keepScreenAwakeEnabled
-                        )
+                        NavigationLink {
+                            CameraHUDSettingsMenu(camera: camera)
+                        } label: {
+                            SettingsNavigationRow(
+                                title: "Camera HUD",
+                                subtitle: "Choose what appears in the top info pill",
+                                symbol: "capsule.fill"
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -90,8 +81,7 @@ struct VideoSettingsView: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    @ViewBuilder
-    private var videoSettings: some View {
+    private var videoQualitySettings: some View {
         SettingsCard(title: "Video Quality", symbol: "video.fill") {
             SettingsPickerRow(
                 title: "Resolution",
@@ -111,20 +101,8 @@ struct VideoSettingsView: View {
                 onSelect: camera.selectFrameRate
             )
         }
-
-        SettingsCard(title: "Recording", symbol: "record.circle") {
-            SettingsToggleRow(
-                title: "Stabilization",
-                subtitle: "Use automatic video stabilization when supported",
-                isOn: Binding(
-                    get: { camera.isVideoStabilizationEnabled },
-                    set: { camera.setVideoStabilizationEnabled($0) }
-                )
-            )
-        }
     }
 
-    @ViewBuilder
     private var slowMotionSettings: some View {
         SettingsCard(title: "Slo-Mo Quality", symbol: "slowmo") {
             if camera.supportedSlowMotionResolutions.isEmpty {
@@ -174,65 +152,171 @@ struct VideoSettingsView: View {
         }
     }
 
-    private var hudSettings: some View {
-        SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
-            SettingsToggleRow(
-                title: "Show Camera HUD",
-                subtitle: "Compact live info between the flash and Settings buttons",
-                isOn: $isHUDEnabled
-            )
-
-            if isHUDEnabled {
-                SettingsDivider()
-
-                SettingsToggleRow(
-                    title: "Resolution",
-                    subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show current video resolution",
-                    isOn: $hudResolution
-                )
-
-                if camera.captureMode != .photo {
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title: "FPS",
-                        subtitle: camera.captureMode == .sloMo ? "Show the selected Slo-Mo frame rate" : "Show the selected video frame rate",
-                        isOn: $hudFPS
-                    )
-                }
-
-                SettingsDivider()
-
-                SettingsToggleRow(
-                    title: camera.captureMode == .photo ? "Photos Remaining" : "Recording Time Remaining",
-                    subtitle: camera.captureMode == .photo ? "Estimate how many more photos fit on the device" : "Estimate recording time from available storage and current quality",
-                    isOn: $hudRemaining
-                )
-
-                SettingsDivider()
-
-                SettingsToggleRow(
-                    title: "Zoom",
-                    subtitle: "Show the current zoom value",
-                    isOn: $hudZoom
-                )
-
-                SettingsDivider()
-
-                SettingsToggleRow(
-                    title: "White Balance",
-                    subtitle: "Show the active white-balance preset",
-                    isOn: $hudWhiteBalance
-                )
-            }
-        }
-    }
-
     private var modeSymbol: String {
         switch camera.captureMode {
         case .video: return "video.fill"
         case .photo: return "camera.fill"
         case .sloMo: return "slowmo"
         }
+    }
+}
+
+private struct CameraSettingsMenu: View {
+    @ObservedObject var camera: CameraManager
+    @AppStorage("cameraGridEnabled") private var isGridEnabled = false
+    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
+    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
+    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
+                    SettingsToggleRow(
+                        title: "Grid",
+                        subtitle: "Show a 3×3 composition grid",
+                        isOn: $isGridEnabled
+                    )
+
+                    SettingsDivider()
+
+                    SettingsToggleRow(
+                        title: "Level Meter",
+                        subtitle: "Show the live horizon level in the preview",
+                        isOn: $isLevelMeterEnabled
+                    )
+                }
+
+                if camera.captureMode == .video {
+                    SettingsCard(title: "Recording", symbol: "record.circle") {
+                        SettingsToggleRow(
+                            title: "Stabilization",
+                            subtitle: "Use automatic video stabilization when supported",
+                            isOn: Binding(
+                                get: { camera.isVideoStabilizationEnabled },
+                                set: { camera.setVideoStabilizationEnabled($0) }
+                            )
+                        )
+                    }
+                }
+
+                SettingsCard(title: "Camera Experience", symbol: "sparkles") {
+                    SettingsToggleRow(
+                        title: "Haptic Capture",
+                        subtitle: camera.captureMode == .photo ? "Feel a tap when taking a photo" : "Feel a tap when starting or stopping recording",
+                        isOn: $isHapticCaptureEnabled
+                    )
+
+                    SettingsDivider()
+
+                    SettingsToggleRow(
+                        title: "Keep Screen Awake",
+                        subtitle: "Prevent Auto-Lock while LowPolyCam is open",
+                        isOn: $keepScreenAwakeEnabled
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Camera")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct CameraHUDSettingsMenu: View {
+    @ObservedObject var camera: CameraManager
+    @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
+    @AppStorage("cameraHUDResolution") private var hudResolution = true
+    @AppStorage("cameraHUDFPS") private var hudFPS = true
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
+    @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
+                    SettingsToggleRow(
+                        title: "Show Camera HUD",
+                        subtitle: "Compact live info between Flash and Settings",
+                        isOn: $isHUDEnabled
+                    )
+                }
+
+                if isHUDEnabled {
+                    SettingsCard(title: "HUD Information", symbol: "text.line.first.and.arrowtriangle.forward") {
+                        SettingsToggleRow(
+                            title: "Resolution",
+                            subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show selected video resolution",
+                            isOn: $hudResolution
+                        )
+
+                        if camera.captureMode != .photo {
+                            SettingsDivider()
+                            SettingsToggleRow(
+                                title: "FPS",
+                                subtitle: camera.captureMode == .sloMo ? "Show selected Slo-Mo frame rate" : "Show selected video frame rate",
+                                isOn: $hudFPS
+                            )
+                        }
+
+                        SettingsDivider()
+
+                        SettingsToggleRow(
+                            title: camera.captureMode == .photo ? "Photos Remaining" : "Recording Time Remaining",
+                            subtitle: camera.captureMode == .photo ? "Estimate how many more photos fit on the device" : "Estimate recording time from available storage and current quality",
+                            isOn: $hudRemaining
+                        )
+
+                        SettingsDivider()
+
+                        SettingsToggleRow(
+                            title: "White Balance",
+                            subtitle: "Show the active white-balance preset",
+                            isOn: $hudWhiteBalance
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Camera HUD")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct SettingsNavigationRow: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .frame(width: 34, height: 34)
+                .background(.yellow.opacity(0.13), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
     }
 }
 
@@ -309,6 +393,7 @@ private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
                         Text(label(option))
                             .font(.caption.weight(.semibold))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.82)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 9)
                             .background(

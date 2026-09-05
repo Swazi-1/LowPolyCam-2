@@ -11,7 +11,6 @@ struct CameraView: View {
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
-    @AppStorage("cameraHUDZoom") private var hudZoom = false
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
     @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
@@ -166,7 +165,6 @@ struct CameraView: View {
                         showResolution: hudResolution,
                         showFPS: hudFPS,
                         showRemaining: hudRemaining,
-                        showZoom: hudZoom,
                         showWhiteBalance: hudWhiteBalance,
                         maxWidth: hudMaxWidth
                     )
@@ -207,15 +205,6 @@ struct CameraView: View {
                         camera.capturePhoto()
                     }
                 } else {
-                    if camera.captureMode == .sloMo {
-                        Text(camera.selectedSlowMotionFrameRate.label.uppercased())
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.75))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.32), in: Capsule())
-                    }
-
                     RecordButton(isRecording: camera.isRecording) {
                         captureHaptic()
                         camera.startOrStopRecording()
