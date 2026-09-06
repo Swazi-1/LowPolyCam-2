@@ -524,22 +524,34 @@ final class CameraManager: NSObject, ObservableObject {
                 let wantsDifferentLens = desiredPhysical?.uniqueID != currentDevice.uniqueID
 
                 if wantsDifferentLens {
-                    if self.movieOutput.isRecording || self.isRecordingStarting {
+                    let recordingOrStarting = self.movieOutput.isRecording || self.isRecordingStarting
+                    if recordingOrStarting && self.captureMode != .video {
                         self.showError("Stop recording to switch physical lenses.")
                         return
                     }
 
-                    let previousRequested = self.requestedZoom
-                    self.requestedZoom = requested
-                    guard self.isLatestZoomRequest(requestID),
-                          self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput),
-                          self.isLatestZoomRequest(requestID) else {
-                        self.requestedZoom = previousRequested
+                    // Normal Video locks the physical lens for the whole recording. If recording
+                    // started on 0.5x Ultra Wide (or another physical rear lens), crossing an
+                    // optical lens boundary simply digitally zooms/crops that same sensor instead
+                    // of rebuilding the capture input mid-recording. This keeps zoom continuous and
+                    // avoids the old “Stop recording to switch physical lenses” interruption.
+                    if !recordingOrStarting {
+                        let previousRequested = self.requestedZoom
+                        self.requestedZoom = requested
+                        guard self.isLatestZoomRequest(requestID),
+                              self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput),
+                              self.isLatestZoomRequest(requestID) else {
+                            self.requestedZoom = previousRequested
+                            return
+                        }
+                        // applyActiveModeFormat already applied and published the snapped zoom on the
+                        // correct physical lens. Do not queue a second ramp after the lens switch.
                         return
                     }
-                    // applyActiveModeFormat already applied and published the snapped zoom on the
-                    // correct physical lens. Do not queue a second ramp after the lens switch.
-                    return
+
+                    // Video recording continues below using the currently active physical lens.
+                    // deviceZoomFactor(for:) maps the displayed zoom into that sensor's digital crop.
+                    
                 }
             }
 
