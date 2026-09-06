@@ -618,8 +618,9 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func configureLiveMetrics() {
-        let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats")
+        let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats") && captureMode != .photo
         let attached = session.outputs.contains { $0 === liveMetrics.output }
+        guard wanted != attached else { return }
         session.beginConfiguration()
         if wanted && !attached && session.canAddOutput(liveMetrics.output) { session.addOutput(liveMetrics.output) }
         if !wanted && attached { session.removeOutput(liveMetrics.output) }
@@ -651,7 +652,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.publish {
                 self.liveFPS = attached ? measurement.fps : nil
                 self.liveMbps = mbps
-                self.liveCaptureDrops = attached ? measurement.drops : nil
+                self.liveCaptureDrops = attached && measurement.fps != nil ? measurement.drops : nil
             }
         }
         metricsTimer = timer
@@ -1451,6 +1452,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func applyActiveModeFormat(preferVirtualCamera: Bool = true) -> Bool {
+        configureLiveMetrics()
         switch captureMode {
         case .photo:
             return applyBestPhotoFormat(preferVirtualCamera: preferVirtualCamera)
