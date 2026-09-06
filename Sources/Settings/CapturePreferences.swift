@@ -75,7 +75,8 @@ struct CapturePreferencesView: View {
                     title: "Haptic Strength",
                     selection: $strength,
                     options: ["Low", "Medium", "Strong"].map { ($0, $0) },
-                    onSelect: { CameraHaptics.fire(strength: $0) }
+                    onSelect: { CameraHaptics.preview(strength: $0) },
+                    firesActionOnReselect: true
                 )
                 .disabled(!haptics)
                 if !haptics {

@@ -10,6 +10,7 @@ struct SettingsSelectionControl<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(Value, String)]
     var onSelect: ((Value) -> Void)? = nil
+    var firesActionOnReselect = false
 
     private var currentLabel: String {
         options.first(where: { $0.0 == selection })?.1 ?? "—"
@@ -96,7 +97,10 @@ struct SettingsSelectionControl<Value: Hashable>: View {
     }
 
     private func commit(_ value: Value) {
-        guard value != selection else { return }
+        if value == selection {
+            if firesActionOnReselect { onSelect?(value) }
+            return
+        }
         selection = value
         onSelect?(value)
     }
@@ -110,13 +114,15 @@ struct ThemeMenu<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(Value, String)]
     var onSelect: ((Value) -> Void)? = nil
+    var firesActionOnReselect = false
 
     var body: some View {
         SettingsSelectionControl(
             title: title,
             selection: $selection,
             options: options,
-            onSelect: onSelect
+            onSelect: onSelect,
+            firesActionOnReselect: firesActionOnReselect
         )
     }
 }

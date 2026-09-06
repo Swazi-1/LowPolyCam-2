@@ -25,4 +25,26 @@ enum CameraHaptics {
             DispatchQueue.main.async(execute: perform)
         }
     }
+    /// Settings preview is deliberately separate from capture feedback. A fresh generator makes
+    /// the selected style immediately obvious and allows re-tapping the current choice to preview
+    /// it again without depending on UserDefaults propagation timing.
+    static func preview(strength: String) {
+        let perform = {
+            let style: UIImpactFeedbackGenerator.FeedbackStyle
+            switch strength {
+            case "Low": style = .light
+            case "Strong": style = .heavy
+            default: style = .medium
+            }
+            let generator = UIImpactFeedbackGenerator(style: style)
+            generator.prepare()
+            generator.impactOccurred(intensity: 1)
+        }
+        if Thread.isMainThread {
+            perform()
+        } else {
+            DispatchQueue.main.async(execute: perform)
+        }
+    }
+
 }

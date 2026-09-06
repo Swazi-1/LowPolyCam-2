@@ -325,18 +325,22 @@ struct CameraView: View {
             .onChanged { value in
                 if dragStartZoom == nil {
                     dragStartZoom = camera.zoomFactor
+                    camera.beginInteractiveZoom()
                 }
                 guard let dragStartZoom else { return }
                 let screenWidth = max(zoomWidth, 1)
                 let zoomRange = camera.maximumZoomFactor - camera.minimumZoomFactor
                 let requestedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange * zoomSpeed)
-                camera.setZoomFactor(requestedZoom)
+                camera.updateInteractiveZoom(requestedZoom)
             }
             .onEnded { value in
-                if tapZoomReset, abs(value.translation.width) < 4, abs(value.translation.height) < 4 {
-                    camera.setZoomFactor(1)
-                }
-                dragStartZoom = nil
+                guard let dragStartZoom else { return }
+                let screenWidth = max(zoomWidth, 1)
+                let zoomRange = camera.maximumZoomFactor - camera.minimumZoomFactor
+                let draggedZoom = dragStartZoom - (value.translation.width / screenWidth * zoomRange * zoomSpeed)
+                let isTap = abs(value.translation.width) < 4 && abs(value.translation.height) < 4
+                camera.endInteractiveZoom(tapZoomReset && isTap ? 1 : draggedZoom)
+                self.dragStartZoom = nil
             }
     }
 

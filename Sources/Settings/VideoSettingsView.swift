@@ -293,6 +293,17 @@ private struct PhotoResolutionPicker: View {
         camera.supportedPhotoResolutions.first { $0.id == camera.selectedPhotoResolutionID }
     }
 
+    private var maximumOptionLabel: String {
+        guard let maximum = camera.supportedPhotoResolutions.first(where: { $0.id == "max" }) else {
+            return "MAX"
+        }
+        return "MAX · \(PhotoResolutionCatalog.label(for: maximum.dimensions))"
+    }
+
+    private func label(for option: CameraManager.PhotoResolutionOption) -> String {
+        option.id == "max" ? maximumOptionLabel : option.label
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -314,15 +325,15 @@ private struct PhotoResolutionPicker: View {
                             camera.selectPhotoResolution(option)
                         } label: {
                             if option.id == camera.selectedPhotoResolutionID {
-                                Label(option.label, systemImage: "checkmark")
+                                Label(label(for: option), systemImage: "checkmark")
                             } else {
-                                Text(option.label)
+                                Text(label(for: option))
                             }
                         }
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Text(selectedOption?.id == "max" ? "Max · \(camera.currentPhotoResolutionLabel)" : (selectedOption?.label ?? camera.currentPhotoResolutionLabel))
+                        Text(selectedOption.map { label(for: $0) } ?? camera.currentPhotoResolutionLabel)
                             .font(.caption.weight(.bold))
                             .lineLimit(1)
                         Image(systemName: "chevron.up.chevron.down")

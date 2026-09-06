@@ -15,13 +15,22 @@ enum CameraZoomController {
         currentDevice: AVCaptureDevice,
         availableDevices: [AVCaptureDevice],
         mode: CameraManager.CaptureMode,
-        recordingOrStarting: Bool
+        recordingOrStarting: Bool,
+        preferCurrentDeviceWhenPossible: Bool = false
     ) -> RequestPlan {
         guard currentDevice.position == .back else {
             return .applyToCurrentDevice(displayedZoom)
         }
 
         let desired = desiredPhysicalDevice(in: availableDevices, displayedZoom: displayedZoom)
+
+        // During a continuous drag, do not exchange physical inputs if the current sensor can
+        // already represent the requested field of view digitally. This keeps 4K60/HFR zoom
+        // responsive under load and defers the optical handoff until the gesture settles.
+        if preferCurrentDeviceWhenPossible,
+           activeDisplayedZoomRange(for: currentDevice).contains(displayedZoom) {
+            return .applyToCurrentDevice(displayedZoom)
+        }
 
         if currentDevice.isVirtualDevice {
             // A virtual camera is not proof that every constituent lens participates in the

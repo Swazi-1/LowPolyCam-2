@@ -688,7 +688,34 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func beginInteractiveZoom() {
+        // Usually already warm from the last successful configuration. This fallback makes a
+        // gesture started immediately after launch pay discovery work before its first update,
+        // not repeatedly during the drag.
+        let requestSnapshot = makeConfigurationRequest()
+        sessionQueue.async { [weak self] in
+            guard let self, !self.pendingSessionRecovery else { return }
+            _ = self.legalZoomDevicesForCurrentMode(request: requestSnapshot)
+        }
+    }
+
+    func updateInteractiveZoom(_ requestedFactor: CGFloat) {
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false)
+    }
+
+    func endInteractiveZoom(_ requestedFactor: CGFloat) {
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false)
+    }
+
     func setZoomFactor(_ requestedFactor: CGFloat) {
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: true)
+    }
+
+    private func enqueueZoomRequest(
+        _ requestedFactor: CGFloat,
+        settleOpticalRoute: Bool,
+        animate: Bool
+    ) {
         let requestID = requestGate.next(.zoom)
         let requestSnapshot = makeConfigurationRequest(displayedZoom: requestedFactor)
         sessionQueue.async { [weak self] in
@@ -705,12 +732,17 @@ final class CameraManager: NSObject, ObservableObject {
             let domainDevices = recordingOrStarting ? [currentDevice] : legalDevices
             let domain = CameraZoomController.displayedZoomDomain(for: domainDevices, currentDevice: currentDevice)
             let requested = CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
+            let isHighBandwidthRearZoom = requestSnapshot.position == .back && (
+                requestSnapshot.mode == .sloMo ||
+                (requestSnapshot.mode == .video && requestSnapshot.resolution == .p4k && requestSnapshot.frameRate == .fps60)
+            )
             let plan = CameraZoomController.planRequest(
                 displayedZoom: requested,
                 currentDevice: currentDevice,
                 availableDevices: legalDevices,
                 mode: requestSnapshot.mode,
-                recordingOrStarting: recordingOrStarting
+                recordingOrStarting: recordingOrStarting,
+                preferCurrentDeviceWhenPossible: (!settleOpticalRoute || recordingOrStarting) && isHighBandwidthRearZoom
             )
 
             switch plan {
@@ -749,14 +781,27 @@ final class CameraManager: NSObject, ObservableObject {
                 guard self.requestGate.isCurrent(requestID),
                       let device = self.videoInput?.device else { return }
                 let factor = CameraZoomController.snappedDisplayedZoom(targetZoom, for: device)
+                if !animate, abs(factor - self.requestedZoom) < 0.001 { return }
+                let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
+
                 do {
-                    try device.lockForConfiguration()
-                    let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
-                    device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
-                    device.unlockForConfiguration()
+                    if abs(device.videoZoomFactor - deviceFactor) >= 0.001 {
+                        try device.lockForConfiguration()
+                        defer { device.unlockForConfiguration() }
+                        if animate || !isHighBandwidthRearZoom {
+                            // Preserve the known-good normal Video/Photo/front-camera feel.
+                            device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
+                        } else {
+                            // Restarting ramp(to:) for every DragGesture sample is visibly choppy on
+                            // rear 4K60/HFR. Those high-bandwidth modes track the finger directly;
+                            // optical routing is settled once the gesture finishes.
+                            if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+                            device.videoZoomFactor = deviceFactor
+                        }
+                    }
                     guard self.requestGate.isCurrent(requestID) else { return }
                     self.requestedZoom = factor
-                    self.publish {
+                    self.publishIfCurrent(requestID) {
                         self.zoomFactor = factor
                         self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
                     }
@@ -766,7 +811,6 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
     }
-
 
 
     func switchCamera() {
@@ -1923,6 +1967,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         let wbZoomDevices = whiteBalanceCompatibleZoomDevices(zoomDevices, request: request)
         if !wbZoomDevices.isEmpty { zoomDevices = wbZoomDevices }
+        cacheLegalZoomDevices(zoomDevices, request: request)
         let zoomDomain = publishedZoomDomain(legalDevices: zoomDevices, currentDevice: device)
         let displayedZoom = CameraZoomController.displayedZoom(forDeviceZoom: device.videoZoomFactor, device: device)
         if let requestToken, !requestGate.isCurrent(requestToken) { return }
@@ -2000,17 +2045,7 @@ final class CameraManager: NSObject, ObservableObject {
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> [AVCaptureDevice] {
         let request = suppliedRequest ?? makeConfigurationRequest()
-        let positionKey = request.position == .back ? "back" : "front"
-        let signature = [
-            request.mode.rawValue,
-            positionKey,
-            request.resolution.rawValue,
-            String(request.frameRate.rawValue),
-            request.slowMotionResolution.rawValue,
-            String(request.slowMotionFrameRate.rawValue),
-            request.codec,
-            request.whiteBalancePreset.rawValue
-        ].joined(separator: "|")
+        let signature = legalZoomSignature(for: request)
         if legalZoomCacheSignature == signature, !legalZoomCacheDevices.isEmpty {
             return legalZoomCacheDevices
         }
@@ -2060,9 +2095,31 @@ final class CameraManager: NSObject, ObservableObject {
         }
         let wbLegal = whiteBalanceCompatibleZoomDevices(legal, request: request)
         let resolved = wbLegal.isEmpty ? legal : wbLegal
-        legalZoomCacheSignature = signature
-        legalZoomCacheDevices = resolved
+        cacheLegalZoomDevices(resolved, request: request)
         return resolved
+    }
+
+    private func legalZoomSignature(for request: CaptureConfigurationRequest) -> String {
+        let positionKey = request.position == .back ? "back" : "front"
+        return [
+            request.mode.rawValue,
+            positionKey,
+            request.resolution.rawValue,
+            String(request.frameRate.rawValue),
+            request.slowMotionResolution.rawValue,
+            String(request.slowMotionFrameRate.rawValue),
+            request.codec,
+            request.whiteBalancePreset.rawValue
+        ].joined(separator: "|")
+    }
+
+    private func cacheLegalZoomDevices(
+        _ devices: [AVCaptureDevice],
+        request: CaptureConfigurationRequest
+    ) {
+        guard !devices.isEmpty else { return }
+        legalZoomCacheSignature = legalZoomSignature(for: request)
+        legalZoomCacheDevices = devices
     }
 
     private func publishedZoomDomain(
@@ -2390,6 +2447,7 @@ final class CameraManager: NSObject, ObservableObject {
             showError("Photo capture is unavailable on this camera.")
             return false
         }
+        cacheLegalZoomDevices(legalDevices, request: request)
 
         let domain = CameraZoomController.displayedZoomDomain(for: legalDevices)
         let requestedDisplayZoom = CameraZoomController.clampDisplayedZoom(request.displayedZoom, to: domain)
@@ -2589,6 +2647,7 @@ final class CameraManager: NSObject, ObservableObject {
             showError("This video quality isn’t available with the selected white balance.")
             return false
         }
+        cacheLegalZoomDevices(supportedDevices, request: request)
 
         publishIfCurrent(requestToken) {
             let wasSuppressing = self.suppressPreferencePersistence
@@ -2695,6 +2754,7 @@ final class CameraManager: NSObject, ObservableObject {
         // deliver the requested HFR format. This keeps capability claims tied to the real sensor.
         let physicalRecordingDevices = supportedDevices.filter { !$0.isVirtualDevice }
         let recordingDevices = physicalRecordingDevices.isEmpty ? supportedDevices : physicalRecordingDevices
+        cacheLegalZoomDevices(recordingDevices, request: request)
         let navigationDomain = CameraZoomController.displayedZoomDomain(for: recordingDevices)
         let requestedDisplayZoom = CameraZoomController.clampDisplayedZoom(request.displayedZoom, to: navigationDomain)
         let desiredDevice = CameraZoomController.desiredPhysicalDevice(in: recordingDevices, displayedZoom: requestedDisplayZoom)
