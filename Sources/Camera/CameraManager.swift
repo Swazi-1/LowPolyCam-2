@@ -382,7 +382,11 @@ final class CameraManager: NSObject, ObservableObject {
         sessionRecoveryAttempt += 1
         if session.isRunning { session.stopRunning() }
         let configured = configureSessionIfNeeded(forceRebuild: true)
-        if configured, !session.isRunning { session.startRunning() }
+        if configured, !session.isRunning {
+            CameraHaptics.prepareSystemPolicy()
+            session.startRunning()
+            CameraHaptics.prepareSystemPolicy()
+        }
         let running = configured && session.isRunning
         synchronizeTorchState()
         publish {
@@ -455,7 +459,11 @@ final class CameraManager: NSObject, ObservableObject {
            !movieOutput.isRecording {
             _ = configureCurrentMode(phase: .preview)
         }
-        if !session.isRunning { session.startRunning() }
+        if !session.isRunning {
+            CameraHaptics.prepareSystemPolicy()
+            session.startRunning()
+            CameraHaptics.prepareSystemPolicy()
+        }
         synchronizeTorchState()
         publish { self.isSessionRunning = self.session.isRunning }
     }
@@ -519,8 +527,9 @@ final class CameraManager: NSObject, ObservableObject {
                 self.publish { self.isSessionRunning = true }
                 return
             }
+            CameraHaptics.prepareSystemPolicy()
             self.session.startRunning()
-            try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
+            CameraHaptics.prepareSystemPolicy()
             self.publish { self.isSessionRunning = self.session.isRunning }
         }
     }
@@ -633,8 +642,9 @@ final class CameraManager: NSObject, ObservableObject {
                 _ = self.configureCurrentMode(phase: .preview)
             }
             if !self.session.isRunning {
+                CameraHaptics.prepareSystemPolicy()
                 self.session.startRunning()
-                try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
+                CameraHaptics.prepareSystemPolicy()
             }
             self.publish { self.isSessionRunning = self.session.isRunning }
             self.synchronizeTorchState()
@@ -742,7 +752,12 @@ final class CameraManager: NSObject, ObservableObject {
                 availableDevices: legalDevices,
                 mode: requestSnapshot.mode,
                 recordingOrStarting: recordingOrStarting,
-                preferCurrentDeviceWhenPossible: (!settleOpticalRoute || recordingOrStarting) && isHighBandwidthRearZoom
+                // Match the normal Video/Photo optical-routing behavior while idle: high-
+                // bandwidth modes still use direct sensor zoom between lens boundaries, but
+                // crossing an optical boundary during the drag must hand off immediately.
+                // During recording/start/finalization we keep the current physical sensor so
+                // Record/Stop and active HFR capture never reintroduce input-swap flicker.
+                preferCurrentDeviceWhenPossible: recordingOrStarting && isHighBandwidthRearZoom
             )
 
             switch plan {
@@ -793,8 +808,9 @@ final class CameraManager: NSObject, ObservableObject {
                             device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
                         } else {
                             // Restarting ramp(to:) for every DragGesture sample is visibly choppy on
-                            // rear 4K60/HFR. Those high-bandwidth modes track the finger directly;
-                            // optical routing is settled once the gesture finishes.
+                            // rear 4K60/HFR. Those high-bandwidth modes track the finger directly
+                            // between optical boundaries; the planner still performs a real lens
+                            // handoff immediately when an idle drag crosses a supported boundary.
                             if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
                             device.videoZoomFactor = deviceFactor
                         }

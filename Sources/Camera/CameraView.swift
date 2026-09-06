@@ -268,7 +268,9 @@ struct CameraView: View {
                         .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
                 })
                 .gesture(zoomGesture)
-                .allowsHitTesting(!camera.isPreviewTransitioning && !(camera.isRecording && recordingLock))
+                // Keep an already-active drag alive across an optical lens handoff. New zoom
+                // gestures are still blocked during unrelated camera transitions.
+                .allowsHitTesting((!camera.isPreviewTransitioning || dragStartZoom != nil) && !(camera.isRecording && recordingLock))
 
                 CaptureModeSelector(
                     selectedMode: camera.captureMode,
