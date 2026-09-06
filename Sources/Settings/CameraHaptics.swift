@@ -1,57 +1,130 @@
 import AVFAudio
+import CoreHaptics
 import Foundation
 import UIKit
 
-/// One place for camera haptic behavior. AVAudioSession policy is configured with the camera
-/// session; individual taps only prepare and fire the selected feedback generator.
+/// Central haptic path for camera controls and Settings previews.
+/// Core Haptics is the primary engine so strength previews remain explicit and predictable while
+/// AVCaptureSession owns an audio-recording session. UIKit impact feedback is retained as fallback.
 enum CameraHaptics {
-    private static let light = UIImpactFeedbackGenerator(style: .light)
-    private static let medium = UIImpactFeedbackGenerator(style: .medium)
-    private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
+    private static var engine: CHHapticEngine?
+    private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private static let mediumImpact = UIImpactFeedbackGenerator(style: .medium)
+    private static let heavyImpact = UIImpactFeedbackGenerator(style: .heavy)
 
-    /// AVCaptureSession may activate an audio-recording session for the microphone. iOS defaults
-    /// to suppressing system haptics while audio input is active, so establish the policy before
-    /// capture starts and reassert it after session/recovery changes. This does not change the
-    /// app's audio category, route, or activation state.
+    /// Audio input suppresses system haptics by default. Keep the documented shared-audio-session
+    /// policy enabled without changing LowPolyCam's category, route, or activation state.
     static func prepareSystemPolicy() {
         let session = AVAudioSession.sharedInstance()
         guard !session.allowHapticsAndSystemSoundsDuringRecording else { return }
-        try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+        do {
+            try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+        } catch {
+            // Core Haptics/UIKit fallback is still attempted. Camera audio configuration must not
+            // be changed merely to make a Settings preview vibrate.
+        }
     }
 
     static func fire(strength selectedStrength: String? = nil, captureOnly: Bool = false) {
         let defaults = UserDefaults.standard
         if captureOnly, !(defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true) { return }
-
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
-        performImpact(strength: strength)
+        perform(strength: strength)
     }
 
-    /// Settings preview is separate from capture feedback so re-tapping the selected strength
-    /// previews it again immediately.
+    /// Re-tapping the selected strength intentionally previews it again.
     static func preview(strength: String) {
-        performImpact(strength: strength)
+        perform(strength: strength)
     }
 
-    private static func performImpact(strength: String) {
-        let perform = {
+    private static func perform(strength: String) {
+        let work = {
             prepareSystemPolicy()
-            let generator: UIImpactFeedbackGenerator
-            switch strength {
-            case "Low": generator = light
-            case "Strong": generator = heavy
-            default: generator = medium
-            }
-            generator.prepare()
-            generator.impactOccurred()
-            // Keep the retained generator warm for the next nearby capture/menu tap.
-            generator.prepare()
+            if playCoreHaptic(strength: strength) { return }
+            playUIKitFallback(strength: strength)
         }
         if Thread.isMainThread {
-            perform()
+            work()
         } else {
-            DispatchQueue.main.async(execute: perform)
+            DispatchQueue.main.async(execute: work)
         }
     }
-}
 
+    @discardableResult
+    private static func playCoreHaptic(strength: String) -> Bool {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return false }
+
+        do {
+            let hapticEngine: CHHapticEngine
+            if let existing = engine {
+                hapticEngine = existing
+            } else {
+                let created = try CHHapticEngine()
+                created.isAutoShutdownEnabled = false
+                created.resetHandler = {
+                    DispatchQueue.main.async {
+                        engine = nil
+                        _ = ensureEngineStarted()
+                    }
+                }
+                created.stoppedHandler = { _ in
+                    DispatchQueue.main.async { engine = nil }
+                }
+                engine = created
+                hapticEngine = created
+            }
+
+            try hapticEngine.start()
+            let values = coreHapticValues(for: strength)
+            let event = CHHapticEvent(
+                eventType: .hapticTransient,
+                parameters: [
+                    CHHapticEventParameter(parameterID: .hapticIntensity, value: values.intensity),
+                    CHHapticEventParameter(parameterID: .hapticSharpness, value: values.sharpness)
+                ],
+                relativeTime: 0
+            )
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            let player = try hapticEngine.makePlayer(with: pattern)
+            try player.start(atTime: CHHapticTimeImmediate)
+            return true
+        } catch {
+            engine = nil
+            return false
+        }
+    }
+
+    private static func ensureEngineStarted() -> Bool {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return false }
+        do {
+            let created = try CHHapticEngine()
+            created.isAutoShutdownEnabled = false
+            try created.start()
+            engine = created
+            return true
+        } catch {
+            engine = nil
+            return false
+        }
+    }
+
+    private static func coreHapticValues(for strength: String) -> (intensity: Float, sharpness: Float) {
+        switch strength {
+        case "Low": return (0.32, 0.38)
+        case "Strong": return (1.0, 0.72)
+        default: return (0.62, 0.52)
+        }
+    }
+
+    private static func playUIKitFallback(strength: String) {
+        let generator: UIImpactFeedbackGenerator
+        switch strength {
+        case "Low": generator = lightImpact
+        case "Strong": generator = heavyImpact
+        default: generator = mediumImpact
+        }
+        generator.prepare()
+        generator.impactOccurred(intensity: 1.0)
+        generator.prepare()
+    }
+}

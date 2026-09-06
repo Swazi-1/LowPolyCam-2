@@ -16,7 +16,8 @@ enum CameraZoomController {
         availableDevices: [AVCaptureDevice],
         mode: CameraManager.CaptureMode,
         recordingOrStarting: Bool,
-        preferCurrentDeviceWhenPossible: Bool = false
+        preferCurrentDeviceWhenPossible: Bool = false,
+        forcePhysicalOpticalRouting: Bool = false
     ) -> RequestPlan {
         guard currentDevice.position == .back else {
             return .applyToCurrentDevice(displayedZoom)
@@ -33,6 +34,14 @@ enum CameraZoomController {
         }
 
         if currentDevice.isVirtualDevice {
+            // Photo/normal Video can let Apple's virtual camera perform constituent switching.
+            // Rear native 4K60/HFR are different: when their validated route is physical, force
+            // the matching optical input while idle so a virtual device cannot digitally crop
+            // the Ultra Wide all the way past 1x without actually changing lenses.
+            if forcePhysicalOpticalRouting, desired != nil {
+                if recordingOrStarting { return .blockedPhysicalSwitch }
+                return .reconfigureLens(displayedZoom)
+            }
             // A virtual camera is not proof that every constituent lens participates in the
             // CURRENT active format. Stay virtual only when its real active zoom interval can
             // represent this request. Otherwise an idle request may hand off to a legal physical

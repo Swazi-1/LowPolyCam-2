@@ -201,6 +201,10 @@ final class CameraManager: NSObject, ObservableObject {
     private var durationTimer: Timer?
     private var recordingSessionStartedAt: Date?
     private var requestedZoom: CGFloat = 1
+    // One continuous high-bandwidth preview drag owns one zoom generation. Without this, every
+    // DragGesture sample invalidates the previous 0.5x<->1x handoff before sessionQueue can
+    // perform it, so the optical switch only happens after finger-up.
+    private var interactiveZoomRequestID: CaptureRequestGate.Token?
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var activeWhiteBalanceOperationID: UUID?
@@ -699,10 +703,16 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func beginInteractiveZoom() {
-        // Usually already warm from the last successful configuration. This fallback makes a
-        // gesture started immediately after launch pay discovery work before its first update,
-        // not repeatedly during the drag.
+        // Rear 4K60 and rear HFR use physical recording-capable inputs. Keep one zoom generation
+        // for the whole held gesture so an optical handoff cannot be invalidated by the next
+        // DragGesture sample before sessionQueue gets to execute it. Normal Video/Photo keep their
+        // existing Apple virtual-camera path.
         let requestSnapshot = makeConfigurationRequest()
+        if usesPhysicalPreviewZoomRouting(requestSnapshot) {
+            interactiveZoomRequestID = requestGate.next(.zoom)
+        } else {
+            interactiveZoomRequestID = nil
+        }
         sessionQueue.async { [weak self] in
             guard let self, !self.pendingSessionRecovery else { return }
             _ = self.legalZoomDevicesForCurrentMode(request: requestSnapshot)
@@ -710,23 +720,64 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func updateInteractiveZoom(_ requestedFactor: CGFloat) {
-        enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false)
+        let request = makeConfigurationRequest(displayedZoom: requestedFactor)
+        if usesPhysicalPreviewZoomRouting(request) {
+            let token = currentInteractiveZoomToken()
+            enqueueZoomRequest(
+                requestedFactor,
+                settleOpticalRoute: false,
+                animate: false,
+                requestID: token,
+                forcePhysicalOpticalRouting: true
+            )
+        } else {
+            enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false)
+        }
     }
 
     func endInteractiveZoom(_ requestedFactor: CGFloat) {
-        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false)
+        let request = makeConfigurationRequest(displayedZoom: requestedFactor)
+        if usesPhysicalPreviewZoomRouting(request) {
+            let token = currentInteractiveZoomToken()
+            enqueueZoomRequest(
+                requestedFactor,
+                settleOpticalRoute: true,
+                animate: false,
+                requestID: token,
+                forcePhysicalOpticalRouting: true
+            )
+            interactiveZoomRequestID = nil
+        } else {
+            enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false)
+        }
     }
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
+        interactiveZoomRequestID = nil
         enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: true)
+    }
+
+    private func usesPhysicalPreviewZoomRouting(_ request: CaptureConfigurationRequest) -> Bool {
+        guard request.position == .back else { return false }
+        if request.mode == .sloMo { return true }
+        return request.mode == .video && request.resolution == .p4k && request.frameRate == .fps60
+    }
+
+    private func currentInteractiveZoomToken() -> CaptureRequestGate.Token {
+        if let token = interactiveZoomRequestID, requestGate.isCurrent(token) { return token }
+        let token = requestGate.next(.zoom)
+        interactiveZoomRequestID = token
+        return token
     }
 
     private func enqueueZoomRequest(
         _ requestedFactor: CGFloat,
         settleOpticalRoute: Bool,
-        animate: Bool
+        animate: Bool,
+        requestID suppliedRequestID: CaptureRequestGate.Token? = nil,
+        forcePhysicalOpticalRouting: Bool = false
     ) {
-        let requestID = requestGate.next(.zoom)
+        let requestID = suppliedRequestID ?? requestGate.next(.zoom)
         let requestSnapshot = makeConfigurationRequest(displayedZoom: requestedFactor)
         sessionQueue.async { [weak self] in
             guard let self, self.requestGate.isCurrent(requestID),
@@ -742,22 +793,13 @@ final class CameraManager: NSObject, ObservableObject {
             let domainDevices = recordingOrStarting ? [currentDevice] : legalDevices
             let domain = CameraZoomController.displayedZoomDomain(for: domainDevices, currentDevice: currentDevice)
             let requested = CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
-            let isHighBandwidthRearZoom = requestSnapshot.position == .back && (
-                requestSnapshot.mode == .sloMo ||
-                (requestSnapshot.mode == .video && requestSnapshot.resolution == .p4k && requestSnapshot.frameRate == .fps60)
-            )
             let plan = CameraZoomController.planRequest(
                 displayedZoom: requested,
                 currentDevice: currentDevice,
                 availableDevices: legalDevices,
                 mode: requestSnapshot.mode,
                 recordingOrStarting: recordingOrStarting,
-                // Match the normal Video/Photo optical-routing behavior while idle: high-
-                // bandwidth modes still use direct sensor zoom between lens boundaries, but
-                // crossing an optical boundary during the drag must hand off immediately.
-                // During recording/start/finalization we keep the current physical sensor so
-                // Record/Stop and active HFR capture never reintroduce input-swap flicker.
-                preferCurrentDeviceWhenPossible: recordingOrStarting && isHighBandwidthRearZoom
+                forcePhysicalOpticalRouting: forcePhysicalOpticalRouting && !recordingOrStarting
             )
 
             switch plan {
@@ -776,7 +818,12 @@ final class CameraManager: NSObject, ObservableObject {
                 }
                 guard self.requestGate.isCurrent(requestID),
                       self.requestGate.isCurrent(configurationToken),
-                      self.configureCurrentMode(phase: .preview, requestToken: configurationToken, request: configurationRequest),
+                      self.configureCurrentMode(
+                        phase: .preview,
+                        preferVirtualCamera: forcePhysicalOpticalRouting ? false : nil,
+                        requestToken: configurationToken,
+                        request: configurationRequest
+                      ),
                       self.requestGate.isCurrent(requestID),
                       self.requestGate.isCurrent(configurationToken) else {
                     if self.requestGate.isCurrent(requestID) {
@@ -803,17 +850,11 @@ final class CameraManager: NSObject, ObservableObject {
                     if abs(device.videoZoomFactor - deviceFactor) >= 0.001 {
                         try device.lockForConfiguration()
                         defer { device.unlockForConfiguration() }
-                        if animate || !isHighBandwidthRearZoom {
-                            // Preserve the known-good normal Video/Photo/front-camera feel.
-                            device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
-                        } else {
-                            // Restarting ramp(to:) for every DragGesture sample is visibly choppy on
-                            // rear 4K60/HFR. Those high-bandwidth modes track the finger directly
-                            // between optical boundaries; the planner still performs a real lens
-                            // handoff immediately when an idle drag crosses a supported boundary.
-                            if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
-                            device.videoZoomFactor = deviceFactor
-                        }
+                        // Use the exact same zoom application path as the already-good Photo
+                        // and normal Video modes. AVFoundation owns the ramp between optical
+                        // handoffs; the only special handling for 4K60/HFR is keeping one gesture
+                        // token alive long enough for its physical lens switch to execute.
+                        device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
                     }
                     guard self.requestGate.isCurrent(requestID) else { return }
                     self.requestedZoom = factor
@@ -2682,11 +2723,14 @@ final class CameraManager: NSObject, ObservableObject {
         let requestedDisplayZoom = CameraZoomController.clampDisplayedZoom(request.displayedZoom, to: navigationDomain)
         let physical = CameraZoomController.desiredPhysicalDevice(in: supportedDevices, displayedZoom: requestedDisplayZoom)
         let wantsExplicitUltraWideRoute = requestedDisplayZoom < 1 && physical?.deviceType == .builtInUltraWideCamera
-        let desiredDevice: AVCaptureDevice? = wantsExplicitUltraWideRoute
-            ? physical
-            : (preferVirtualCamera
-                ? (supportedDevices.first(where: { $0.isVirtualDevice }) ?? physical ?? supportedDevices.first)
-                : (physical ?? supportedDevices.first(where: { !$0.isVirtualDevice }) ?? supportedDevices.first))
+        let isRearNative4K60 = request.position == .back && selection.resolution == .p4k && selection.frameRate == .fps60
+        let desiredDevice: AVCaptureDevice? = isRearNative4K60
+            ? (physical ?? supportedDevices.first(where: { !$0.isVirtualDevice }) ?? supportedDevices.first)
+            : (wantsExplicitUltraWideRoute
+                ? physical
+                : (preferVirtualCamera
+                    ? (supportedDevices.first(where: { $0.isVirtualDevice }) ?? physical ?? supportedDevices.first)
+                    : (physical ?? supportedDevices.first(where: { !$0.isVirtualDevice }) ?? supportedDevices.first)))
         guard let desiredDevice,
               let selectedFormat = CameraFormatSelector.preferredRecordingFormat(
                 for: desiredDevice,
