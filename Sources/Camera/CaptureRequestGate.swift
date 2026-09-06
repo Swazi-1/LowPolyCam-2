@@ -10,6 +10,7 @@ final class CaptureRequestGate {
         case whiteBalance
         case modeChange
         case configuration
+        case photoSettings
         case recordingStart
     }
 

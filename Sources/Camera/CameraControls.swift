@@ -346,6 +346,38 @@ struct CameraGridOverlay: View {
     }
 }
 
+struct CameraLevelHost: View {
+    let enabled: Bool
+    let isActive: Bool
+    @StateObject private var monitor = CameraLevelMonitor()
+
+    var body: some View {
+        Group {
+            if enabled {
+                CameraLevelOverlay(
+                    angle: monitor.angle,
+                    isAvailable: monitor.isAvailable,
+                    isLevel: monitor.isLevel
+                )
+                .offset(y: -8)
+                .allowsHitTesting(false)
+            }
+        }
+        .onAppear { updateMonitoring() }
+        .onChange(of: enabled) { _, _ in updateMonitoring() }
+        .onChange(of: isActive) { _, _ in updateMonitoring() }
+        .onDisappear { monitor.stop() }
+    }
+
+    private func updateMonitoring() {
+        if enabled && isActive {
+            monitor.start()
+        } else {
+            monitor.stop()
+        }
+    }
+}
+
 final class CameraLevelMonitor: ObservableObject {
     @Published private(set) var angle: Double = 0
     @Published private(set) var isAvailable = false
@@ -382,20 +414,23 @@ final class CameraLevelMonitor: ObservableObject {
             }
 
             let rawRoll = atan2(gravity.x, -gravity.y)
+            let nextAngle: Double
             if let lastRawRoll = self.lastRawRoll {
                 // Unwrap the -π/+π boundary so the indicator keeps rotating continuously.
                 let delta = atan2(sin(rawRoll - lastRawRoll), cos(rawRoll - lastRawRoll))
                 self.unwrappedRoll += delta
-                self.angle += (self.unwrappedRoll - self.angle) * 0.50
+                nextAngle = self.angle + (self.unwrappedRoll - self.angle) * 0.50
             } else {
                 self.unwrappedRoll = rawRoll
-                self.angle = rawRoll
+                nextAngle = rawRoll
             }
             self.lastRawRoll = rawRoll
             let quarterTurn = Double.pi / 2
-            let nearestLevel = (self.angle / quarterTurn).rounded() * quarterTurn
-            self.levelDeviation = abs(self.angle - nearestLevel)
-            self.isAvailable = true
+            let nearestLevel = (nextAngle / quarterTurn).rounded() * quarterTurn
+            let nextDeviation = abs(nextAngle - nearestLevel)
+            if abs(self.angle - nextAngle) > 0.0005 { self.angle = nextAngle }
+            if abs(self.levelDeviation - nextDeviation) > 0.0005 { self.levelDeviation = nextDeviation }
+            if !self.isAvailable { self.isAvailable = true }
         }
     }
 

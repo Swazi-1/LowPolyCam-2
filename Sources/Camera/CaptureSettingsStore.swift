@@ -14,7 +14,8 @@ struct CaptureSettingsStore {
     }
 
     var audioMeterEnabled: Bool {
-        defaults.bool(forKey: "cameraHUDAudioMeter")
+        let hudEnabled = defaults.object(forKey: "cameraHUDEnabled") as? Bool ?? true
+        return hudEnabled && defaults.bool(forKey: "cameraHUDAudioMeter")
     }
 
     var burstCount: Int {
@@ -35,6 +36,7 @@ struct CaptureSettingsStore {
     }
 
     var droppedFrameDiagnosticsEnabled: Bool {
-        defaults.bool(forKey: "cameraHUDDroppedFrames")
+        let hudEnabled = defaults.object(forKey: "cameraHUDEnabled") as? Bool ?? true
+        return hudEnabled && defaults.bool(forKey: "cameraHUDDroppedFrames")
     }
 }

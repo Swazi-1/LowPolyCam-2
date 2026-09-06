@@ -4,7 +4,6 @@ import UIKit
 struct CameraView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
-    @StateObject private var levelMonitor = CameraLevelMonitor()
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
@@ -82,15 +81,10 @@ struct CameraView: View {
                     .allowsHitTesting(false)
             }
 
-            if isLevelMeterEnabled {
-                CameraLevelOverlay(
-                    angle: levelMonitor.angle,
-                    isAvailable: levelMonitor.isAvailable,
-                    isLevel: levelMonitor.isLevel
-                )
-                .offset(y: -8)
-                .allowsHitTesting(false)
-            }
+            CameraLevelHost(
+                enabled: isLevelMeterEnabled,
+                isActive: scenePhase == .active
+            )
 
             VStack {
                 topControls
@@ -161,21 +155,15 @@ struct CameraView: View {
             camera.start()
             camera.refreshAvailableStorage()
             updateIdleTimer(for: scenePhase)
-            if isLevelMeterEnabled { levelMonitor.start() }
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
                 if Task.isCancelled { break }
-                camera.refreshAvailableStorage()
-            }
-        }
-        .onChange(of: isLevelMeterEnabled) { _, enabled in
-            if enabled, scenePhase == .active {
-                levelMonitor.start()
-            } else {
-                levelMonitor.stop()
+                // The Settings sheet does not display live storage. Avoid publishing a broad
+                // CameraManager update every five seconds while a menu/control is being tracked.
+                if !isShowingSettings { camera.refreshAvailableStorage() }
             }
         }
         .onChange(of: keepScreenAwakeEnabled) { _, _ in
@@ -189,7 +177,6 @@ struct CameraView: View {
             if phase == .active {
                 camera.appDidBecomeActive()
                 camera.refreshAvailableStorage()
-                if isLevelMeterEnabled { levelMonitor.start() }
             } else {
                 cancelCountdown()
                 if let brightness = restoreBrightness {
@@ -197,12 +184,10 @@ struct CameraView: View {
                     restoreBrightness = nil
                 }
                 camera.appDidBecomeInactive()
-                levelMonitor.stop()
             }
         }
         .onDisappear {
             cancelCountdown()
-            levelMonitor.stop()
             camera.stop()
             if let brightness = restoreBrightness { UIScreen.main.brightness = brightness; restoreBrightness = nil }
             UIApplication.shared.isIdleTimerDisabled = false
@@ -214,7 +199,7 @@ struct CameraView: View {
                 cancelCountdown()
                 editingStats = true
             }
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
         .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
@@ -225,7 +210,13 @@ struct CameraView: View {
                 camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
             }
         }
-        .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
+        .onChange(of: isShowingSettings) { _, showing in
+            if showing {
+                cancelCountdown()
+            } else {
+                camera.refreshAvailableStorage()
+            }
+        }
     }
 
     private var topControls: some View {

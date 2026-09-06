@@ -1,7 +1,11 @@
 import SwiftUI
 
-struct ThemeMenu<Value: Hashable>: View {
+/// Shared exclusive-choice control used throughout Settings.
+/// Short lists are direct one-tap choices; longer lists use a native Menu with Button actions.
+/// Both paths call the same setter exactly once and keep stable value identities.
+struct SettingsSelectionControl<Value: Hashable>: View {
     @Environment(\.cameraTint) private var theme
+    @Environment(\.isEnabled) private var isEnabled
     let title: String
     @Binding var selection: Value
     let options: [(Value, String)]
@@ -11,46 +15,109 @@ struct ThemeMenu<Value: Hashable>: View {
         options.first(where: { $0.0 == selection })?.1 ?? "—"
     }
 
-    private var nativeSelection: Binding<Value> {
-        Binding(
-            get: { selection },
-            set: { value in
-                guard value != selection else { return }
-                selection = value
-                onSelect?(value)
-            }
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
 
-            Menu {
-                Picker(title, selection: nativeSelection) {
+            if options.isEmpty {
+                HStack {
+                    Text("Unavailable")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .padding(.horizontal, 11)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+            } else if options.count <= 3 {
+                HStack(spacing: 8) {
                     ForEach(options, id: \.0) { value, label in
-                        Text(label).tag(value)
+                        Button {
+                            commit(value)
+                        } label: {
+                            Text(label)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.82)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .padding(.horizontal, 8)
+                                .foregroundStyle(isEnabled ? (value == selection ? theme : Color.primary) : Color.secondary)
+                                .background(
+                                    value == selection ? theme.opacity(0.18) : Color.primary.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                                .overlay {
+                                    if value == selection {
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(theme.opacity(0.65), lineWidth: 1)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(value == selection ? .isSelected : [])
                     }
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Text(currentLabel)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
+            } else {
+                Menu {
+                    ForEach(options, id: \.0) { value, label in
+                        Button {
+                            commit(value)
+                        } label: {
+                            if value == selection {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Text(label)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(currentLabel)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.82)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundStyle(theme)
+                    .padding(.horizontal, 11)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
                 }
-                .foregroundStyle(theme)
-                .padding(.horizontal, 11)
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
-                .contentShape(Rectangle())
             }
-            .disabled(options.isEmpty)
         }
+    }
+
+    private func commit(_ value: Value) {
+        guard value != selection else { return }
+        selection = value
+        onSelect?(value)
+    }
+}
+
+/// Compatibility wrapper retained for existing call sites. Its interaction semantics now come
+/// from SettingsSelectionControl instead of Menu { Picker }, which was unreliable on the target
+/// iOS beta for several settings and also made short 2/3-choice settings unnecessarily two-step.
+struct ThemeMenu<Value: Hashable>: View {
+    let title: String
+    @Binding var selection: Value
+    let options: [(Value, String)]
+    var onSelect: ((Value) -> Void)? = nil
+
+    var body: some View {
+        SettingsSelectionControl(
+            title: title,
+            selection: $selection,
+            options: options,
+            onSelect: onSelect
+        )
     }
 }
 
@@ -99,6 +166,7 @@ struct SettingsCard<Content: View>: View {
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(.primary.opacity(0.05), lineWidth: 1)
+                .allowsHitTesting(false)
         }
     }
 }

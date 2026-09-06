@@ -13,7 +13,7 @@ struct AppearanceSettingsView: View {
         SettingsPage {
             VStack(spacing: 16) {
                 Image(systemName: "camera.aperture")
-                    .font(.system(size: 60, weight: .light))
+                    .font(.system(size: 46, weight: .light))
                     .foregroundStyle(accent.color)
                     .shadow(color: accent.color.opacity(0.45), radius: 18)
                 Text(appearance.uppercased())
@@ -27,7 +27,7 @@ struct AppearanceSettingsView: View {
                 }
                 Text("Your camera, your color").font(.caption).foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity).padding(.vertical, 24)
+            .frame(maxWidth: .infinity).padding(.vertical, 16)
             .background(LinearGradient(colors: [accent.color.opacity(0.22), Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
             SettingsCard(title: "Choose a Theme", symbol: "paintpalette.fill") {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -47,7 +47,7 @@ struct AppearanceSettingsView: View {
                             }
                             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                             .background(color(for: name).opacity(appearance == name ? 0.18 : 0.06), in: RoundedRectangle(cornerRadius: 12))
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(color(for: name).opacity(appearance == name ? 0.8 : 0.12)))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(color(for: name).opacity(appearance == name ? 0.8 : 0.12)).allowsHitTesting(false))
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
                     }
@@ -55,8 +55,12 @@ struct AppearanceSettingsView: View {
                 if appearance == "Custom" {
                     ColorPicker("Custom Accent", selection: Binding(get: { accent.color }, set: { value in
                         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                        UIColor(value).getRed(&r, green: &g, blue: &b, alpha: &a)
-                        red = Double(r); green = Double(g); blue = Double(b)
+                        guard UIColor(value).getRed(&r, green: &g, blue: &b, alpha: &a) else { return }
+                        let values = [Double(r), Double(g), Double(b)]
+                        guard values.allSatisfy({ $0.isFinite }) else { return }
+                        red = min(max(values[0], 0), 1)
+                        green = min(max(values[1], 0), 1)
+                        blue = min(max(values[2], 0), 1)
                     }), supportsOpacity: false)
                 }
             }
@@ -66,20 +70,19 @@ struct AppearanceSettingsView: View {
     }
 
     private func color(for name: String) -> Color {
-        switch name {
-        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
-        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
-        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
-        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
-        case "Custom": return Color(red: red, green: green, blue: blue)
-        default: return Color(red: 0.65, green: 0.88, blue: 1)
-        }
+        CameraThemePalette.color(
+            for: name,
+            customRed: red,
+            customGreen: green,
+            customBlue: blue
+        )
     }
 }
 
 struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.cameraTint) private var theme
+    private var accent = CameraAccent()
     @Environment(\.dismiss) private var dismiss
     @State private var preview: VideoQuickPreset = .balanced
     var body: some View {
@@ -102,7 +105,7 @@ struct VideoPresetsView: View {
                 }
                 .padding(14)
                 .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
-                .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.opacity(0.4)))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.opacity(0.4)).allowsHitTesting(false))
                 Text("HUD preview · example recording timer").font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 22)
@@ -131,7 +134,7 @@ struct VideoPresetsView: View {
                 } label: {
                     Text("Use \(preview.rawValue)").font(.subheadline.weight(.bold))
                         .frame(maxWidth: .infinity).padding(.vertical, 13)
-                        .background(theme, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
+                        .background(theme, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(accent.foregroundColor)
                 }.buttonStyle(.plain)
             }
         }

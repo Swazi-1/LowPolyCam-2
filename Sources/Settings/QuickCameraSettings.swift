@@ -7,7 +7,7 @@ struct QuickCameraSettings: View {
     @AppStorage("levelMeterEnabled") private var level = true
     @Environment(\.cameraTint) private var theme
     var body: some View {
-        SettingsCard(title: "Quick Settings", symbol: "slider.horizontal.3") {
+        SettingsCard(title: "Quick Controls", symbol: "slider.horizontal.3") {
             if camera.captureMode == .video {
                 SettingsToggleRow(title: "Stabilization", subtitle: "Reduce camera shake", isOn: Binding(get: { camera.isVideoStabilizationEnabled }, set: camera.setVideoStabilizationEnabled))
                 SettingsDivider()

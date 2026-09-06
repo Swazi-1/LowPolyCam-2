@@ -68,39 +68,68 @@ struct LiveStatsOverlay: View {
     }
 }
 
-struct RecordingExtrasSettings: View {
+struct AdvancedRecordingSettingsView: View {
     @ObservedObject var camera: CameraManager
     var positionStats: () -> Void
+    @AppStorage("splitMinutes") private var splitMinutes = 0
     @AppStorage("longevityMode") private var longevity = false
     @AppStorage("liveRecordingStats") private var stats = false
+    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+
     var body: some View {
-        Group {
-            if camera.captureMode == .video {
-                SettingsCard(title: "Long Sessions & Stats", symbol: "battery.100percent") {
-                    SettingsToggleRow(title: "Longevity Mode", subtitle: "Starts video at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording. You can customize quality afterward. Previous video settings return when disabled.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
+        SettingsPage {
+            SettingsCard(title: "Long Sessions", symbol: "clock.arrow.circlepath") {
+                ThemeMenu(
+                    title: "Split Recording",
+                    selection: $splitMinutes,
+                    options: [(0, "Off"), (15, "15 min"), (30, "30 min"), (60, "1 hour"), (120, "2 hours")]
+                )
+                Text("Split clips save separately with a brief gap between files. A change applies to the next recording session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if camera.captureMode == .video {
                     SettingsDivider()
-                    liveStatsControls
+                    SettingsToggleRow(
+                        title: "Longevity Mode",
+                        subtitle: "Starts at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording",
+                        isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) })
+                    )
                 }
-            } else if camera.captureMode == .sloMo {
-                SettingsCard(title: "Recording Stats", symbol: "chart.bar.xaxis") {
-                    liveStatsControls
+
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Low Storage Warning",
+                    subtitle: "Warn when free storage falls below 1 GB",
+                    isOn: $lowStorageWarning
+                )
+            }
+
+            SettingsCard(title: "Diagnostics", symbol: "chart.bar.xaxis") {
+                SettingsToggleRow(
+                    title: "Live Recording Stats",
+                    subtitle: "Measured capture FPS, file bitrate and monitoring-output drops",
+                    isOn: $stats
+                )
+                SettingsDivider()
+                NavigationLink {
+                    LiveStatsSettings(positionStats: positionStats)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Live Stats Settings",
+                        subtitle: "Size, information and position",
+                        symbol: "chart.bar.xaxis"
+                    )
                 }
+                .buttonStyle(.plain)
             }
         }
+        .navigationTitle("Advanced Recording")
+        .navigationBarTitleDisplayMode(.inline)
         .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
     }
-
-    @ViewBuilder
-    private var liveStatsControls: some View {
-        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Measured capture FPS, file bitrate and capture-output drops. Encoder drops are not exposed by iOS. Adds some processing overhead.", isOn: $stats)
-        SettingsDivider()
-        NavigationLink {
-            LiveStatsSettings(positionStats: positionStats)
-        } label: {
-            SettingsNavigationRow(title: "Live Stats Settings", subtitle: "Size, information and position", symbol: "chart.bar.xaxis")
-        }.buttonStyle(.plain)
-    }
 }
+
 
 
 struct LiveStatsSettings: View {

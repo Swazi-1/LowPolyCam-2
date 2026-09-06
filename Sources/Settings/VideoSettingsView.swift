@@ -5,8 +5,6 @@ struct VideoSettingsView: View {
     @ObservedObject var camera: CameraManager
     var positionStats: () -> Void = {}
     @AppStorage("photoAspect") private var photoAspect = "4:3"
-    @AppStorage("burstCount") private var burstCount = 5
-    @AppStorage("photoShutterDelay") private var photoShutterDelay = 0
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -25,7 +23,65 @@ struct VideoSettingsView: View {
                     }
 
                     QuickCameraSettings(camera: camera)
-                    RecordingExtrasSettings(camera: camera, positionStats: positionStats)
+
+                    SettingsCard(title: "More Settings", symbol: "slider.horizontal.3") {
+                        if camera.captureMode == .video {
+                            NavigationLink { VideoPresetsView(camera: camera) } label: {
+                                SettingsNavigationRow(
+                                    title: "Video Presets",
+                                    subtitle: "Choose a ready-to-shoot setup",
+                                    symbol: "wand.and.stars"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            SettingsDivider()
+                        }
+
+                        NavigationLink { CapturePreferencesView(camera: camera) } label: {
+                            SettingsNavigationRow(
+                                title: "Capture",
+                                subtitle: "Timer, zoom, haptics and capture behavior",
+                                symbol: "camera.badge.ellipsis"
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        SettingsDivider()
+
+                        NavigationLink { ViewfinderHUDSettingsMenu(camera: camera) } label: {
+                            SettingsNavigationRow(
+                                title: "Viewfinder & HUD",
+                                subtitle: "Guides, level, HUD and screen behavior",
+                                symbol: "viewfinder"
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        SettingsDivider()
+
+                        NavigationLink { AppearanceSettingsView() } label: {
+                            SettingsNavigationRow(
+                                title: "Appearance",
+                                subtitle: "Theme and custom accent color",
+                                symbol: "paintpalette.fill"
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        if camera.captureMode != .photo {
+                            SettingsDivider()
+                            NavigationLink {
+                                AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)
+                            } label: {
+                                SettingsNavigationRow(
+                                    title: "Advanced Recording",
+                                    subtitle: "Split clips, longevity and diagnostics",
+                                    symbol: "waveform.path.ecg"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
 
                     if camera.recoverableRecordingCount > 0 {
                         SettingsCard(title: "Recovery", symbol: "arrow.clockwise.circle.fill") {
@@ -38,55 +94,11 @@ struct VideoSettingsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button("Retry") {
-                                    camera.retryRecoverableRecordings()
-                                }
-                                .font(.caption.weight(.bold))
-                                .buttonStyle(.borderedProminent)
+                                Button("Retry") { camera.retryRecoverableRecordings() }
+                                    .font(.caption.weight(.bold))
+                                    .buttonStyle(.borderedProminent)
                             }
                         }
-                    }
-
-                    SettingsCard(title: "Settings", symbol: "slider.horizontal.3") {
-                        if camera.captureMode == .video {
-                            NavigationLink { VideoPresetsView(camera: camera) } label: {
-                                SettingsNavigationRow(title: "Video Presets", subtitle: "Choose a ready-to-shoot setup", symbol: "wand.and.stars")
-                            }.buttonStyle(.plain)
-                            SettingsDivider()
-                        }
-                        NavigationLink { AppearanceSettingsView() } label: {
-                            SettingsNavigationRow(title: "Appearance", subtitle: "Theme and custom accent color", symbol: "paintpalette.fill")
-                        }.buttonStyle(.plain)
-                        SettingsDivider()
-                        NavigationLink {
-                            CapturePreferencesView(camera: camera)
-                        } label: {
-                            SettingsNavigationRow(title: "Capture Controls", subtitle: "Timer, zoom, recording and haptics", symbol: "slider.horizontal.3")
-                        }.buttonStyle(.plain)
-                        SettingsDivider()
-                        NavigationLink {
-                            CameraSettingsMenu(camera: camera)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Camera",
-                                subtitle: "Viewfinder, stabilization and camera behavior",
-                                symbol: "camera.fill"
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        SettingsDivider()
-
-                        NavigationLink {
-                            CameraHUDSettingsMenu(camera: camera)
-                        } label: {
-                            SettingsNavigationRow(
-                                title: "Camera HUD",
-                                subtitle: "Choose what appears in the top info pill",
-                                symbol: "capsule.fill"
-                            )
-                        }
-                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -94,7 +106,6 @@ struct VideoSettingsView: View {
             }
             .background(Color(uiColor: .systemGroupedBackground))
             .tint(theme)
-            .accentColor(theme)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -118,21 +129,29 @@ struct VideoSettingsView: View {
                 .foregroundStyle(theme)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(camera.captureMode.rawValue)
+                Text("\(camera.captureMode.rawValue) • \(camera.cameraPosition == .back ? "Rear" : "Front")")
                     .font(.headline)
-                Text("Camera settings")
+                Text(qualitySummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             Spacer()
         }
         .padding(14)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(
+            Color(uiColor: .secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(theme.opacity(0.16), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
     }
 
     private var videoQualitySettings: some View {
-        VStack(spacing: 18) {
-          SettingsCard(title: "Video Quality", symbol: "video.fill") {
+        SettingsCard(title: "Video Quality", symbol: "video.fill") {
             SettingsPickerRow(
                 title: "Resolution",
                 options: camera.supportedResolutions,
@@ -140,9 +159,7 @@ struct VideoSettingsView: View {
                 label: { $0.rawValue },
                 onSelect: camera.selectResolution
             )
-
             SettingsDivider()
-
             SettingsPickerRow(
                 title: "Frame Rate",
                 options: camera.supportedFrameRates,
@@ -150,15 +167,37 @@ struct VideoSettingsView: View {
                 label: { $0.label },
                 onSelect: camera.selectFrameRate
             )
-        }
+            SettingsDivider()
+            ThemeMenu(
+                title: "Compression",
+                selection: $camera.videoCompression,
+                options: VideoCompression.allCases.map { ($0, $0.rawValue) }
+            )
+            SettingsDivider()
+            ThemeMenu(
+                title: "Codec",
+                selection: $camera.selectedVideoCodec,
+                options: [("HEVC", "HEVC"), ("H264", "H.264")]
+            )
+            if let message = camera.codecAvailabilityMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("High uses native encoder defaults. Medium and Data Saver trade bitrate for smaller files.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
     private var slowMotionSettings: some View {
         SettingsCard(title: "Slo-Mo Quality", symbol: "slowmo") {
             if camera.cameraPosition == .back && camera.minimumZoomFactor >= 1 {
-                Text("0.5× is available only when the Ultra Wide lens supports this Slo-Mo quality and frame rate.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("0.5× appears only when Ultra Wide supports the selected resolution and capture FPS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if camera.supportedSlowMotionResolutions.isEmpty {
                 Text("Slo-Mo isn’t available on this camera.")
@@ -172,9 +211,7 @@ struct VideoSettingsView: View {
                     label: { $0.rawValue },
                     onSelect: camera.selectSlowMotionResolution
                 )
-
                 SettingsDivider()
-
                 SettingsPickerRow(
                     title: "Frame Rate",
                     options: camera.supportedSlowMotionFrameRates,
@@ -182,46 +219,59 @@ struct VideoSettingsView: View {
                     label: { $0.label },
                     onSelect: camera.selectSlowMotionFrameRate
                 )
+                SettingsDivider()
+                ThemeMenu(
+                    title: "Compression",
+                    selection: $camera.videoCompression,
+                    options: VideoCompression.allCases.map { ($0, $0.rawValue) }
+                )
+                SettingsDivider()
+                ThemeMenu(
+                    title: "Codec",
+                    selection: $camera.selectedVideoCodec,
+                    options: [("HEVC", "HEVC"), ("H264", "H.264")]
+                )
+                if let message = camera.codecAvailabilityMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
 
     private var photoSettings: some View {
-        SettingsCard(title: "Photo", symbol: "camera.fill") {
+        SettingsCard(title: "Photo Quality", symbol: "camera.fill") {
             PhotoResolutionPicker(camera: camera)
-            Text("Max uses the active camera's highest-quality still. Lower choices are clean downsizes from Max and always keep the selected aspect ratio.")
+            Text("Lower MP choices are clean downsizes from the active camera's maximum-quality still.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             SettingsDivider()
-            ThemeMenu(title: "Aspect Ratio", selection: $photoAspect, options: [("4:3", "4:3"), ("1:1", "1:1")])
-            ThemeMenu(title: "Photo Timer", selection: $photoShutterDelay, options: [(0, "Off"), (3, "3 seconds"), (5, "5 seconds"), (10, "10 seconds")])
-            Text("The countdown appears around the shutter. Tap it again to cancel.")
+            ThemeMenu(
+                title: "Aspect",
+                selection: $photoAspect,
+                options: [("4:3", "4:3"), ("1:1", "1:1")]
+            )
+            SettingsDivider()
+            ThemeMenu(
+                title: "Format",
+                selection: $camera.photoFileFormat,
+                options: [("HEIC", "HEIC"), ("JPEG", "JPEG")]
+            )
+            Text("HEIC uses less storage. JPEG offers broader compatibility.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            SettingsDivider()
-            ThemeMenu(title: "Burst Photos", selection: $burstCount, options: [(5, "5"), (10, "10"), (15, "15")])
-            Text("Hold the shutter to start a burst, then release to stop after the current shot finishes. Photos continue saving in the background.").font(.caption).foregroundStyle(.secondary)
-            SettingsDivider()
-            ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
-            Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
-                .font(.caption).foregroundStyle(.secondary)
-            SettingsDivider()
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Active Photo Size")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Applies to the current camera lens")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(camera.currentPhotoResolutionLabel)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(theme)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(theme.opacity(0.13), in: Capsule())
-            }
+        }
+    }
+
+    private var qualitySummary: String {
+        switch camera.captureMode {
+        case .video:
+            return "\(camera.selectedResolution.rawValue) • \(camera.selectedFrameRate.label) • \(camera.selectedVideoCodec)"
+        case .sloMo:
+            return "\(camera.selectedSlowMotionResolution.rawValue) • \(camera.selectedSlowMotionFrameRate.label) • \(camera.selectedVideoCodec)"
+        case .photo:
+            return "\(camera.currentPhotoResolutionLabel) • \(photoAspect) • \(camera.photoFileFormat)"
         }
     }
 
@@ -232,6 +282,7 @@ struct VideoSettingsView: View {
         case .sloMo: return "slowmo"
         }
     }
+
 }
 
 private struct PhotoResolutionPicker: View {
@@ -240,17 +291,6 @@ private struct PhotoResolutionPicker: View {
 
     private var selectedOption: CameraManager.PhotoResolutionOption? {
         camera.supportedPhotoResolutions.first { $0.id == camera.selectedPhotoResolutionID }
-    }
-
-    private var nativeSelection: Binding<String> {
-        Binding(
-            get: { camera.selectedPhotoResolutionID },
-            set: { id in
-                guard id != camera.selectedPhotoResolutionID,
-                      let option = camera.supportedPhotoResolutions.first(where: { $0.id == id }) else { return }
-                camera.selectPhotoResolution(option)
-            }
-        )
     }
 
     var body: some View {
@@ -268,9 +308,16 @@ private struct PhotoResolutionPicker: View {
                 ProgressView().controlSize(.small)
             } else {
                 Menu {
-                    Picker("Photo Resolution", selection: nativeSelection) {
-                        ForEach(camera.supportedPhotoResolutions) { option in
-                            Text(option.label).tag(option.id)
+                    ForEach(camera.supportedPhotoResolutions) { option in
+                        Button {
+                            guard option.id != camera.selectedPhotoResolutionID else { return }
+                            camera.selectPhotoResolution(option)
+                        } label: {
+                            if option.id == camera.selectedPhotoResolutionID {
+                                Label(option.label, systemImage: "checkmark")
+                            } else {
+                                Text(option.label)
+                            }
                         }
                     }
                 } label: {
@@ -282,54 +329,25 @@ private struct PhotoResolutionPicker: View {
                             .font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(theme)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, 12)
+                    .frame(minWidth: 112, minHeight: 44)
                     .background(theme.opacity(0.13), in: Capsule())
+                    .contentShape(Rectangle())
                 }
             }
         }
+        .frame(minHeight: 52)
     }
 }
 
-private struct CameraSettingsMenu: View {
+private struct ViewfinderHUDSettingsMenu: View {
     @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
+    @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
-    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
+    @AppStorage("centerCrosshair") private var centerCrosshair = false
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                SettingsCard(title: "Camera Experience", symbol: "sparkles") {
-                    SettingsToggleRow(
-                        title: "Haptic Capture",
-                        subtitle: camera.captureMode == .photo ? "Feel a tap when taking a photo" : "Feel a tap when starting or stopping recording",
-                        isOn: $isHapticCaptureEnabled
-                    )
-
-                    SettingsDivider()
-
-                    SettingsToggleRow(
-                        title: "Keep Screen Awake",
-                        subtitle: "Prevent Auto-Lock while LowPolyCam is open",
-                        isOn: $keepScreenAwakeEnabled
-                    )
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-        }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .navigationTitle("Camera")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct CameraHUDSettingsMenu: View {
-    @Environment(\.cameraTint) private var theme
-    @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
@@ -343,81 +361,94 @@ private struct CameraHUDSettingsMenu: View {
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
-                    SettingsToggleRow(
-                        title: "Show Camera HUD",
-                        subtitle: "Compact live info between Flash and Settings",
-                        isOn: $isHUDEnabled
-                    )
+        SettingsPage {
+            SettingsCard(title: "Guides", symbol: "viewfinder") {
+                SettingsToggleRow(
+                    title: "Grid",
+                    subtitle: "Rule-of-thirds composition guides",
+                    isOn: $isGridEnabled
+                )
+                if isGridEnabled {
+                    HStack(spacing: 10) {
+                        Text("Opacity").font(.caption)
+                        Slider(value: $gridOpacity, in: 0.2...1)
+                        Text("\(Int(gridOpacity * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .frame(width: 38)
+                    }
+                    .frame(minHeight: 44)
+                    .tint(theme)
                 }
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Level",
+                    subtitle: "Keep the horizon straight",
+                    isOn: $isLevelMeterEnabled
+                )
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Center Crosshair",
+                    subtitle: "Show a small center aiming mark",
+                    isOn: $centerCrosshair
+                )
+            }
+
+            SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
+                SettingsToggleRow(
+                    title: "Show Camera HUD",
+                    subtitle: "Compact live info between Flash and Settings",
+                    isOn: $isHUDEnabled
+                )
 
                 if isHUDEnabled {
-                    SettingsCard(title: "HUD Information", symbol: "text.line.first.and.arrowtriangle.forward") {
-                        SettingsToggleRow(title: "Battery", subtitle: "Show the current battery percentage", isOn: $hudBattery)
+                    SettingsDivider()
+                    ThemeMenu(
+                        title: "Text Size",
+                        selection: $hudTextSize,
+                        options: [(10.0, "Compact"), (12.0, "Large")]
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Resolution", subtitle: "Show active capture resolution", isOn: $hudResolution)
+                    if camera.captureMode != .photo {
                         SettingsDivider()
-                        SettingsToggleRow(title: "Free Storage", subtitle: "Show available space on this iPhone", isOn: $hudStorage)
-                        SettingsDivider()
-                        SettingsToggleRow(title: "Thermal Status", subtitle: "Show the current device thermal state", isOn: $hudThermal)
-                        if camera.captureMode != .photo {
-                            SettingsDivider()
-                            SettingsToggleRow(title: "Frame Gaps", subtitle: "Check the last saved clip for missing frame intervals; not a live counter", isOn: $hudDroppedFrames)
-                        }
-                        SettingsDivider()
-                        SettingsToggleRow(
-                            title: "Resolution",
-                            subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show selected video resolution",
-                            isOn: $hudResolution
-                        )
-
-                        if camera.captureMode != .photo {
-                            SettingsDivider()
-                            SettingsToggleRow(
-                                title: "FPS",
-                                subtitle: camera.captureMode == .sloMo ? "Show selected Slo-Mo frame rate" : "Show selected video frame rate",
-                                isOn: $hudFPS
-                            )
-
-                            SettingsDivider()
-                            SettingsToggleRow(
-                                title: "Audio Meter",
-                                subtitle: "A tiny microphone level meter while recording Video or Slo-Mo",
-                                isOn: $hudAudioMeter
-                            )
-                        }
-
-                        SettingsDivider()
-
-                        SettingsToggleRow(
-                            title: camera.captureMode == .photo ? "Photos Remaining" : "Recording Time Remaining",
-                            subtitle: camera.captureMode == .photo ? "Estimate how many more photos fit on the device" : "Estimate recording time from available storage and current quality",
-                            isOn: $hudRemaining
-                        )
-
-                        SettingsDivider()
-
-                        SettingsToggleRow(
-                            title: "White Balance",
-                            subtitle: "Show the active white-balance preset",
-                            isOn: $hudWhiteBalance
-                        )
+                        SettingsToggleRow(title: "FPS", subtitle: "Show selected capture frame rate", isOn: $hudFPS)
                     }
-
-                    SettingsCard(title: "HUD Appearance", symbol: "textformat.size") {
-                        ThemeMenu(title: "Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Remaining", subtitle: camera.captureMode == .photo ? "Estimate photos remaining" : "Estimate recording time remaining", isOn: $hudRemaining)
+                    SettingsDivider()
+                    SettingsToggleRow(title: "White Balance", subtitle: "Show active white-balance preset", isOn: $hudWhiteBalance)
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Battery", subtitle: "Show battery percentage", isOn: $hudBattery)
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Free Storage", subtitle: "Show available device storage", isOn: $hudStorage)
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Thermal Status", subtitle: "Show current thermal state", isOn: $hudThermal)
+                    if camera.captureMode != .photo {
+                        SettingsDivider()
+                        SettingsToggleRow(title: "Frame Gaps", subtitle: "Analyze the last saved clip for frame gaps", isOn: $hudDroppedFrames)
+                        SettingsDivider()
+                        SettingsToggleRow(title: "Audio Meter", subtitle: "Microphone level meter while recording", isOn: $hudAudioMeter)
                     }
+                } else {
+                    Text("HUD item choices stay saved while the HUD is hidden.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+
+            SettingsCard(title: "Screen Behavior", symbol: "display") {
+                SettingsToggleRow(
+                    title: "Keep Screen Awake",
+                    subtitle: "Prevent Auto-Lock while LowPolyCam is open",
+                    isOn: $keepScreenAwakeEnabled
+                )
+            }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .tint(theme)
-        .accentColor(theme)
-        .navigationTitle("Camera HUD")
+        .navigationTitle("Viewfinder & HUD")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: isHUDEnabled) { _, _ in camera.refreshAuxiliaryOutputs() }
         .onChange(of: hudAudioMeter) { _, _ in camera.refreshAuxiliaryOutputs() }
+        .onChange(of: hudDroppedFrames) { _, _ in camera.refreshAuxiliaryOutputs() }
     }
 }
 
@@ -454,52 +485,33 @@ struct SettingsNavigationRow: View {
     }
 }
 
-private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
-    @Environment(\.cameraTint) private var theme
+private struct SettingsPickerRow<Option: Identifiable & Equatable>: View where Option.ID: Hashable {
     let title: String
     let options: [Option]
     let selection: Option
     let label: (Option) -> String
     let onSelect: (Option) -> Void
 
-    private var nativeSelection: Binding<Option.ID> {
+    private var optionPairs: [(Option.ID, String)] {
+        options.map { ($0.id, label($0)) }
+    }
+
+    private var selectionBinding: Binding<Option.ID> {
         Binding(
             get: { selection.id },
             set: { id in
-                guard id != selection.id, let option = options.first(where: { $0.id == id }) else { return }
+                guard id != selection.id,
+                      let option = options.first(where: { $0.id == id }) else { return }
                 onSelect(option)
             }
         )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-
-            Menu {
-                Picker(title, selection: nativeSelection) {
-                    ForEach(options) { option in
-                        Text(label(option)).tag(option.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Text(label(selection))
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                }
-                .foregroundStyle(theme)
-                .padding(.horizontal, 11)
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .contentShape(Rectangle())
-            }
-            .disabled(options.isEmpty)
-        }
+        SettingsSelectionControl(
+            title: title,
+            selection: selectionBinding,
+            options: optionPairs
+        )
     }
 }

@@ -25,3 +25,40 @@ struct CaptureConfigurationApplyResult {
 
     var requiresFocusReset: Bool { topologyChanged || deviceConfigurationChanged }
 }
+
+/// Immutable user intent consumed by one camera configuration operation. Keeping the dependent
+/// quality/codec/zoom/WB tuple together prevents a queued operation from reading a mixture of
+/// values after a newer main-thread edit has already changed part of the selection.
+struct CaptureConfigurationRequest {
+    let mode: CameraManager.CaptureMode
+    let position: CameraManager.CameraPosition
+    let resolution: VideoResolution
+    let frameRate: VideoFrameRate
+    let slowMotionResolution: VideoResolution
+    let slowMotionFrameRate: CameraManager.SlowMotionFrameRate
+    let codec: String
+    let compression: VideoCompression
+    let displayedZoom: CGFloat
+    let whiteBalancePreset: CameraManager.WhiteBalancePreset
+    let stabilizationEnabled: Bool
+    let mirrorSelfies: Bool
+    let photoAspect: String
+
+    func replacingDisplayedZoom(_ displayedZoom: CGFloat) -> CaptureConfigurationRequest {
+        CaptureConfigurationRequest(
+            mode: mode,
+            position: position,
+            resolution: resolution,
+            frameRate: frameRate,
+            slowMotionResolution: slowMotionResolution,
+            slowMotionFrameRate: slowMotionFrameRate,
+            codec: codec,
+            compression: compression,
+            displayedZoom: displayedZoom,
+            whiteBalancePreset: whiteBalancePreset,
+            stabilizationEnabled: stabilizationEnabled,
+            mirrorSelfies: mirrorSelfies,
+            photoAspect: photoAspect
+        )
+    }
+}

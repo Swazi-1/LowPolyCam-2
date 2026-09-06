@@ -17,11 +17,28 @@ enum CameraZoomController {
         mode: CameraManager.CaptureMode,
         recordingOrStarting: Bool
     ) -> RequestPlan {
-        guard !currentDevice.isVirtualDevice, currentDevice.position == .back else {
+        guard currentDevice.position == .back else {
             return .applyToCurrentDevice(displayedZoom)
         }
 
         let desired = desiredPhysicalDevice(in: availableDevices, displayedZoom: displayedZoom)
+
+        if currentDevice.isVirtualDevice {
+            // A virtual camera is not proof that every constituent lens participates in the
+            // CURRENT active format. Stay virtual only when its real active zoom interval can
+            // represent this request. Otherwise an idle request may hand off to a legal physical
+            // lens (notably Ultra Wide at native 4K60).
+            if activeDisplayedZoomRange(for: currentDevice).contains(displayedZoom) {
+                return .applyToCurrentDevice(displayedZoom)
+            }
+            guard desired?.uniqueID != currentDevice.uniqueID else {
+                return .applyToCurrentDevice(displayedZoom)
+            }
+            if recordingOrStarting {
+                return .blockedPhysicalSwitch
+            }
+            return .reconfigureLens(displayedZoom)
+        }
         let wantsDifferentLens = desired?.uniqueID != currentDevice.uniqueID
         guard wantsDifferentLens else { return .applyToCurrentDevice(displayedZoom) }
 
@@ -54,20 +71,43 @@ enum CameraZoomController {
     }
 
     static func minimumDisplayedZoom(for device: AVCaptureDevice) -> CGFloat {
-        max(0.5, displayedZoom(forDeviceZoom: device.minAvailableVideoZoomFactor, device: device))
+        // Physical optical routes have a stable displayed base independent of whichever format
+        // happened to be active the last time that inactive device was used.
+        if !device.isVirtualDevice {
+            if device.deviceType == .builtInUltraWideCamera { return 0.5 }
+            if device.deviceType == .builtInWideAngleCamera { return 1 }
+        }
+        return activeDisplayedZoomRange(for: device).lowerBound
     }
 
     static func maximumDisplayedZoom(for device: AVCaptureDevice) -> CGFloat {
-        min(8, displayedZoom(forDeviceZoom: device.maxAvailableVideoZoomFactor, device: device))
+        activeDisplayedZoomRange(for: device).upperBound
+    }
+
+    static func activeDisplayedZoomRange(for device: AVCaptureDevice) -> ClosedRange<CGFloat> {
+        let minimum = max(0.5, displayedZoom(forDeviceZoom: device.minAvailableVideoZoomFactor, device: device))
+        let maximum = min(8, displayedZoom(forDeviceZoom: device.maxAvailableVideoZoomFactor, device: device))
+        return min(minimum, maximum)...max(minimum, maximum)
     }
 
     /// Idle navigation is a union across legal optical inputs, not the digital range of whichever
     /// physical sensor happens to be active right now. This is what keeps 0.5x reachable after a
     /// manual-WB handoff to the 1x wide camera.
-    static func displayedZoomDomain(for devices: [AVCaptureDevice]) -> ClosedRange<CGFloat> {
+    static func displayedZoomDomain(
+        for devices: [AVCaptureDevice],
+        currentDevice: AVCaptureDevice? = nil
+    ) -> ClosedRange<CGFloat> {
         guard !devices.isEmpty else { return 1...1 }
-        let minimum = devices.map(minimumDisplayedZoom(for:)).min() ?? 1
-        let maximum = devices.map(maximumDisplayedZoom(for:)).max() ?? 1
+        let ranges: [ClosedRange<CGFloat>] = devices.map { device in
+            if device.uniqueID == currentDevice?.uniqueID {
+                return activeDisplayedZoomRange(for: device)
+            }
+            let minimum = minimumDisplayedZoom(for: device)
+            let maximum = maximumDisplayedZoom(for: device)
+            return min(minimum, maximum)...max(minimum, maximum)
+        }
+        let minimum = ranges.map(\.lowerBound).min() ?? 1
+        let maximum = ranges.map(\.upperBound).max() ?? 1
         return min(minimum, maximum)...max(minimum, maximum)
     }
 
