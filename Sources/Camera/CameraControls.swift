@@ -58,23 +58,89 @@ struct RecordButton: View {
 struct PhotoButton: View {
     @Environment(\.cameraTint) private var theme
     let isCapturing: Bool
+    let countdown: Int
+    let countdownTotal: Int
+    var isEnabled = true
     let action: () -> Void
+    let onBurstStart: () -> Void
+    let onBurstEnd: () -> Void
+    @State private var pressTask: Task<Void, Never>?
+    @State private var isBurstActive = false
 
     var body: some View {
-        Button(action: action) {
-            ZStack {
+        ZStack {
+            Circle()
+                .stroke(.white, lineWidth: 4)
+                .frame(width: 76, height: 76)
+            Circle()
+                .fill(.white)
+                .frame(width: 62, height: 62)
+                .scaleEffect(isCapturing ? 0.86 : 1)
+            if countdown > 0 {
                 Circle()
-                    .stroke(.white, lineWidth: 4)
-                    .frame(width: 76, height: 76)
-                Circle()
-                    .fill(.white)
-                    .frame(width: 62, height: 62)
-                    .scaleEffect(isCapturing ? 0.86 : 1)
+                    .trim(from: 0, to: countdownProgress)
+                    .stroke(theme, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 86, height: 86)
+                    .animation(.linear(duration: 0.9), value: countdown)
+                Text("\(countdown)")
+                    .font(.system(.title3, design: .rounded).weight(.bold))
+                    .foregroundStyle(.black)
             }
-            .animation(.easeOut(duration: 0.12), value: isCapturing)
         }
-        .disabled(isCapturing)
+        .animation(.easeOut(duration: 0.12), value: isCapturing)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in beginPress() }
+                .onEnded { _ in endPress() }
+        )
+        .opacity(isEnabled ? 1 : 0.55)
         .accessibilityLabel("Take photo")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { action() }
+        .onDisappear { cancelPress() }
+    }
+
+    private var countdownProgress: CGFloat {
+        guard countdownTotal > 0 else { return 0 }
+        return max(0.04, min(CGFloat(countdown) / CGFloat(countdownTotal), 1))
+    }
+
+    private func beginPress() {
+        guard isEnabled, !isCapturing, pressTask == nil else { return }
+        pressTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 450_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, !isCapturing else { return }
+            isBurstActive = true
+            pressTask = nil
+            onBurstStart()
+        }
+    }
+
+    private func endPress() {
+        let didStartBurst = isBurstActive
+        pressTask?.cancel()
+        pressTask = nil
+        isBurstActive = false
+
+        if didStartBurst {
+            onBurstEnd()
+        } else if isEnabled, !isCapturing {
+            action()
+        }
+    }
+
+    private func cancelPress() {
+        pressTask?.cancel()
+        pressTask = nil
+        guard isBurstActive else { return }
+        isBurstActive = false
+        onBurstEnd()
     }
 }
 
@@ -145,6 +211,7 @@ struct CameraHUD: View {
     @AppStorage("cameraHUDBattery") private var showBattery = false
     @AppStorage("cameraHUDStorage") private var showStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
+    @AppStorage("cameraHUDAudioMeter") private var showAudioMeter = false
     @State private var batteryLevel: Float = -1
     @AppStorage("thermalHUD") private var showThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
@@ -186,6 +253,9 @@ struct CameraHUD: View {
                 Text(String(format: "%02d:%02d:%02d", Int(camera.recordingDuration) / 3600, (Int(camera.recordingDuration) / 60) % 60, Int(camera.recordingDuration) % 60))
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white)
+            }
+            if showAudioMeter, camera.captureMode != .photo, camera.isRecording {
+                AudioLevelBars(level: camera.audioLevel)
             }
         }
         if !items.isEmpty {
@@ -283,6 +353,25 @@ struct CameraHUD: View {
         if item.hasPrefix("~") { return camera.captureMode == .photo ? "photo.on.rectangle" : "clock" }
         if item == whiteBalanceShortLabel { return "sun.max" }
         return "viewfinder"
+    }
+}
+
+private struct AudioLevelBars: View {
+    @Environment(\.cameraTint) private var theme
+    let level: CGFloat
+
+    private let heights: [CGFloat] = [4, 7, 10, 13]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(Array(heights.enumerated()), id: \.offset) { index, height in
+                Capsule()
+                    .fill(level >= CGFloat(index + 1) / CGFloat(heights.count) ? theme : .white.opacity(0.26))
+                    .frame(width: 2.5, height: height)
+            }
+        }
+        .frame(width: 18, height: 14, alignment: .bottom)
+        .accessibilityLabel("Microphone level")
     }
 }
 

@@ -18,9 +18,11 @@ struct CameraView: View {
     @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
     @State private var countdown = 0
+    @State private var countdownTotal = 0
     @State private var shutterTask: Task<Void, Never>?
     @State private var zoomWidth: CGFloat = 320
     @AppStorage("shutterDelay") private var shutterDelay = 0
+    @AppStorage("photoShutterDelay") private var photoShutterDelay = 0
     @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
     @AppStorage("tapZoomReset") private var tapZoomReset = true
@@ -78,17 +80,6 @@ struct CameraView: View {
                     .font(.system(size: 22, weight: .ultraLight))
                     .foregroundStyle(.white.opacity(0.7))
                     .allowsHitTesting(false)
-            }
-
-            if countdown > 0 {
-                Button { cancelCountdown() } label: {
-                    VStack {
-                        Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
-                        Text("Tap to cancel").font(.caption)
-                    }
-                    .padding(24)
-                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
-                }.foregroundStyle(.white).zIndex(10)
             }
 
             if isLevelMeterEnabled {
@@ -301,20 +292,20 @@ struct CameraView: View {
                 }
                 Spacer()
                 if camera.captureMode == .photo {
-                    PhotoButton(isCapturing: camera.isCapturingPhoto) { shutterPressed() }
-                        .highPriorityGesture(
-                            LongPressGesture(minimumDuration: 0.45).exclusively(before: TapGesture())
-                                .onEnded { value in
-                                    guard !editingStats else { return }
-                                    switch value {
-                                    case .first:
-                                        cancelCountdown()
-                                        captureHaptic()
-                                        camera.captureBurst()
-                                    case .second: shutterPressed()
-                                    }
-                                }
-                        )
+                    PhotoButton(
+                        isCapturing: camera.isCapturingPhoto,
+                        countdown: countdown,
+                        countdownTotal: countdownTotal,
+                        isEnabled: !editingStats && !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording,
+                        action: { shutterPressed() },
+                        onBurstStart: {
+                            guard !editingStats, countdown == 0 else { return }
+                            cancelCountdown()
+                            captureHaptic()
+                            camera.captureBurst()
+                        },
+                        onBurstEnd: { camera.cancelBurst() }
+                    )
                 } else if camera.isRecording && recordingLock {
                     Image(systemName: "lock.fill")
                         .font(.title2).foregroundStyle(accent.color)
@@ -367,6 +358,7 @@ struct CameraView: View {
         shutterTask?.cancel()
         shutterTask = nil
         countdown = 0
+        countdownTotal = 0
     }
 
     private func shutterPressed() {
@@ -375,17 +367,24 @@ struct CameraView: View {
         guard !camera.isRecordingStarting, !camera.isFinalizingRecording,
               shutterTask == nil, camera.isSessionRunning else { return }
         let mode = camera.captureMode
+        let delay = mode == .photo ? photoShutterDelay : shutterDelay
         shutterTask = Task { @MainActor in
-            countdown = shutterDelay
+            countdownTotal = delay
+            countdown = delay
             while countdown > 0 {
                 if countdownHaptics { CameraHaptics.fire() }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                 guard !Task.isCancelled else { return }
                 countdown -= 1
             }
-            guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else { return }
+            guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else {
+                countdownTotal = 0
+                shutterTask = nil
+                return
+            }
             captureHaptic()
             if mode == .photo { camera.capturePhoto() } else { camera.startOrStopRecording() }
+            countdownTotal = 0
             shutterTask = nil
         }
     }

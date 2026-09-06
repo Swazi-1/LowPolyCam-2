@@ -6,6 +6,7 @@ struct VideoSettingsView: View {
     var positionStats: () -> Void = {}
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("burstCount") private var burstCount = 5
+    @AppStorage("photoShutterDelay") private var photoShutterDelay = 0
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -184,9 +185,19 @@ struct VideoSettingsView: View {
 
     private var photoSettings: some View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
+            PhotoResolutionPicker(camera: camera)
+            Text("Max keeps the active camera's highest supported photo size. Lower choices only appear when that camera actually supports them.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            SettingsDivider()
             ThemeMenu(title: "Aspect Ratio", selection: $photoAspect, options: [("4:3", "4:3"), ("1:1", "1:1")])
+            ThemeMenu(title: "Photo Timer", selection: $photoShutterDelay, options: [(0, "Off"), (3, "3 seconds"), (5, "5 seconds"), (10, "10 seconds")])
+            Text("The countdown appears around the shutter. Tap it again to cancel.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            SettingsDivider()
             ThemeMenu(title: "Burst Photos", selection: $burstCount, options: [(5, "5"), (10, "10"), (15, "15")])
-            Text("Hold the shutter to take the selected number of photos. Each photo saves separately.").font(.caption).foregroundStyle(.secondary)
+            Text("Hold the shutter to start a burst, then release to stop after the current photo saves.").font(.caption).foregroundStyle(.secondary)
             SettingsDivider()
             ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
             Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
@@ -194,9 +205,9 @@ struct VideoSettingsView: View {
             SettingsDivider()
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Photo Quality")
+                    Text("Active Photo Size")
                         .font(.subheadline.weight(.semibold))
-                    Text("Uses the maximum resolution supported by the active camera")
+                    Text("Applies to the current camera lens")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -216,6 +227,55 @@ struct VideoSettingsView: View {
         case .video: return "video.fill"
         case .photo: return "camera.fill"
         case .sloMo: return "slowmo"
+        }
+    }
+}
+
+private struct PhotoResolutionPicker: View {
+    @Environment(\.cameraTint) private var theme
+    @ObservedObject var camera: CameraManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Photo Resolution")
+                .font(.subheadline.weight(.semibold))
+
+            if camera.supportedPhotoResolutions.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking this camera…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: 8),
+                        count: min(3, max(1, camera.supportedPhotoResolutions.count))
+                    ),
+                    spacing: 8
+                ) {
+                    ForEach(camera.supportedPhotoResolutions) { option in
+                        Button {
+                            camera.selectPhotoResolution(option)
+                        } label: {
+                            Text(option.label)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                                .padding(.horizontal, 4)
+                                .background(
+                                    camera.selectedPhotoResolutionID == option.id ? theme : Color.primary.opacity(0.07),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                                .foregroundStyle(camera.selectedPhotoResolutionID == option.id ? .black : .primary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(camera.selectedPhotoResolutionID == option.id ? .isSelected : [])
+                    }
+                }
+            }
         }
     }
 }
@@ -267,6 +327,7 @@ private struct CameraHUDSettingsMenu: View {
     @AppStorage("cameraHUDBattery") private var hudBattery = false
     @AppStorage("cameraHUDStorage") private var hudStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
+    @AppStorage("cameraHUDAudioMeter") private var hudAudioMeter = false
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
 
@@ -306,6 +367,13 @@ private struct CameraHUDSettingsMenu: View {
                                 subtitle: camera.captureMode == .sloMo ? "Show selected Slo-Mo frame rate" : "Show selected video frame rate",
                                 isOn: $hudFPS
                             )
+
+                            SettingsDivider()
+                            SettingsToggleRow(
+                                title: "Audio Meter",
+                                subtitle: "A tiny microphone level meter while recording Video or Slo-Mo",
+                                isOn: $hudAudioMeter
+                            )
                         }
 
                         SettingsDivider()
@@ -338,6 +406,7 @@ private struct CameraHUDSettingsMenu: View {
         .accentColor(theme)
         .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: hudAudioMeter) { _, _ in camera.refreshAuxiliaryOutputs() }
     }
 }
 

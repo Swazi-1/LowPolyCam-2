@@ -93,8 +93,10 @@ struct CapturePreferencesView: View {
 
     var body: some View {
         SettingsPage {
-            SettingsCard(title: "Shutter", symbol: "timer") {
-                ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (10, "10 seconds")])
+            if camera.captureMode != .photo {
+                SettingsCard(title: "Recording Timer", symbol: "timer") {
+                    ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (5, "5 seconds"), (10, "10 seconds")])
+                }
             }
             if camera.captureMode != .photo {
                 SettingsCard(title: "Recording", symbol: "video.fill") {

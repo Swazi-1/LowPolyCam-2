@@ -56,6 +56,25 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    struct PhotoResolutionOption: Identifiable, Equatable {
+        let id: String
+        let label: String
+        fileprivate let dimensions: CMVideoDimensions
+
+        static func == (lhs: PhotoResolutionOption, rhs: PhotoResolutionOption) -> Bool {
+            lhs.id == rhs.id
+        }
+    }
+
+    private struct PhotoFormatCandidate {
+        let id: String
+        let format: AVCaptureDevice.Format
+        let dimensions: CMVideoDimensions
+        let photoPixels: Int64
+        let previewPixels: Int64
+        let supports30FPS: Bool
+    }
+
     @Published private(set) var isSessionRunning = false
     @Published private(set) var isRecording = false
     @Published private(set) var isRecordingStarting = false
@@ -70,6 +89,8 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var availableStorageBytes: Int64 = 0
     @Published private(set) var currentPhotoResolutionLabel = "MAX"
     @Published private(set) var currentPhotoPixelCount: Int64 = 12_000_000
+    @Published private(set) var supportedPhotoResolutions: [PhotoResolutionOption] = []
+    @Published private(set) var selectedPhotoResolutionID: String
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
     @Published private(set) var supportedSlowMotionResolutions: [VideoResolution] = []
@@ -133,11 +154,14 @@ final class CameraManager: NSObject, ObservableObject {
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private let liveMetrics = LiveCaptureMetrics()
+    private let audioMeter = AudioLevelMeter()
     @Published private(set) var liveFPS: Double?
     @Published private(set) var liveMbps: Double?
     @Published private(set) var liveCaptureDrops: Int?
     @Published private(set) var liveMetricsAvailable = false
+    @Published private(set) var audioLevel: CGFloat = 0
     private var metricsTimer: DispatchSourceTimer?
+    private var audioMeterTimer: DispatchSourceTimer?
     private var diagnosticsGeneration: UInt64 = 0
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
@@ -183,6 +207,7 @@ final class CameraManager: NSObject, ObservableObject {
     private static let slowMotionResolutionKey = "selectedSlowMotionResolution"
     private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
     private static let videoStabilizationKey = "videoStabilizationEnabled"
+    private static let photoResolutionKey = "selectedPhotoResolution"
     private static let mediaSequenceKey = "lowPolyCamMediaSequence"
 
     override init() {
@@ -195,6 +220,7 @@ final class CameraManager: NSObject, ObservableObject {
         let savedSlowMotionFrameRate = UserDefaults.standard.integer(forKey: Self.slowMotionFrameRateKey)
         selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
         isVideoStabilizationEnabled = UserDefaults.standard.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
+        selectedPhotoResolutionID = UserDefaults.standard.string(forKey: Self.photoResolutionKey) ?? "max"
         super.init()
         if UserDefaults.standard.bool(forKey: "rememberCaptureMode"),
            let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
@@ -205,6 +231,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     deinit {
         metricsTimer?.cancel()
+        audioMeterTimer?.cancel()
         durationTimer?.invalidate()
         sessionObserverTokens.forEach(NotificationCenter.default.removeObserver)
         if backgroundSaveTask != .invalid {
@@ -688,13 +715,24 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func refreshLiveMetrics() {
+        refreshAuxiliaryOutputs()
+    }
+
+    func refreshAuxiliaryOutputs() {
         sessionQueue.async { [weak self] in
             guard let self, !self.recordingRequested, !self.movieOutput.isRecording else { return }
-            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            self.session.beginConfiguration()
+            self.configureAuxiliaryOutputs()
+            self.session.commitConfiguration()
         }
     }
 
     // Called inside the same transaction as the input/format change.
+    private func configureAuxiliaryOutputs() {
+        configureLiveMetrics()
+        configureAudioMeter()
+    }
+
     private func configureLiveMetrics() {
         let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats") && captureMode != .photo
         let attached = session.outputs.contains { $0 === liveMetrics.output }
@@ -703,6 +741,21 @@ final class CameraManager: NSObject, ObservableObject {
         if !wanted && attached { session.removeOutput(liveMetrics.output) }
         let available = session.outputs.contains { $0 === liveMetrics.output }
         publish { self.liveMetricsAvailable = available }
+    }
+
+    private func configureAudioMeter() {
+        let wanted = UserDefaults.standard.bool(forKey: "cameraHUDAudioMeter") && captureMode != .photo
+        let attached = session.outputs.contains { $0 === audioMeter.output }
+        guard wanted != attached else { return }
+
+        if wanted && !attached && session.canAddOutput(audioMeter.output) {
+            session.addOutput(audioMeter.output)
+        }
+        if !wanted && attached {
+            session.removeOutput(audioMeter.output)
+            audioMeter.setRunning(false)
+            publish { self.audioLevel = 0 }
+        }
     }
 
     private func startLiveMetrics() {
@@ -733,6 +786,35 @@ final class CameraManager: NSObject, ObservableObject {
         }
         metricsTimer = timer
         timer.resume()
+    }
+
+    private func startAudioMeter() {
+        audioMeterTimer?.cancel()
+        audioMeterTimer = nil
+
+        let enabled = UserDefaults.standard.bool(forKey: "cameraHUDAudioMeter") && captureMode != .photo
+        let attached = session.outputs.contains { $0 === audioMeter.output }
+        let shouldMeasure = enabled && attached
+        audioMeter.setRunning(shouldMeasure)
+        publish { self.audioLevel = 0 }
+        guard shouldMeasure else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: sessionQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(90))
+        timer.setEventHandler { [weak self] in
+            guard let self, self.movieOutput.isRecording else { return }
+            let level = self.audioMeter.readLevel()
+            self.publish { self.audioLevel = level }
+        }
+        audioMeterTimer = timer
+        timer.resume()
+    }
+
+    private func stopAudioMeter() {
+        audioMeterTimer?.cancel()
+        audioMeterTimer = nil
+        audioMeter.setRunning(false)
+        publish { self.audioLevel = 0 }
     }
 
     func applyLongevityMode(_ enabled: Bool) {
@@ -777,12 +859,35 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    /// Stops a held burst after the photo currently in flight has safely finished saving.
+    func cancelBurst() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.burstRemaining > 0 else { return }
+            self.burstRemaining = 0
+        }
+    }
+
     func capturePhoto() {
         guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning else { return }
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.beginPhotoCapture()
+        }
+    }
+
+    func selectPhotoResolution(_ option: PhotoResolutionOption) {
+        guard supportedPhotoResolutions.contains(option) else { return }
+        UserDefaults.standard.set(option.id, forKey: Self.photoResolutionKey)
+        publish { self.selectedPhotoResolutionID = option.id }
+
+        sessionQueue.async { [weak self] in
+            guard let self,
+                  self.captureMode == .photo,
+                  !self.isCapturingPhoto,
+                  !self.isPreviewTransitioning,
+                  !self.movieOutput.isRecording else { return }
+            _ = self.applyBestPhotoFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
         }
     }
 
@@ -1107,7 +1212,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         session.beginConfiguration()
         var committed = false
-        configureLiveMetrics()
+        configureAuxiliaryOutputs()
         defer {
             if !committed { session.commitConfiguration() }
         }
@@ -1560,16 +1665,16 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
-        let previewRange = photoChoice.format.videoSupportedFrameRateRanges.first {
+        let previewRange = photoChoice.candidate.format.videoSupportedFrameRateRanges.first {
             $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
-        } ?? photoChoice.format.videoSupportedFrameRateRanges.first
+        } ?? photoChoice.candidate.format.videoSupportedFrameRateRanges.first
         let previewFPS = min(max(30.0, previewRange?.minFrameRate ?? 30), previewRange?.maxFrameRate ?? 30)
 
         guard let displayedZoom = applyAtomicCaptureConfiguration(
             device: desiredDevice,
-            format: photoChoice.format,
+            format: photoChoice.candidate.format,
             frameRate: previewFPS,
-            photoDimensions: photoChoice.dimensions
+            photoDimensions: photoChoice.candidate.dimensions
         ) else {
             showError("Couldn’t configure full-resolution Photo mode.")
             return false
@@ -1586,54 +1691,86 @@ final class CameraManager: NSObject, ObservableObject {
             self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
-            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: photoChoice.dimensions)
-            self.currentPhotoPixelCount = Int64(photoChoice.dimensions.width) * Int64(photoChoice.dimensions.height)
+            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: photoChoice.candidate.dimensions)
+            self.currentPhotoPixelCount = photoChoice.candidate.photoPixels
+            self.supportedPhotoResolutions = photoChoice.options
+            if self.selectedPhotoResolutionID != photoChoice.selectedID {
+                self.selectedPhotoResolutionID = photoChoice.selectedID
+                UserDefaults.standard.set(photoChoice.selectedID, forKey: Self.photoResolutionKey)
+            }
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
         return true
     }
 
-    private func bestPhotoFormat(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions)? {
-        struct Candidate {
-            let format: AVCaptureDevice.Format
-            let photoDimensions: CMVideoDimensions
-            let photoPixels: Int64
-            let previewPixels: Int64
-            let supports30FPS: Bool
-        }
+    private func bestPhotoFormat(for device: AVCaptureDevice) -> (
+        candidate: PhotoFormatCandidate,
+        selectedID: String,
+        options: [PhotoResolutionOption]
+    )? {
+        let candidates = photoFormatCandidates(for: device)
+        guard let maximum = candidates.first else { return nil }
 
-        var best: Candidate?
+        let requestedID = UserDefaults.standard.string(forKey: Self.photoResolutionKey) ?? selectedPhotoResolutionID
+        let requested = requestedID == "max" ? maximum : candidates.first(where: { $0.id == requestedID })
+        let selected = requested ?? maximum
+        let resolvedID = requested == nil && requestedID != "max" ? "max" : requestedID
+        return (selected, resolvedID, photoResolutionOptions(from: candidates, maximum: maximum))
+    }
+
+    private func photoFormatCandidates(for device: AVCaptureDevice) -> [PhotoFormatCandidate] {
+        var bestByDimensions: [String: PhotoFormatCandidate] = [:]
+
         for format in device.formats {
-            guard let photoDimensions = format.supportedMaxPhotoDimensions.max(by: { lhs, rhs in
-                Int64(lhs.width) * Int64(lhs.height) < Int64(rhs.width) * Int64(rhs.height)
-            }) else { continue }
-
-            let videoDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let candidate = Candidate(
-                format: format,
-                photoDimensions: photoDimensions,
-                photoPixels: Int64(photoDimensions.width) * Int64(photoDimensions.height),
-                previewPixels: Int64(videoDimensions.width) * Int64(videoDimensions.height),
-                supports30FPS: format.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }
-            )
-
-            guard let current = best else {
-                best = candidate
-                continue
+            let previewDimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let previewPixels = Int64(previewDimensions.width) * Int64(previewDimensions.height)
+            let supports30FPS = format.videoSupportedFrameRateRanges.contains {
+                $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
             }
 
-            // Max still-photo resolution always wins. For formats that produce the same
-            // max-resolution photo, prefer 30 fps and then the sharpest live-preview format.
-            if candidate.photoPixels > current.photoPixels ||
-                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS && !current.supports30FPS) ||
-                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS == current.supports30FPS && candidate.previewPixels > current.previewPixels) {
-                best = candidate
+            for dimensions in format.supportedMaxPhotoDimensions where dimensions.width > 0 && dimensions.height > 0 {
+                let id = "photo-\(dimensions.width)x\(dimensions.height)"
+                let candidate = PhotoFormatCandidate(
+                    id: id,
+                    format: format,
+                    dimensions: dimensions,
+                    photoPixels: Int64(dimensions.width) * Int64(dimensions.height),
+                    previewPixels: previewPixels,
+                    supports30FPS: supports30FPS
+                )
+
+                if let current = bestByDimensions[id], !isPreferredPhotoCandidate(candidate, over: current) {
+                    continue
+                }
+                bestByDimensions[id] = candidate
             }
         }
 
-        guard let best else { return nil }
-        return (best.format, best.photoDimensions)
+        return bestByDimensions.values.sorted { lhs, rhs in
+            if lhs.photoPixels != rhs.photoPixels { return lhs.photoPixels > rhs.photoPixels }
+            return isPreferredPhotoCandidate(lhs, over: rhs)
+        }
+    }
+
+    private func isPreferredPhotoCandidate(_ lhs: PhotoFormatCandidate, over rhs: PhotoFormatCandidate) -> Bool {
+        if lhs.supports30FPS != rhs.supports30FPS { return lhs.supports30FPS }
+        return lhs.previewPixels > rhs.previewPixels
+    }
+
+    private func photoResolutionOptions(
+        from candidates: [PhotoFormatCandidate],
+        maximum: PhotoFormatCandidate
+    ) -> [PhotoResolutionOption] {
+        var options = [PhotoResolutionOption(id: "max", label: "Max", dimensions: maximum.dimensions)]
+        var usedLabels = Set([photoResolutionLabel(for: maximum.dimensions)])
+
+        for candidate in candidates where candidate.id != maximum.id {
+            let label = photoResolutionLabel(for: candidate.dimensions)
+            guard usedLabels.insert(label).inserted else { continue }
+            options.append(PhotoResolutionOption(id: candidate.id, label: label, dimensions: candidate.dimensions))
+        }
+        return options
     }
 
     private func photoResolutionLabel(for dimensions: CMVideoDimensions) -> String {
@@ -2408,6 +2545,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             }
 
             self.startLiveMetrics()
+            self.startAudioMeter()
             self.segmentTimer?.cancel()
             if self.segmentSeconds > 0 {
                 let timer = DispatchWorkItem { [weak self] in
@@ -2444,6 +2582,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             self.metricsTimer?.cancel()
             self.metricsTimer = nil
             self.liveMetrics.setRunning(false)
+            self.stopAudioMeter()
             self.segmentTimer?.cancel()
 
             if self.discardCurrentRecordingWhenFinished {
