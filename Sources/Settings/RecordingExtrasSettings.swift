@@ -108,7 +108,9 @@ struct AdvancedRecordingSettingsView: View {
             SettingsCard(title: "Diagnostics", symbol: "chart.bar.xaxis") {
                 SettingsToggleRow(
                     title: "Live Recording Stats",
-                    subtitle: "Measured capture FPS, file bitrate and monitoring-output drops",
+                    subtitle: camera.captureMode == .sloMo
+                        ? "File bitrate stays available in Slo-Mo. Extra FPS/drop monitoring stays off at 120/240 fps for stability."
+                        : "Measured capture FPS, file bitrate and monitoring-output drops",
                     isOn: $stats
                 )
                 SettingsDivider()
