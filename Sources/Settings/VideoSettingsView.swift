@@ -341,7 +341,7 @@ private struct CameraHUDSettingsMenu: View {
     }
 }
 
-private struct SettingsNavigationRow: View {
+struct SettingsNavigationRow: View {
     @Environment(\.cameraTint) private var theme
     let title: String
     let subtitle: String
