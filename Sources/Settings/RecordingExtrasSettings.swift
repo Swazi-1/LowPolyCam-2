@@ -18,11 +18,11 @@ struct LiveStatsOverlay: View {
             let compact = size == "Compact"
             let width = min(CGFloat(compact ? 176 : 238), max(120, proxy.size.width - 24))
             let rows = max(1, [showFPS, showBitrate, showDrops].filter { $0 }.count)
-            let height = CGFloat(rows * (compact ? 17 : 22) + (compact ? 16 : 24) + ((!compact || editing) ? 20 : 0))
+            let height = CGFloat(rows * (compact ? 20 : 22) + (compact ? 16 : 24) + (!compact ? 20 : 0))
             let travelX = max(1, proxy.size.width - width - 24)
             let travelY = max(1, proxy.size.height - height - 24)
             VStack(alignment: .leading, spacing: 6) {
-                if !compact || editing {
+                if !compact {
                     Text(editing ? "DRAG TO POSITION" : "LIVE RECORDING").font(.caption2.bold()).foregroundStyle(theme)
                 }
                 if showFPS { metric(compact ? "FPS" : "Capture FPS", camera.liveFPS.map { String(format: "%.1f", $0) } ?? "—") }

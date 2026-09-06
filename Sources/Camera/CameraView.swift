@@ -49,6 +49,7 @@ struct CameraView: View {
                 onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
             )
             .ignoresSafeArea()
+            .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning && !camera.isCapturingPhoto && !(camera.isRecording && recordingLock))
 
             if camera.captureMode == .photo && photoAspect == "1:1" {
                 GeometryReader { proxy in
@@ -131,16 +132,20 @@ struct CameraView: View {
                     Spacer()
                     Text(message)
                         .font(.subheadline.weight(.semibold))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 11)
-                        .background(.black.opacity(0.75), in: Capsule())
+                        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 18))
                         .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
                         .padding(.bottom, 176)
                 }
                 .transition(.opacity)
+                .allowsHitTesting(false)
                 .task(id: camera.statusMessageID) {
                     let id = camera.statusMessageID
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
                     camera.clearStatus(id: id)
                 }
             }
@@ -167,9 +172,10 @@ struct CameraView: View {
             updateIdleTimer(for: scenePhase)
             if isLevelMeterEnabled { levelMonitor.start() }
         }
-        .task {
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
                 if Task.isCancelled { break }
                 camera.refreshAvailableStorage()
             }
@@ -256,6 +262,9 @@ struct CameraView: View {
                         maxWidth: hudMaxWidth
                     )
                     .allowsHitTesting(false)
+                } else if camera.isRecording {
+                    RecordingTimer(duration: camera.recordingDuration)
+                        .allowsHitTesting(false)
                 }
             }
         }

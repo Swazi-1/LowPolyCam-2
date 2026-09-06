@@ -369,7 +369,7 @@ struct ProToolsPopup: View {
         }
         .foregroundStyle(.white)
         .padding(16)
-        .frame(width: 310)
+        .frame(maxWidth: 310)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)

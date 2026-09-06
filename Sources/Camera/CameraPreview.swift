@@ -23,7 +23,6 @@ struct CameraPreview: UIViewRepresentable {
         if uiView.previewLayer.session !== session { uiView.previewLayer.session = session }
         configure(uiView)
         guard !isPreviewTransitioning else { return }
-        uiView.enableStabilizationIfAvailable()
         uiView.updateRotation()
     }
 
@@ -37,7 +36,6 @@ struct CameraPreview: UIViewRepresentable {
         view.onLongPressToLock = onLongPressToLock
         view.setFocusExposureLocked(isFocusExposureLocked)
         view.setStabilizationEnabled(stabilizationEnabled)
-        view.setPreviewTransitioning(isPreviewTransitioning)
     }
 }
 
@@ -104,7 +102,9 @@ final class PreviewView: UIView {
         guard let connection = previewLayer.connection,
               let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview,
               connection.isVideoRotationAngleSupported(angle) else { return }
-        connection.videoRotationAngle = angle
+        if abs(connection.videoRotationAngle - angle) > 0.01 {
+            connection.videoRotationAngle = angle
+        }
     }
 
     func enableStabilizationIfAvailable() {

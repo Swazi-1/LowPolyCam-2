@@ -138,6 +138,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var liveCaptureDrops: Int?
     @Published private(set) var liveMetricsAvailable = false
     private var metricsTimer: DispatchSourceTimer?
+    private var diagnosticsGeneration: UInt64 = 0
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
     private var burstRemaining = 0
@@ -169,6 +170,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var continuingSegment = false
     private var segmentSeconds: Double = 0
     private var pendingVideoSaves = 0
+    private var recoveryRetriesInFlight = Set<URL>()
     private var discardCurrentRecordingWhenFinished = false
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
@@ -202,6 +204,8 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     deinit {
+        metricsTimer?.cancel()
+        durationTimer?.invalidate()
         sessionObserverTokens.forEach(NotificationCenter.default.removeObserver)
         if backgroundSaveTask != .invalid {
             let task = backgroundSaveTask
@@ -264,6 +268,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterrupted() {
+        burstRemaining = 0
         synchronizeTorchState()
         guard recordingRequested || movieOutput.isRecording else { return }
 
@@ -761,8 +766,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     func captureBurst() {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
-        let count = UserDefaults.standard.integer(forKey: "burstCount")
-        guard [5, 10, 15].contains(count) else { return }
+        let storedCount = UserDefaults.standard.integer(forKey: "burstCount")
+        let count = [5, 10, 15].contains(storedCount) ? storedCount : 5
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -773,7 +778,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func capturePhoto() {
-        guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
+        guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning else { return }
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -2250,12 +2255,13 @@ final class CameraManager: NSObject, ObservableObject {
     func retryRecoverableRecordings() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            let files = CameraRecoveryStore.recordings()
+            let files = CameraRecoveryStore.recordings().filter { !self.recoveryRetriesInFlight.contains($0) }
             guard !files.isEmpty else {
                 self.refreshRecoveryCount()
                 return
             }
             self.pendingVideoSaves += files.count
+            self.recoveryRetriesInFlight.formUnion(files)
             self.beginBackgroundSaveIfNeeded()
             for file in files {
                 self.saveVideoResourceToPhotos(file, runDiagnostics: false, recoveryRetry: true)
@@ -2320,21 +2326,36 @@ final class CameraManager: NSObject, ObservableObject {
         runDiagnostics: Bool,
         recoveryRetry: Bool = false
     ) {
-        let performSave: (Int?) -> Void = { [weak self] gaps in
+        if runDiagnostics {
+            diagnosticsGeneration &+= 1
+            publish { self.lastFrameGaps = nil }
+        }
+        let generation = diagnosticsGeneration
+        let performSave: () -> Void = { [weak self] in
             guard let self else { return }
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
                 let options = PHAssetResourceCreationOptions()
                 options.originalFilename = fileURL.lastPathComponent
-                options.shouldMoveFile = true
+                options.shouldMoveFile = !runDiagnostics
                 request.addResource(with: .video, fileURL: fileURL, options: options)
             }) { [weak self] success, error in
                 guard let self else { return }
                 self.sessionQueue.async {
                     self.pendingVideoSaves = max(self.pendingVideoSaves - 1, 0)
+                    if recoveryRetry { self.recoveryRetriesInFlight.remove(fileURL) }
                     if success {
-                        if let gaps {
-                            self.publish { self.lastFrameGaps = gaps }
+                        if runDiagnostics {
+                            // Photos already owns the saved copy. Diagnose the temporary source
+                            // without holding the capture UI in its finalizing state.
+                            ClipFrameDiagnostics.inspect(fileURL) { [weak self] gaps in
+                                try? FileManager.default.removeItem(at: fileURL)
+                                self?.sessionQueue.async { [weak self] in
+                                    guard let self, self.diagnosticsGeneration == generation else { return }
+                                    self.publish { self.lastFrameGaps = gaps }
+                                    self.refreshAvailableStorage()
+                                }
+                            }
                         }
                         self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
                     } else {
@@ -2352,13 +2373,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
-        if runDiagnostics {
-            ClipFrameDiagnostics.inspect(fileURL) { gaps in
-                performSave(gaps)
-            }
-        } else {
-            performSave(nil)
-        }
+        performSave()
     }
 
     func postStatus(_ message: String) {
