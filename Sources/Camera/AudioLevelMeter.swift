@@ -58,6 +58,10 @@ final class AudioLevelMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
         let bitsPerChannel = streamDescription?.pointee.mBitsPerChannel ?? 16
         let formatFlags = streamDescription?.pointee.mFormatFlags ?? 0
         let isFloat = bitsPerChannel == 32 && (formatFlags & kAudioFormatFlagIsFloat) != 0
+        // CMBlockBuffer can expose only a contiguous first range. Never read past that
+        // range when a device delivers segmented audio storage.
+        let readableLength = min(lengthAtOffset, totalLength)
+        guard readableLength > 0 else { return }
 
         let rawBytes = UnsafeRawPointer(bytes)
         var squaredTotal = 0.0
@@ -65,7 +69,7 @@ final class AudioLevelMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
 
         if isFloat {
             let samples = rawBytes.assumingMemoryBound(to: Float32.self)
-            let count = totalLength / MemoryLayout<Float32>.size
+            let count = readableLength / MemoryLayout<Float32>.size
             for index in stride(from: 0, to: count, by: 8) {
                 let value = Double(samples[index])
                 squaredTotal += value * value
@@ -73,7 +77,7 @@ final class AudioLevelMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
             }
         } else if bitsPerChannel == 32 {
             let samples = rawBytes.assumingMemoryBound(to: Int32.self)
-            let count = totalLength / MemoryLayout<Int32>.size
+            let count = readableLength / MemoryLayout<Int32>.size
             for index in stride(from: 0, to: count, by: 8) {
                 let value = Double(samples[index]) / 2_147_483_648.0
                 squaredTotal += value * value
@@ -81,7 +85,7 @@ final class AudioLevelMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
             }
         } else {
             let samples = rawBytes.assumingMemoryBound(to: Int16.self)
-            let count = totalLength / MemoryLayout<Int16>.size
+            let count = readableLength / MemoryLayout<Int16>.size
             for index in stride(from: 0, to: count, by: 8) {
                 let value = Double(samples[index]) / 32_768.0
                 squaredTotal += value * value
