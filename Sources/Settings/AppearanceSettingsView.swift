@@ -85,6 +85,11 @@ struct VideoPresetsView: View {
     private var accent = CameraAccent()
     @Environment(\.dismiss) private var dismiss
     @State private var preview: VideoQuickPreset = .balanced
+
+    init(camera: CameraManager) {
+        self.camera = camera
+    }
+
     var body: some View {
         SettingsPage {
             VStack(spacing: 18) {
