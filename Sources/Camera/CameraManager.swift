@@ -765,7 +765,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func captureBurst() {
-        guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
+        guard captureMode == .photo, isSessionRunning, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording, !isPreviewTransitioning else { return }
         let storedCount = UserDefaults.standard.integer(forKey: "burstCount")
         let count = [5, 10, 15].contains(storedCount) ? storedCount : 5
         isCapturingPhoto = true
@@ -2106,6 +2106,7 @@ final class CameraManager: NSObject, ObservableObject {
         photoSaveResult = nil
         processingPhoto = false
         guard session.isRunning else {
+            burstRemaining = 0
             publish { self.isCapturingPhoto = false }
             showError("Camera isn’t ready yet.")
             return
