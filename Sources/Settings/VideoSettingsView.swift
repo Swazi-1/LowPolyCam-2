@@ -450,63 +450,6 @@ struct SettingsNavigationRow: View {
     }
 }
 
-struct SettingsCard<Content: View>: View {
-    @Environment(\.cameraTint) private var theme
-    let title: String
-    let symbol: String
-    let content: Content
-
-    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.symbol = symbol
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Label(title, systemImage: symbol)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.secondary)
-
-            content
-        }
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.primary.opacity(0.05), lineWidth: 1)
-        }
-    }
-}
-
-struct SettingsDivider: View {
-    @Environment(\.cameraTint) private var theme
-    var body: some View {
-        Divider().opacity(0.55)
-    }
-}
-
-struct SettingsToggleRow: View {
-    @Environment(\.cameraTint) private var theme
-    let title: String
-    let subtitle: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Toggle(isOn: $isOn) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .tint(theme)
-        .frame(minHeight: 52)
-    }
-}
-
 private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
     @Environment(\.cameraTint) private var theme
     let title: String

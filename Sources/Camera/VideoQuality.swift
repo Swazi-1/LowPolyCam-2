@@ -23,3 +23,42 @@ enum VideoFrameRate: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
     var label: String { "\(rawValue) fps" }
 }
+
+enum VideoCompression: String, CaseIterable, Identifiable {
+    case dataSaver = "Data Saver"
+    case medium = "Medium"
+    case high = "High"
+
+    var id: String { rawValue }
+
+    var bitsPerPixel: Double {
+        switch self {
+        case .dataSaver: return 0.055
+        case .medium: return 0.10
+        case .high: return 0.18
+        }
+    }
+}
+
+enum VideoQuickPreset: String, CaseIterable, Identifiable {
+    case balanced = "Balanced"
+    case highQuality = "High Quality"
+    case allRounder = "All Rounder"
+    case allDay = "All Day"
+    case social = "Social"
+
+    var id: String { rawValue }
+    var resolution: VideoResolution { self == .highQuality ? .p4k : self == .allDay ? .p720 : .p1080 }
+    var frameRate: VideoFrameRate { self == .allRounder ? .fps60 : .fps30 }
+
+    var compression: VideoCompression {
+        switch self {
+        case .highQuality, .allRounder: return .high
+        case .allDay, .social: return .dataSaver
+        case .balanced: return .medium
+        }
+    }
+
+    var detail: String { "\(resolution.rawValue) · \(compression.rawValue) · \(frameRate.rawValue) fps · HEVC" }
+}
+

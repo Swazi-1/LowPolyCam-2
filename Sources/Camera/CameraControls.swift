@@ -4,7 +4,6 @@ import CoreMotion
 import UIKit
 
 struct CameraIconButton: View {
-    @Environment(\.cameraTint) private var theme
     let symbol: String
     let isEnabled: Bool
     let color: Color
@@ -33,7 +32,6 @@ struct CameraIconButton: View {
 }
 
 struct RecordButton: View {
-    @Environment(\.cameraTint) private var theme
     let isRecording: Bool
     var isEnabled = true
     let action: () -> Void
@@ -172,7 +170,6 @@ struct CaptureModeSelector: View {
 }
 
 struct ZoomIndicator: View {
-    @Environment(\.cameraTint) private var theme
     let label: String
 
     var body: some View {
@@ -188,7 +185,6 @@ struct ZoomIndicator: View {
 }
 
 struct RecordingTimer: View {
-    @Environment(\.cameraTint) private var theme
     let duration: TimeInterval
 
     var body: some View {
@@ -203,177 +199,6 @@ struct RecordingTimer: View {
     private var timerText: String {
         let totalSeconds = Int(duration)
         return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
-    }
-}
-
-struct CameraHUD: View {
-    @Environment(\.cameraTint) private var theme
-    @ObservedObject var camera: CameraManager
-    @AppStorage("cameraHUDBattery") private var showBattery = false
-    @AppStorage("cameraHUDStorage") private var showStorage = false
-    @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
-    @AppStorage("cameraHUDAudioMeter") private var showAudioMeter = false
-    @State private var batteryLevel: Float = -1
-    @AppStorage("thermalHUD") private var showThermal = false
-    @AppStorage("hudTextSize") private var hudTextSize = 10.0
-    @State private var thermalState = ProcessInfo.processInfo.thermalState
-    let showResolution: Bool
-    let showFPS: Bool
-    let showRemaining: Bool
-    let showWhiteBalance: Bool
-    let maxWidth: CGFloat
-
-    // Keep showZoom as an ignored, defaulted compatibility argument so an older
-    // CameraView/CameraControls pair cannot fail to compile during incremental updates.
-    init(
-        camera: CameraManager,
-        showResolution: Bool,
-        showFPS: Bool,
-        showRemaining: Bool,
-        showZoom: Bool = false,
-        showWhiteBalance: Bool,
-        maxWidth: CGFloat
-    ) {
-        _camera = ObservedObject(wrappedValue: camera)
-        self.showResolution = showResolution
-        self.showFPS = showFPS
-        self.showRemaining = showRemaining
-        self.showWhiteBalance = showWhiteBalance
-        self.maxWidth = maxWidth
-        _ = showZoom
-    }
-
-    var body: some View {
-      VStack(spacing: 6) {
-        HStack(spacing: 5) {
-            Circle().fill(camera.isRecording ? Color.red : theme).frame(width: 5, height: 5)
-            Text(camera.isRecording ? "REC" : camera.captureMode.rawValue)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(theme)
-            if camera.isRecording {
-                Text(String(format: "%02d:%02d:%02d", Int(camera.recordingDuration) / 3600, (Int(camera.recordingDuration) / 60) % 60, Int(camera.recordingDuration) % 60))
-                    .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white)
-            }
-            if showAudioMeter, camera.captureMode != .photo, camera.isRecording {
-                AudioLevelBars(level: camera.audioLevel)
-            }
-        }
-        if !items.isEmpty {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        Label(item, systemImage: symbol(for: item))
-                    }
-                }
-                .fixedSize(horizontal: true, vertical: false)
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        Label(item, systemImage: symbol(for: item))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                }
-                .frame(maxWidth: maxWidth - 20)
-            }
-        }
-      }
-            .font(.system(size: hudTextSize, weight: .semibold, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(theme)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
-            .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20).stroke(theme.opacity(0.35), lineWidth: 1)
-            }
-            // Keep the black pill only as wide as its content. The outer frame centers it in the
-            // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
-            .frame(maxWidth: maxWidth)
-            .accessibilityLabel(([camera.captureMode.rawValue] + items).joined(separator: ", "))
-            .task(id: showBattery) {
-                UIDevice.current.isBatteryMonitoringEnabled = showBattery
-                batteryLevel = showBattery ? UIDevice.current.batteryLevel : -1
-            }
-            .onDisappear {
-                if showBattery { UIDevice.current.isBatteryMonitoringEnabled = false }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
-                batteryLevel = UIDevice.current.batteryLevel
-            }
-            .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
-                thermalState = ProcessInfo.processInfo.thermalState
-            }
-    }
-
-    private var displayText: String {
-        items.joined(separator: "  ·  ")
-    }
-
-    private var items: [String] {
-        var result: [String] = []
-        if showResolution { result.append(camera.hudResolutionLabel) }
-        if showFPS, let fps = camera.hudFrameRateLabel { result.append("\(fps)fps") }
-        if showRemaining { result.append(camera.hudRemainingLabel) }
-        if showWhiteBalance { result.append(whiteBalanceShortLabel) }
-        if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
-        if showStorage { result.append(String(format: "%.1f GB", Double(camera.availableStorageBytes) / 1_000_000_000)) }
-        if showThermal {
-            switch thermalState {
-            case .nominal: result.append("Cool")
-            case .fair: result.append("Warm")
-            case .serious: result.append("Hot")
-            case .critical: result.append("Critical")
-            @unknown default: result.append("Temp —")
-            }
-        }
-        if showDroppedFrames, camera.captureMode != .photo {
-            result.append(camera.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
-        }
-        return result
-    }
-
-    private var whiteBalanceShortLabel: String {
-        switch camera.whiteBalancePreset {
-        case .auto: return "AWB"
-        case .daylight: return "Day"
-        case .cloudy: return "Cloud"
-        case .tungsten: return "Tung"
-        case .fluorescent: return "Fluor"
-        }
-    }
-
-    private func symbol(for item: String) -> String {
-        if item.contains("fps") { return "speedometer" }
-        if item.hasPrefix("BAT") { return "battery.100percent" }
-        if item.contains("GB") { return "internaldrive" }
-        if item.hasPrefix("Gaps") { return "waveform.path" }
-        if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
-        if item.hasPrefix("~") { return camera.captureMode == .photo ? "photo.on.rectangle" : "clock" }
-        if item == whiteBalanceShortLabel { return "sun.max" }
-        return "viewfinder"
-    }
-}
-
-private struct AudioLevelBars: View {
-    @Environment(\.cameraTint) private var theme
-    let level: CGFloat
-
-    private let heights: [CGFloat] = [4, 7, 10, 13]
-    private let thresholds: [CGFloat] = [0.10, 0.28, 0.50, 0.74]
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(Array(heights.enumerated()), id: \.offset) { index, height in
-                Capsule()
-                    .fill(level >= thresholds[index] ? theme : .white.opacity(0.26))
-                    .frame(width: 2.5, height: height)
-            }
-        }
-        .frame(width: 18, height: 14, alignment: .bottom)
-        .accessibilityLabel("Microphone level")
     }
 }
 

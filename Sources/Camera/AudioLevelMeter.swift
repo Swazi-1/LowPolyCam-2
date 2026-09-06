@@ -13,24 +13,49 @@ final class AudioLevelMeter: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
     private var running = false
     private var level: CGFloat = 0
     private var lastLevelUpdateTime: TimeInterval = 0
+    private var publishTimer: DispatchSourceTimer?
 
     override init() {
         super.init()
         output.setSampleBufferDelegate(self, queue: queue)
     }
 
-    func setRunning(_ value: Bool) {
+    func startPublishing(every interval: DispatchTimeInterval = .milliseconds(90), onLevel: @escaping (CGFloat) -> Void) {
+        stop()
+
         lock.lock()
-        running = value
+        running = true
         level = 0
-        lastLevelUpdateTime = value ? ProcessInfo.processInfo.systemUptime : 0
+        lastLevelUpdateTime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let currentLevel = self.level
+            let isRunning = self.running
+            self.lock.unlock()
+            if isRunning { onLevel(currentLevel) }
+        }
+        publishTimer = timer
+        timer.resume()
+    }
+
+    func stop() {
+        publishTimer?.cancel()
+        publishTimer = nil
+
+        lock.lock()
+        running = false
+        level = 0
+        lastLevelUpdateTime = 0
         lock.unlock()
     }
 
-    func readLevel() -> CGFloat {
-        lock.lock()
-        defer { lock.unlock() }
-        return level
+    deinit {
+        publishTimer?.cancel()
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
