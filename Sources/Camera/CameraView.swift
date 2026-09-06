@@ -47,7 +47,7 @@ struct CameraView: View {
                 onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
                 onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
             )
-            .aspectRatio(camera.captureMode == .photo ? CGFloat(3.0 / 4.0) : nil, contentMode: .fit)
+            .modifier(PhotoPreviewAspect(enabled: camera.captureMode == .photo))
             .ignoresSafeArea()
 
             if camera.captureMode == .photo && photoAspect == "1:1" {
@@ -382,5 +382,16 @@ struct CameraView: View {
 
     private func updateIdleTimer(for phase: ScenePhase) {
         UIApplication.shared.isIdleTimerDisabled = keepScreenAwakeEnabled && phase == .active
+    }
+}
+
+private struct PhotoPreviewAspect: ViewModifier {
+    let enabled: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled {
+            content.aspectRatio(CGFloat(3.0 / 4.0), contentMode: .fit)
+        } else {
+            content
+        }
     }
 }
