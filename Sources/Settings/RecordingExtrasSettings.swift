@@ -6,24 +6,33 @@ struct LiveStatsOverlay: View {
     var finish: () -> Void
     @AppStorage("liveStatsX") private var x = 0.5
     @AppStorage("liveStatsY") private var y = 0.28
+    @AppStorage("liveStatsSize") private var size = "Normal"
+    @AppStorage("liveStatsShowFPS") private var showFPS = true
+    @AppStorage("liveStatsShowBitrate") private var showBitrate = true
+    @AppStorage("liveStatsShowDrops") private var showDrops = true
     @State private var dragOrigin: CGPoint?
     @Environment(\.cameraTint) private var theme
 
     var body: some View {
         GeometryReader { proxy in
-            let width = min(CGFloat(238), max(120, proxy.size.width - 24))
-            let height: CGFloat = 110
+            let compact = size == "Compact"
+            let width = min(CGFloat(compact ? 176 : 238), max(120, proxy.size.width - 24))
+            let rows = max(1, [showFPS, showBitrate, showDrops].filter { $0 }.count)
+            let height = CGFloat(rows * (compact ? 17 : 22) + (compact ? 16 : 24) + ((!compact || editing) ? 20 : 0))
             let travelX = max(1, proxy.size.width - width - 24)
             let travelY = max(1, proxy.size.height - height - 24)
             VStack(alignment: .leading, spacing: 6) {
-                Text(editing ? "DRAG TO POSITION" : "LIVE RECORDING").font(.caption2.bold()).foregroundStyle(theme)
-                metric("Capture FPS", camera.liveFPS.map { String(format: "%.1f", $0) } ?? "—")
-                metric("File bitrate", camera.liveMbps.map { String(format: "%.1f Mbps", $0) } ?? "—")
-                metric("Capture drops", camera.liveCaptureDrops.map { String($0) } ?? "—")
+                if !compact || editing {
+                    Text(editing ? "DRAG TO POSITION" : "LIVE RECORDING").font(.caption2.bold()).foregroundStyle(theme)
+                }
+                if showFPS { metric(compact ? "FPS" : "Capture FPS", camera.liveFPS.map { String(format: "%.1f", $0) } ?? "—") }
+                if showBitrate { metric(compact ? "Bitrate" : "File bitrate", camera.liveMbps.map { String(format: "%.1f Mbps", $0) } ?? "—") }
+                if showDrops { metric(compact ? "Drops*" : "Capture drops", camera.liveCaptureDrops.map { String($0) } ?? "—") }
+                if !showFPS && !showBitrate && !showDrops { Text("No stats selected").font(.caption) }
             }
             .font(.system(size: 12, weight: .medium, design: .monospaced))
             .foregroundStyle(.white)
-            .padding(12)
+            .padding(compact ? 8 : 12)
             .frame(width: width, height: height)
             .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(theme.opacity(0.65)))
@@ -54,7 +63,8 @@ struct LiveStatsOverlay: View {
     }
 
     private func metric(_ title: String, _ value: String) -> some View {
-        HStack { Text(title); Spacer(minLength: 8); Text(value).monospacedDigit() }
+        HStack { Text(title); Spacer(minLength: 6); Text(value).monospacedDigit() }
+            .lineLimit(1).minimumScaleFactor(0.75)
     }
 }
 
@@ -68,11 +78,45 @@ struct RecordingExtrasSettings: View {
             SettingsToggleRow(title: "Longevity Mode", subtitle: "Starts video at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording. You can customize quality afterward. Previous video settings return when disabled.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
             SettingsDivider()
             SettingsToggleRow(title: "Live Recording Stats", subtitle: "Measured capture FPS, file bitrate and capture-output drops. Encoder drops are not exposed by iOS. Adds some processing overhead.", isOn: $stats)
-            if stats {
-                Button("Position Live Stats", action: positionStats).padding(.vertical, 8)
-                Text("Drag the panel on your camera screen. Camera buttons are disabled in the editor. Measurements appear during recording; — means unavailable.").font(.caption).foregroundStyle(.secondary)
-            }
+            SettingsDivider()
+            NavigationLink {
+                LiveStatsSettings(positionStats: positionStats)
+            } label: {
+                SettingsNavigationRow(title: "Live Stats Settings", subtitle: "Size, information and position", symbol: "chart.bar.xaxis")
+            }.buttonStyle(.plain)
         }
         .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
+    }
+}
+
+
+struct LiveStatsSettings: View {
+    var positionStats: () -> Void
+    @AppStorage("liveStatsSize") private var size = "Normal"
+    @AppStorage("liveStatsShowFPS") private var showFPS = true
+    @AppStorage("liveStatsShowBitrate") private var showBitrate = true
+    @AppStorage("liveStatsShowDrops") private var showDrops = true
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Appearance", symbol: "textformat.size") {
+                ThemeMenu(title: "Panel Size", selection: $size, options: [("Compact", "Compact"), ("Normal", "Normal")])
+                Text("Compact uses shorter labels and less space. The panel adjusts to your selected stats.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SettingsCard(title: "Information", symbol: "list.bullet") {
+                SettingsToggleRow(title: "Capture FPS", subtitle: "Measured frames arriving from the camera", isOn: $showFPS)
+                SettingsDivider()
+                SettingsToggleRow(title: "File Bitrate", subtitle: "Measured recording data in Mbps", isOn: $showBitrate)
+                SettingsDivider()
+                SettingsToggleRow(title: "Capture Drops", subtitle: "Frames dropped by the monitoring output; not encoder drops", isOn: $showDrops)
+            }
+            SettingsCard(title: "Position", symbol: "arrow.up.and.down.and.arrow.left.and.right") {
+                Button("Position Live Stats", action: positionStats).padding(.vertical, 8)
+                Text("Drag the panel on your camera screen. Camera buttons are disabled while positioning. The chosen size and information are used in the editor and during recording.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Live Stats")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

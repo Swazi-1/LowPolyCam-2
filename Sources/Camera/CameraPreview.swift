@@ -8,6 +8,7 @@ struct CameraPreview: UIViewRepresentable {
     let isFocusExposureLocked: Bool
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
+    var fitsPhoto = false
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
 
@@ -21,11 +22,16 @@ struct CameraPreview: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewView, context: Context) {
         if uiView.previewLayer.session !== session { uiView.previewLayer.session = session }
         configure(uiView)
+        guard !isPreviewTransitioning else { return }
         uiView.enableStabilizationIfAvailable()
         uiView.updateRotation()
     }
 
     private func configure(_ view: PreviewView) {
+        view.setPreviewTransitioning(isPreviewTransitioning)
+        guard !isPreviewTransitioning else { return }
+        let gravity: AVLayerVideoGravity = fitsPhoto ? .resizeAspect : .resizeAspectFill
+        if view.previewLayer.videoGravity != gravity { view.previewLayer.videoGravity = gravity }
         view.tintColor = UIColor(theme)
         view.onTapToFocus = onTapToFocus
         view.onLongPressToLock = onLongPressToLock
@@ -70,8 +76,10 @@ final class PreviewView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        enableStabilizationIfAvailable()
-        updateRotation()
+        if !previewTransitioning {
+            enableStabilizationIfAvailable()
+            updateRotation()
+        }
         transitionSnapshot?.frame = bounds
 
         lockLabel.sizeToFit()

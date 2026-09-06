@@ -599,32 +599,42 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectCaptureMode(_ mode: CaptureMode) {
-        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, captureMode != mode else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, captureMode != mode else { return }
+        let previousMode = captureMode
         let requestID = nextModeChangeRequestID()
+        isPreviewTransitioning = true
         captureMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: "lastCaptureMode")
         sessionQueue.async { [weak self] in
             guard let self, self.isLatestModeChangeRequest(requestID) else { return }
-            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            self.publish {
+                self.isPreviewTransitioning = false
+                if success {
+                    UserDefaults.standard.set(mode.rawValue, forKey: "lastCaptureMode")
+                } else {
+                    self.captureMode = previousMode
+                    self.sessionQueue.async {
+                        _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+                    }
+                }
+            }
         }
     }
 
     func refreshLiveMetrics() {
         sessionQueue.async { [weak self] in
             guard let self, !self.recordingRequested, !self.movieOutput.isRecording else { return }
-            self.configureLiveMetrics()
             _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
         }
     }
 
+    // Called inside the same transaction as the input/format change.
     private func configureLiveMetrics() {
         let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats") && captureMode != .photo
         let attached = session.outputs.contains { $0 === liveMetrics.output }
         guard wanted != attached else { return }
-        session.beginConfiguration()
         if wanted && !attached && session.canAddOutput(liveMetrics.output) { session.addOutput(liveMetrics.output) }
         if !wanted && attached { session.removeOutput(liveMetrics.output) }
-        session.commitConfiguration()
         let available = session.outputs.contains { $0 === liveMetrics.output }
         publish { self.liveMetricsAvailable = available }
     }
@@ -997,7 +1007,6 @@ final class CameraManager: NSObject, ObservableObject {
         session.addOutput(photoOutput)
         session.commitConfiguration()
 
-        configureLiveMetrics()
         updateCapabilities()
         _ = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         synchronizeTorchState()
@@ -1031,6 +1040,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         session.beginConfiguration()
         var committed = false
+        configureLiveMetrics()
         defer {
             if !committed { session.commitConfiguration() }
         }
@@ -1452,7 +1462,6 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func applyActiveModeFormat(preferVirtualCamera: Bool = true) -> Bool {
-        configureLiveMetrics()
         switch captureMode {
         case .photo:
             return applyBestPhotoFormat(preferVirtualCamera: preferVirtualCamera)
