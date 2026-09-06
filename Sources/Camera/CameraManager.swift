@@ -168,6 +168,9 @@ final class CameraManager: NSObject, ObservableObject {
     private var burstRemaining = 0
     private var burstAspect = "4:3"
     private var pendingPhotoAspect = "4:3"
+    private var activeMaximumPhotoDimensions = CMVideoDimensions(width: 0, height: 0)
+    private var pendingPhotoOutputDimensions: CMVideoDimensions?
+    private var processedPhotoDimensions: CMVideoDimensions?
     private var processingPhoto = false
     private var photoCaptureFinished = false
     private var photoSaveResult: Bool?
@@ -398,8 +401,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     private var estimatedBytesPerPhoto: Double {
         let pixels = max(Double(currentPhotoPixelCount), 1)
-        let bytesPerPixel = photoFileFormat == "HEIC" ? 0.22 : 0.48
-        return max(pixels * bytesPerPixel, photoFileFormat == "HEIC" ? 1_200_000 : 2_000_000)
+        // Include container/metadata overhead without imposing a multi-megabyte minimum on tiny
+        // 0.3/0.5 MP photos. The old floor made the Remaining HUD massively undercount low-res
+        // shots (a 0.3 MP HEIC was estimated as at least 1.2 MB).
+        if photoFileFormat == "HEIC" {
+            return 80_000 + pixels * 0.22
+        }
+        return 140_000 + pixels * 0.42
     }
 
     func start() {
@@ -583,7 +591,7 @@ final class CameraManager: NSObject, ObservableObject {
 
                     // Video recording continues below using the currently active physical lens.
                     // deviceZoomFactor(for:) maps the displayed zoom into that sensor's digital crop.
-                    
+
                 }
             }
 
@@ -879,15 +887,23 @@ final class CameraManager: NSObject, ObservableObject {
     func selectPhotoResolution(_ option: PhotoResolutionOption) {
         guard supportedPhotoResolutions.contains(option) else { return }
         UserDefaults.standard.set(option.id, forKey: Self.photoResolutionKey)
-        publish { self.selectedPhotoResolutionID = option.id }
-
         sessionQueue.async { [weak self] in
-            guard let self,
-                  self.captureMode == .photo,
-                  !self.isCapturingPhoto,
-                  !self.isPreviewTransitioning,
-                  !self.movieOutput.isRecording else { return }
-            _ = self.applyBestPhotoFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            guard let self else { return }
+            self.refreshPhotoResolutionState()
+        }
+    }
+
+    /// Rebuilds the output-size choices when 4:3 / 1:1 changes. Lower MP choices are
+    /// post-processed from the camera's maximum still, so changing resolution never forces a
+    /// sensor-format reconfiguration or changes the requested aspect ratio.
+    func refreshPhotoResolutionForCurrentAspect() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.activeMaximumPhotoDimensions.width > 0 && self.activeMaximumPhotoDimensions.height > 0 {
+                self.refreshPhotoResolutionState()
+            } else if self.captureMode == .photo {
+                _ = self.applyBestPhotoFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            }
         }
     }
 
@@ -1660,63 +1676,216 @@ final class CameraManager: NSObject, ObservableObject {
             ? (devices.first(where: { $0.isVirtualDevice }) ?? physical ?? devices.first)
             : (physical ?? devices.first(where: { !$0.isVirtualDevice }) ?? devices.first)
 
-        guard let desiredDevice, let photoChoice = bestPhotoFormat(for: desiredDevice) else {
+        guard let desiredDevice,
+              let maximum = photoFormatCandidates(for: desiredDevice).first else {
             showError("Full-resolution photos aren’t available on this camera.")
             return false
         }
 
-        let previewRange = photoChoice.candidate.format.videoSupportedFrameRateRanges.first {
+        let previewRange = maximum.format.videoSupportedFrameRateRanges.first {
             $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
-        } ?? photoChoice.candidate.format.videoSupportedFrameRateRanges.first
+        } ?? maximum.format.videoSupportedFrameRateRanges.first
         let previewFPS = min(max(30.0, previewRange?.minFrameRate ?? 30), previewRange?.maxFrameRate ?? 30)
 
+        // Always keep Photo mode on the camera's best still-photo source. The selectable MP
+        // values are produced after capture. This avoids lower-resolution sensor formats that
+        // can silently return fewer pixels or a different aspect ratio (for example 10 MP ->
+        // ~7 MP, or a tall non-4:3 image on some formats).
         guard let displayedZoom = applyAtomicCaptureConfiguration(
             device: desiredDevice,
-            format: photoChoice.candidate.format,
+            format: maximum.format,
             frameRate: previewFPS,
-            photoDimensions: photoChoice.candidate.dimensions
+            photoDimensions: maximum.dimensions
         ) else {
             showError("Couldn’t configure full-resolution Photo mode.")
             return false
         }
 
+        activeMaximumPhotoDimensions = maximum.dimensions
         isUsingVideoPreviewProxy = false
         isUsingSlowMotionPreview = false
         let minimum = minimumSupportedZoom(for: desiredDevice)
-        let maximum = maximumSupportedZoom(for: desiredDevice)
+        let maximumZoom = maximumSupportedZoom(for: desiredDevice)
+        let resolutionState = resolvedPhotoResolutionState(
+            maximumCaptureDimensions: maximum.dimensions,
+            aspect: currentPhotoAspect
+        )
         publish {
             self.minimumZoomFactor = minimum
-            self.maximumZoomFactor = maximum
+            self.maximumZoomFactor = maximumZoom
             self.zoomFactor = displayedZoom
             self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
-            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: photoChoice.candidate.dimensions)
-            self.currentPhotoPixelCount = photoChoice.candidate.photoPixels
-            self.supportedPhotoResolutions = photoChoice.options
-            if self.selectedPhotoResolutionID != photoChoice.selectedID {
-                self.selectedPhotoResolutionID = photoChoice.selectedID
-                UserDefaults.standard.set(photoChoice.selectedID, forKey: Self.photoResolutionKey)
-            }
+            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: resolutionState.selected.dimensions)
+            self.currentPhotoPixelCount = self.pixelCount(resolutionState.selected.dimensions)
+            self.supportedPhotoResolutions = resolutionState.options
+            self.selectedPhotoResolutionID = resolutionState.selected.id
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
         return true
     }
 
-    private func bestPhotoFormat(for device: AVCaptureDevice) -> (
-        candidate: PhotoFormatCandidate,
-        selectedID: String,
-        options: [PhotoResolutionOption]
-    )? {
-        let candidates = photoFormatCandidates(for: device)
-        guard let maximum = candidates.first else { return nil }
+    private var currentPhotoAspect: String {
+        UserDefaults.standard.string(forKey: "photoAspect") == "1:1" ? "1:1" : "4:3"
+    }
 
-        let requestedID = UserDefaults.standard.string(forKey: Self.photoResolutionKey) ?? selectedPhotoResolutionID
-        let requested = requestedID == "max" ? maximum : candidates.first(where: { $0.id == requestedID })
-        let selected = requested ?? maximum
-        let resolvedID = requested == nil && requestedID != "max" ? "max" : requestedID
-        return (selected, resolvedID, photoResolutionOptions(from: candidates, maximum: maximum))
+    private static let photoResolutionPresets: [(id: String, megapixels: Double)] = [
+        ("48", 48), ("24", 24), ("12", 12), ("11", 11), ("10", 10),
+        ("8", 8), ("5", 5), ("3", 3), ("2", 2), ("1.6", 1.6),
+        ("1", 1), ("0.5", 0.5), ("0.3", 0.3)
+    ]
+
+    private func refreshPhotoResolutionState() {
+        guard activeMaximumPhotoDimensions.width > 0, activeMaximumPhotoDimensions.height > 0 else { return }
+        let state = resolvedPhotoResolutionState(
+            maximumCaptureDimensions: activeMaximumPhotoDimensions,
+            aspect: currentPhotoAspect
+        )
+        publish {
+            self.supportedPhotoResolutions = state.options
+            self.selectedPhotoResolutionID = state.selected.id
+            self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: state.selected.dimensions)
+            self.currentPhotoPixelCount = self.pixelCount(state.selected.dimensions)
+        }
+    }
+
+    private func resolvedPhotoResolutionState(
+        maximumCaptureDimensions: CMVideoDimensions,
+        aspect: String,
+        requestedID overrideID: String? = nil
+    ) -> (selected: PhotoResolutionOption, options: [PhotoResolutionOption]) {
+        let options = photoResolutionOptions(maximumCaptureDimensions: maximumCaptureDimensions, aspect: aspect)
+        if options.isEmpty {
+            let fallback = PhotoResolutionOption(id: "max", label: "Max", dimensions: maximumCaptureDimensions)
+            return (fallback, [fallback])
+        }
+        var requestedID = overrideID ?? UserDefaults.standard.string(forKey: Self.photoResolutionKey) ?? selectedPhotoResolutionID
+        if overrideID == nil,
+           requestedID.hasPrefix("photo-"),
+           let migrated = migratedPhotoResolutionID(fromLegacyID: requestedID, options: options) {
+            requestedID = migrated
+            UserDefaults.standard.set(migrated, forKey: Self.photoResolutionKey)
+        }
+        let selected = options.first(where: { $0.id == requestedID }) ?? options[0]
+        return (selected, options)
+    }
+
+    private func migratedPhotoResolutionID(
+        fromLegacyID legacyID: String,
+        options: [PhotoResolutionOption]
+    ) -> String? {
+        let payload = legacyID.dropFirst("photo-".count)
+        let pieces = payload.split(separator: "x")
+        guard pieces.count == 2,
+              let width = Double(pieces[0]),
+              let height = Double(pieces[1]),
+              width > 0, height > 0 else { return nil }
+        let legacyMP = width * height / 1_000_000.0
+        let candidates = options.filter { $0.id != "max" }
+        guard let closest = candidates.min(by: {
+            abs(Double(pixelCount($0.dimensions)) / 1_000_000.0 - legacyMP) <
+            abs(Double(pixelCount($1.dimensions)) / 1_000_000.0 - legacyMP)
+        }) else { return "max" }
+        let closestMP = Double(pixelCount(closest.dimensions)) / 1_000_000.0
+        return abs(closestMP - legacyMP) <= 0.45 ? closest.id : "max"
+    }
+
+    private func photoResolutionOptions(
+        maximumCaptureDimensions: CMVideoDimensions,
+        aspect: String
+    ) -> [PhotoResolutionOption] {
+        let maximumOutput = maximumOutputPhotoDimensions(from: maximumCaptureDimensions, aspect: aspect)
+        let maximumPixels = pixelCount(maximumOutput)
+        guard maximumPixels > 0 else { return [] }
+
+        var options = [PhotoResolutionOption(id: "max", label: "Max", dimensions: maximumOutput)]
+        let maximumMP = Double(maximumPixels) / 1_000_000.0
+
+        for preset in Self.photoResolutionPresets {
+            // Max already represents the highest useful output for the selected aspect. Avoid a
+            // duplicate preset such as Max (12.2 MP) + 12 MP.
+            if abs(maximumMP - preset.megapixels) < 0.30 { continue }
+            guard preset.megapixels < maximumMP else { continue }
+            let dimensions = targetPhotoDimensions(
+                megapixels: preset.megapixels,
+                aspect: aspect,
+                maximum: maximumOutput
+            )
+            guard dimensions.width > 0, dimensions.height > 0 else { continue }
+            let actualMP = Double(pixelCount(dimensions)) / 1_000_000.0
+            guard actualMP <= maximumMP + 0.001 else { continue }
+            options.append(PhotoResolutionOption(
+                id: "mp-\(preset.id)",
+                label: formattedMegapixelValue(preset.megapixels) + " MP",
+                dimensions: dimensions
+            ))
+        }
+        return options
+    }
+
+    private func maximumOutputPhotoDimensions(from source: CMVideoDimensions, aspect: String) -> CMVideoDimensions {
+        let width = Int(max(source.width, source.height))
+        let height = Int(min(source.width, source.height))
+        guard width > 0, height > 0 else { return CMVideoDimensions(width: 0, height: 0) }
+
+        if aspect == "1:1" {
+            let side = max(2, min(width, height))
+            return CMVideoDimensions(width: Int32(side), height: Int32(side))
+        }
+
+        // Exact 4:3 output. Using a 4*k by 3*k rectangle prevents the small ratio drift that
+        // previously let some lower-resolution sensor modes save tall/non-4:3 photos.
+        var unit = min(width / 4, height / 3)
+        unit = max(unit, 2)
+        return CMVideoDimensions(width: Int32(unit * 4), height: Int32(unit * 3))
+    }
+
+    private func targetPhotoDimensions(
+        megapixels: Double,
+        aspect: String,
+        maximum: CMVideoDimensions
+    ) -> CMVideoDimensions {
+        let targetPixels = max(megapixels, 0.01) * 1_000_000.0
+
+        if aspect == "1:1" {
+            var side = Int(sqrt(targetPixels).rounded())
+            side = min(side, Int(min(maximum.width, maximum.height)))
+            side = max(side, 2)
+            return CMVideoDimensions(width: Int32(side), height: Int32(side))
+        }
+
+        // 4*k × 3*k = 12*k² pixels. Using the nearest integer k keeps the saved MP value as
+        // close as possible to the label while preserving an exact 4:3 ratio.
+        var unit = Int(sqrt(targetPixels / 12.0).rounded())
+        let maximumUnit = min(Int(maximum.width) / 4, Int(maximum.height) / 3)
+        unit = min(max(unit, 2), maximumUnit)
+        return CMVideoDimensions(width: Int32(unit * 4), height: Int32(unit * 3))
+    }
+
+    private func pixelCount(_ dimensions: CMVideoDimensions) -> Int64 {
+        Int64(dimensions.width) * Int64(dimensions.height)
+    }
+
+    private func formattedMegapixelValue(_ megapixels: Double) -> String {
+        let rounded = megapixels.rounded()
+        if abs(megapixels - rounded) < 0.001 { return "\(Int(rounded))" }
+        return String(format: "%.1f", megapixels)
+    }
+
+    private func photoResolutionLabel(for dimensions: CMVideoDimensions) -> String {
+        let megapixels = Double(dimensions.width) * Double(dimensions.height) / 1_000_000.0
+        let rounded = megapixels.rounded()
+        // Preserve useful fractional labels at the low end. The old ±0.35 rule turned 0.3 MP
+        // into "0 MP". Max 12.2 MP is still presented cleanly as 12 MP.
+        if megapixels >= 10, abs(megapixels - rounded) < 0.30 {
+            return "\(Int(rounded)) MP"
+        }
+        if megapixels >= 0.9, abs(megapixels - rounded) < 0.08 {
+            return "\(Int(rounded)) MP"
+        }
+        return String(format: "%.1f MP", megapixels)
     }
 
     private func photoFormatCandidates(for device: AVCaptureDevice) -> [PhotoFormatCandidate] {
@@ -1756,30 +1925,6 @@ final class CameraManager: NSObject, ObservableObject {
     private func isPreferredPhotoCandidate(_ lhs: PhotoFormatCandidate, over rhs: PhotoFormatCandidate) -> Bool {
         if lhs.supports30FPS != rhs.supports30FPS { return lhs.supports30FPS }
         return lhs.previewPixels > rhs.previewPixels
-    }
-
-    private func photoResolutionOptions(
-        from candidates: [PhotoFormatCandidate],
-        maximum: PhotoFormatCandidate
-    ) -> [PhotoResolutionOption] {
-        var options = [PhotoResolutionOption(id: "max", label: "Max", dimensions: maximum.dimensions)]
-        var usedLabels = Set([photoResolutionLabel(for: maximum.dimensions)])
-
-        for candidate in candidates where candidate.id != maximum.id {
-            let label = photoResolutionLabel(for: candidate.dimensions)
-            guard usedLabels.insert(label).inserted else { continue }
-            options.append(PhotoResolutionOption(id: candidate.id, label: label, dimensions: candidate.dimensions))
-        }
-        return options
-    }
-
-    private func photoResolutionLabel(for dimensions: CMVideoDimensions) -> String {
-        let megapixels = Double(dimensions.width) * Double(dimensions.height) / 1_000_000.0
-        let rounded = megapixels.rounded()
-        if abs(megapixels - rounded) < 0.35 {
-            return "\(Int(rounded)) MP"
-        }
-        return String(format: "%.1f MP", megapixels)
     }
 
     private func minimumSupportedZoom(for device: AVCaptureDevice) -> CGFloat {
@@ -2249,7 +2394,14 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        pendingPhotoAspect = burstRemaining > 0 ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
+        pendingPhotoAspect = burstRemaining > 0 ? burstAspect : currentPhotoAspect
+        let maxCaptureDimensions = photoOutput.maxPhotoDimensions
+        let resolutionState = resolvedPhotoResolutionState(
+            maximumCaptureDimensions: maxCaptureDimensions,
+            aspect: pendingPhotoAspect
+        )
+        pendingPhotoOutputDimensions = resolutionState.selected.dimensions
+        processedPhotoDimensions = nil
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
@@ -2532,7 +2684,6 @@ final class CameraManager: NSObject, ObservableObject {
         postStatus(message)
     }
 }
-
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         sessionQueue.async { [weak self] in
@@ -2674,48 +2825,65 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             guard let self else { return }
             self.processingPhoto = true
             let filename = self.pendingPhotoFilename ?? self.nextMediaFilename(fileExtension: "jpg")
-            let square = self.pendingPhotoAspect == "1:1"
+            let aspect = self.pendingPhotoAspect
+            let targetDimensions = self.pendingPhotoOutputDimensions
             self.pendingPhotoFilename = nil
+
             self.storageQueue.async {
-                let result = square ? PhotoAspectProcessor.square(data) : data
-                guard let result else {
-                    self.showError("Couldn’t crop the photo. Please try again.")
+                guard let processed = PhotoAspectProcessor.process(
+                    data,
+                    aspect: aspect,
+                    targetDimensions: targetDimensions
+                ) else {
+                    self.showError("Couldn’t prepare the selected photo size. Please try again.")
                     self.completePhoto(saveSucceeded: false)
                     return
                 }
+
                 PHPhotoLibrary.shared().performChanges({
                     let request = PHAssetCreationRequest.forAsset()
                     let options = PHAssetResourceCreationOptions()
                     options.originalFilename = filename
-                    request.addResource(with: .photo, data: result, options: options)
+                    request.addResource(with: .photo, data: processed.data, options: options)
                 }) { success, error in
                     if !success { self.showError(error?.localizedDescription ?? "Couldn’t save the photo.") }
-                    self.completePhoto(saveSucceeded: success)
+                    self.completePhoto(saveSucceeded: success, dimensions: success ? processed.dimensions : nil)
                 }
             }
         }
     }
 
-    private func completePhoto(saveSucceeded: Bool) {
+    private func completePhoto(saveSucceeded: Bool, dimensions: CMVideoDimensions? = nil) {
         sessionQueue.async {
             self.photoSaveResult = saveSucceeded
+            if let dimensions { self.processedPhotoDimensions = dimensions }
             self.finishPhotoIfReady()
         }
     }
 
     private func finishPhotoIfReady() {
-            guard photoCaptureFinished, let saveSucceeded = photoSaveResult else { return }
-            photoSaveResult = nil
-            processingPhoto = false
-            burstRemaining = saveSucceeded ? max(0, burstRemaining - 1) : 0
-            if self.burstRemaining > 0 && self.session.isRunning {
-                self.beginPhotoCapture()
-            } else {
-                self.burstRemaining = 0
-                self.publish { self.isCapturingPhoto = false }
-                if saveSucceeded { self.postStatus("Photos saved to Photos") }
-                self.refreshAvailableStorage()
+        guard photoCaptureFinished, let saveSucceeded = photoSaveResult else { return }
+        photoSaveResult = nil
+        processingPhoto = false
+
+        if saveSucceeded, let dimensions = processedPhotoDimensions {
+            publish {
+                self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: dimensions)
+                self.currentPhotoPixelCount = self.pixelCount(dimensions)
             }
+        }
+        processedPhotoDimensions = nil
+        pendingPhotoOutputDimensions = nil
+
+        burstRemaining = saveSucceeded ? max(0, burstRemaining - 1) : 0
+        if burstRemaining > 0 && session.isRunning {
+            beginPhotoCapture()
+        } else {
+            burstRemaining = 0
+            publish { self.isCapturingPhoto = false }
+            if saveSucceeded { postStatus("Photos saved to Photos") }
+            refreshAvailableStorage()
+        }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
@@ -2725,15 +2893,9 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 self.showError("Photo capture failed: \(error.localizedDescription)")
                 if !self.processingPhoto { self.photoSaveResult = false }
             }
-            let size = resolvedSettings.photoDimensions
-            let side = min(size.width, size.height)
-            let displayed = self.pendingPhotoAspect == "1:1" ? CMVideoDimensions(width: side, height: side) : size
-            self.publish {
-                if displayed.width > 0 && displayed.height > 0 {
-                    self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: displayed)
-                    self.currentPhotoPixelCount = Int64(displayed.width) * Int64(displayed.height)
-                }
-            }
+            // The saved dimensions come from PhotoAspectProcessor, not resolvedSettings. The
+            // camera is intentionally captured at max resolution and lower MP choices are
+            // cropped/resized afterward so the selected MP and aspect stay exact.
             self.finishPhotoIfReady()
         }
     }

@@ -361,12 +361,13 @@ private struct AudioLevelBars: View {
     let level: CGFloat
 
     private let heights: [CGFloat] = [4, 7, 10, 13]
+    private let thresholds: [CGFloat] = [0.10, 0.28, 0.50, 0.74]
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(Array(heights.enumerated()), id: \.offset) { index, height in
                 Capsule()
-                    .fill(level >= CGFloat(index + 1) / CGFloat(heights.count) ? theme : .white.opacity(0.26))
+                    .fill(level >= thresholds[index] ? theme : .white.opacity(0.26))
                     .frame(width: 2.5, height: height)
             }
         }

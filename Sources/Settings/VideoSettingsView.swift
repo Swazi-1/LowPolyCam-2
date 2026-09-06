@@ -104,6 +104,9 @@ struct VideoSettingsView: View {
                 }
             }
         }
+        .onChange(of: photoAspect) { _, _ in
+            camera.refreshPhotoResolutionForCurrentAspect()
+        }
     }
 
     private var modeHeader: some View {
@@ -186,7 +189,7 @@ struct VideoSettingsView: View {
     private var photoSettings: some View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
             PhotoResolutionPicker(camera: camera)
-            Text("Max keeps the active camera's highest supported photo size. Lower choices only appear when that camera actually supports them.")
+            Text("Max uses the active camera's highest-quality still. Lower choices are clean downsizes from Max and always keep the selected aspect ratio.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             SettingsDivider()
@@ -235,45 +238,49 @@ private struct PhotoResolutionPicker: View {
     @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
 
+    private var selectedOption: CameraManager.PhotoResolutionOption? {
+        camera.supportedPhotoResolutions.first { $0.id == camera.selectedPhotoResolutionID }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Photo Resolution")
-                .font(.subheadline.weight(.semibold))
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Photo Resolution")
+                    .font(.subheadline.weight(.semibold))
+                Text("Captured from the maximum-quality camera source")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
 
             if camera.supportedPhotoResolutions.isEmpty {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Checking this camera…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                ProgressView().controlSize(.small)
             } else {
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 8),
-                        count: min(3, max(1, camera.supportedPhotoResolutions.count))
-                    ),
-                    spacing: 8
-                ) {
+                Menu {
                     ForEach(camera.supportedPhotoResolutions) { option in
                         Button {
                             camera.selectPhotoResolution(option)
                         } label: {
-                            Text(option.label)
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.82)
-                                .frame(maxWidth: .infinity, minHeight: 36)
-                                .padding(.horizontal, 4)
-                                .background(
-                                    camera.selectedPhotoResolutionID == option.id ? theme : Color.primary.opacity(0.07),
-                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                )
-                                .foregroundStyle(camera.selectedPhotoResolutionID == option.id ? .black : .primary)
+                            HStack {
+                                Text(option.label)
+                                if camera.selectedPhotoResolutionID == option.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(camera.selectedPhotoResolutionID == option.id ? .isSelected : [])
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(selectedOption?.id == "max" ? "Max · \(camera.currentPhotoResolutionLabel)" : (selectedOption?.label ?? camera.currentPhotoResolutionLabel))
+                            .font(.caption.weight(.bold))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundStyle(theme)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(theme.opacity(0.13), in: Capsule())
                 }
             }
         }
