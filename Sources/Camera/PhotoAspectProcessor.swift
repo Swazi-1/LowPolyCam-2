@@ -14,6 +14,9 @@ enum PhotoAspectProcessor {
         guard let image = context.createCGImage(input.cropped(to: crop), from: crop) else { return nil }
         var properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] ?? [:]
         properties[kCGImagePropertyOrientation as String] = 1
+        var tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+        tiff[kCGImagePropertyTIFFOrientation as String] = 1
+        properties[kCGImagePropertyTIFFDictionary as String] = tiff
         properties[kCGImagePropertyPixelWidth as String] = image.width
         properties[kCGImagePropertyPixelHeight as String] = image.height
         var exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]

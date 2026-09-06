@@ -152,6 +152,10 @@ struct VideoSettingsView: View {
 
     private var slowMotionSettings: some View {
         SettingsCard(title: "Slo-Mo Quality", symbol: "slowmo") {
+            if camera.cameraPosition == .back && camera.minimumZoomFactor >= 1 {
+                Text("0.5× is available only when the Ultra Wide lens supports this Slo-Mo quality and frame rate.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if camera.supportedSlowMotionResolutions.isEmpty {
                 Text("Slo-Mo isn’t available on this camera.")
                     .font(.subheadline)

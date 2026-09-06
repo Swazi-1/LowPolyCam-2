@@ -47,6 +47,7 @@ struct CameraView: View {
                 onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
                 onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
             )
+            .aspectRatio(camera.captureMode == .photo ? CGFloat(3.0 / 4.0) : nil, contentMode: .fit)
             .ignoresSafeArea()
 
             if camera.captureMode == .photo && photoAspect == "1:1" {
@@ -57,7 +58,7 @@ struct CameraView: View {
                         Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
                         Color.black.opacity(0.7)
                     }
-                }.allowsHitTesting(false)
+                }.ignoresSafeArea().allowsHitTesting(false)
             }
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
@@ -290,7 +291,7 @@ struct CameraView: View {
                 }
                 Spacer()
                 if camera.captureMode == .photo {
-                    PhotoButton(isCapturing: camera.isCapturingPhoto) {}
+                    PhotoButton(isCapturing: camera.isCapturingPhoto) { shutterPressed() }
                         .highPriorityGesture(
                             LongPressGesture(minimumDuration: 0.45).exclusively(before: TapGesture())
                                 .onEnded { value in

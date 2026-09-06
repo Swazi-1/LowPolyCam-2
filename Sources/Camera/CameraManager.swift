@@ -144,6 +144,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var burstAspect = "4:3"
     private var pendingPhotoAspect = "4:3"
     private var processingPhoto = false
+    private var photoCaptureFinished = false
+    private var photoSaveResult: Bool?
 
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
@@ -387,6 +389,7 @@ final class CameraManager: NSObject, ObservableObject {
     func stop() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.burstRemaining = 0
             self.segmentTimer?.cancel()
             if self.movieOutput.isRecording {
                 self.recordingRequested = false
@@ -408,6 +411,7 @@ final class CameraManager: NSObject, ObservableObject {
     func appDidBecomeInactive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.burstRemaining = 0
             self.continuingSegment = false
             self.segmentTimer?.cancel()
 
@@ -1963,6 +1967,9 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginPhotoCapture() {
+        photoCaptureFinished = false
+        photoSaveResult = nil
+        processingPhoto = false
         guard session.isRunning else {
             publish { self.isCapturingPhoto = false }
             showError("Camera isn’t ready yet.")
@@ -2406,8 +2413,16 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
 
     private func completePhoto(saveSucceeded: Bool) {
         sessionQueue.async {
-            self.processingPhoto = false
-            self.burstRemaining = saveSucceeded ? max(0, self.burstRemaining - 1) : 0
+            self.photoSaveResult = saveSucceeded
+            self.finishPhotoIfReady()
+        }
+    }
+
+    private func finishPhotoIfReady() {
+            guard photoCaptureFinished, let saveSucceeded = photoSaveResult else { return }
+            photoSaveResult = nil
+            processingPhoto = false
+            burstRemaining = saveSucceeded ? max(0, burstRemaining - 1) : 0
             if self.burstRemaining > 0 && self.session.isRunning {
                 self.beginPhotoCapture()
             } else {
@@ -2416,18 +2431,25 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 if saveSucceeded { self.postStatus("Photos saved to Photos") }
                 self.refreshAvailableStorage()
             }
-        }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
-        if let error {
-            showError("Photo capture failed: \(error.localizedDescription)")
-            sessionQueue.async {
-                if !self.processingPhoto {
-                    self.burstRemaining = 0
-                    self.publish { self.isCapturingPhoto = false }
+        sessionQueue.async {
+            self.photoCaptureFinished = true
+            if let error {
+                self.showError("Photo capture failed: \(error.localizedDescription)")
+                if !self.processingPhoto { self.photoSaveResult = false }
+            }
+            let size = resolvedSettings.photoDimensions
+            let side = min(size.width, size.height)
+            let displayed = self.pendingPhotoAspect == "1:1" ? CMVideoDimensions(width: side, height: side) : size
+            self.publish {
+                if displayed.width > 0 && displayed.height > 0 {
+                    self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: displayed)
+                    self.currentPhotoPixelCount = Int64(displayed.width) * Int64(displayed.height)
                 }
             }
+            self.finishPhotoIfReady()
         }
     }
 }
