@@ -163,12 +163,6 @@ struct CameraView: View {
             updateIdleTimer(for: scenePhase)
             if isLevelMeterEnabled { levelMonitor.start() }
         }
-        .task(id: camera.lastPhotoThumbnailID) {
-            guard camera.lastPhotoThumbnail != nil else { return }
-            let id = camera.lastPhotoThumbnailID
-            do { try await Task.sleep(nanoseconds: 1_350_000_000) } catch { return }
-            camera.clearLastPhotoThumbnail(id: id)
-        }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
@@ -302,7 +296,6 @@ struct CameraView: View {
                         isCapturing: camera.isCapturingPhoto,
                         countdown: countdown,
                         countdownTotal: countdownTotal,
-                        previewImage: camera.lastPhotoThumbnail,
                         isEnabled: !editingStats && !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording,
                         action: { shutterPressed() },
                         onBurstStart: {

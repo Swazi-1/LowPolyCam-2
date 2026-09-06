@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import ImageIO
 import Photos
 import UIKit
 
@@ -161,25 +160,23 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var liveCaptureDrops: Int?
     @Published private(set) var liveMetricsAvailable = false
     @Published private(set) var audioLevel: CGFloat = 0
-    @Published private(set) var lastPhotoThumbnail: UIImage?
-    @Published private(set) var lastPhotoThumbnailID: UInt64 = 0
     private var metricsTimer: DispatchSourceTimer?
     private var audioMeterTimer: DispatchSourceTimer?
     private var diagnosticsGeneration: UInt64 = 0
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
+    private struct PendingPhotoCapture {
+        let aspect: String
+        let outputDimensions: CMVideoDimensions
+        let filename: String
+        let isBurst: Bool
+    }
+
     private var burstRemaining = 0
     private var burstAspect = "4:3"
-    private var pendingPhotoAspect = "4:3"
     private var activeMaximumPhotoDimensions = CMVideoDimensions(width: 0, height: 0)
-    private var pendingPhotoOutputDimensions: CMVideoDimensions?
-    private var processedPhotoDimensions: CMVideoDimensions?
-    private var processingPhoto = false
-    private var photoCaptureFinished = false
-    private var photoProcessingResult: Bool?
-    private var photoCaptureInProgress = false
+    private var pendingPhotoCaptures: [Int64: PendingPhotoCapture] = [:]
     private var pendingPhotoSaves = 0
-    private var photoSaveHadFailure = false
 
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
@@ -189,7 +186,6 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingFocusReturnWorkItem: DispatchWorkItem?
-    private var pendingPhotoFilename: String?
     private let zoomRequestLock = NSLock()
     private var latestZoomRequestID: UInt64 = 0
     private var latestCameraSwitchRequestID: UInt64 = 0
@@ -873,7 +869,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// Stops a held burst after the photo currently in flight has safely finished saving.
+    /// Stops a held burst after the photo currently in flight returns from the camera.
     func cancelBurst() {
         sessionQueue.async { [weak self] in
             guard let self, self.burstRemaining > 0 else { return }
@@ -2404,27 +2400,21 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginPhotoCapture() {
-        photoCaptureFinished = false
-        photoProcessingResult = nil
-        processingPhoto = false
-        photoCaptureInProgress = true
         guard session.isRunning else {
             burstRemaining = 0
-            photoCaptureInProgress = false
             publish { self.isCapturingPhoto = false }
             showError("Camera isn’t ready yet.")
             return
         }
 
-        pendingPhotoAspect = burstRemaining > 0 ? burstAspect : currentPhotoAspect
-        let maxCaptureDimensions = photoOutput.maxPhotoDimensions
+        let isBurstShot = burstRemaining > 0
+        let aspect = isBurstShot ? burstAspect : currentPhotoAspect
         let resolutionState = resolvedPhotoResolutionState(
-            maximumCaptureDimensions: maxCaptureDimensions,
-            aspect: pendingPhotoAspect
+            maximumCaptureDimensions: photoOutput.maxPhotoDimensions,
+            aspect: aspect
         )
-        pendingPhotoOutputDimensions = resolutionState.selected.dimensions
-        processedPhotoDimensions = nil
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
+
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
@@ -2436,13 +2426,22 @@ final class CameraManager: NSObject, ObservableObject {
         let settings = useHEIC
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-        settings.photoQualityPrioritization = burstRemaining > 0 ? .balanced : .quality
+
+        // One predictable capture path. Balanced avoids the extra latency of the old quality-first
+        // setting while keeping normal still-photo quality. MP/aspect processing happens later.
+        settings.photoQualityPrioritization = .balanced
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
         }
-        pendingPhotoFilename = nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg")
-        refreshAvailableStorage()
+
+        let request = PendingPhotoCapture(
+            aspect: aspect,
+            outputDimensions: resolutionState.selected.dimensions,
+            filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
+            isBurst: isBurstShot
+        )
+        pendingPhotoCaptures[settings.uniqueID] = request
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -2689,7 +2688,6 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func savePhotoResourceToPhotos(_ data: Data, filename: String) {
-        if pendingPhotoSaves == 0, !photoCaptureInProgress { photoSaveHadFailure = false }
         pendingPhotoSaves += 1
         beginBackgroundSaveIfNeeded()
 
@@ -2702,50 +2700,17 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self else { return }
             self.sessionQueue.async {
                 self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
-                if !success {
-                    self.photoSaveHadFailure = true
-                    self.burstRemaining = 0
+                if success {
+                    self.postStatus("Saved to Photos")
+                } else {
                     self.showError(error?.localizedDescription ?? "Couldn’t save the photo.")
                 }
 
                 if self.pendingPhotoSaves == 0 {
-                    if !self.photoCaptureInProgress {
-                        if !self.photoSaveHadFailure {
-                            self.postStatus("Saved to Photos")
-                        }
-                        self.photoSaveHadFailure = false
-                    }
                     self.refreshAvailableStorage()
                     self.endBackgroundSaveIfPossible()
                 }
             }
-        }
-    }
-
-    private static func photoThumbnail(from data: Data) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 240,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-        return UIImage(cgImage: image)
-    }
-
-    private func publishPhotoThumbnail(_ image: UIImage?) {
-        guard let image else { return }
-        publish {
-            self.lastPhotoThumbnailID &+= 1
-            self.lastPhotoThumbnail = image
-        }
-    }
-
-    func clearLastPhotoThumbnail(id: UInt64) {
-        publish {
-            guard self.lastPhotoThumbnailID == id else { return }
-            self.lastPhotoThumbnail = nil
         }
     }
 
@@ -2900,104 +2865,73 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraManager: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation() else {
-            showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
-            completePhotoProcessing(succeeded: false)
-            return
-        }
+        let captureID = photo.resolvedSettings.uniqueID
+        let data = error == nil ? photo.fileDataRepresentation() : nil
+
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.processingPhoto = true
-            let filename = self.pendingPhotoFilename ?? self.nextMediaFilename(fileExtension: "jpg")
-            let aspect = self.pendingPhotoAspect
-            let targetDimensions = self.pendingPhotoOutputDimensions
-            self.pendingPhotoFilename = nil
+            guard let request = self.pendingPhotoCaptures[captureID] else { return }
 
-            self.storageQueue.async {
+            guard let data else {
+                // didFinishCaptureFor is the camera-side finish point and will release the shutter.
+                // Stop a burst now so a failed frame does not queue another capture.
+                self.burstRemaining = 0
+                self.showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
+                return
+            }
+
+            // Camera capture and app-side processing are separate now. The request is already a
+            // complete snapshot, so crop/resize/encode can run without holding up the camera queue.
+            self.storageQueue.async { [weak self] in
+                guard let self else { return }
                 guard let processed = PhotoAspectProcessor.process(
                     data,
-                    aspect: aspect,
-                    targetDimensions: targetDimensions
+                    aspect: request.aspect,
+                    targetDimensions: request.outputDimensions
                 ) else {
                     self.showError("Couldn’t prepare the selected photo size. Please try again.")
-                    self.completePhotoProcessing(succeeded: false)
                     return
                 }
 
-                // Generate the tiny shutter preview off the main/camera queues. The full-size image
-                // never needs to be decoded by SwiftUI just to give instant capture feedback.
-                let thumbnail = Self.photoThumbnail(from: processed.data)
-
                 self.sessionQueue.async {
-                    self.publishPhotoThumbnail(thumbnail)
-
-                    // The camera UI is released as soon as the capture has finished processing.
-                    // Photos import continues independently in the background, which matches the
-                    // responsive feel of a normal camera app without falsely claiming a save before
-                    // PHPhotoLibrary confirms it.
-                    self.savePhotoResourceToPhotos(processed.data, filename: filename)
-                    self.completePhotoProcessing(succeeded: true, dimensions: processed.dimensions)
+                    self.publish {
+                        self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: processed.dimensions)
+                        self.currentPhotoPixelCount = self.pixelCount(processed.dimensions)
+                    }
+                    self.savePhotoResourceToPhotos(processed.data, filename: request.filename)
                 }
             }
         }
     }
 
-    private func completePhotoProcessing(succeeded: Bool, dimensions: CMVideoDimensions? = nil) {
-        sessionQueue.async {
-            self.photoProcessingResult = succeeded
-            if let dimensions { self.processedPhotoDimensions = dimensions }
-            self.finishPhotoIfReady()
-        }
-    }
-
-    private func finishPhotoIfReady() {
-        guard photoCaptureFinished, let processingSucceeded = photoProcessingResult else { return }
-        photoProcessingResult = nil
-        processingPhoto = false
-
-        if processingSucceeded, let dimensions = processedPhotoDimensions {
-            publish {
-                self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: dimensions)
-                self.currentPhotoPixelCount = self.pixelCount(dimensions)
+    private func finishCameraSidePhotoCapture(request: PendingPhotoCapture, succeeded: Bool) {
+        if request.isBurst {
+            burstRemaining = succeeded ? max(0, burstRemaining - 1) : 0
+            if burstRemaining > 0, session.isRunning {
+                beginPhotoCapture()
+                return
             }
-        }
-        processedPhotoDimensions = nil
-        pendingPhotoOutputDimensions = nil
-
-        if !processingSucceeded, pendingPhotoSaves > 0 {
-            // Avoid a later success from an older in-flight save masking the failure the user just saw.
-            photoSaveHadFailure = true
-        }
-        burstRemaining = processingSucceeded ? max(0, burstRemaining - 1) : 0
-        if burstRemaining > 0 && session.isRunning {
-            beginPhotoCapture()
-        } else {
             burstRemaining = 0
-            photoCaptureInProgress = false
-            publish { self.isCapturingPhoto = false }
-
-            // If Photos happened to finish before AVCapturePhotoOutput's final callback, surface the
-            // confirmed result now. Otherwise the save completion will do it later.
-            if pendingPhotoSaves == 0 {
-                if processingSucceeded, !photoSaveHadFailure {
-                    postStatus("Saved to Photos")
-                }
-                photoSaveHadFailure = false
-            }
         }
+        publish { self.isCapturingPhoto = false }
     }
 
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
-        sessionQueue.async {
-            self.photoCaptureFinished = true
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: Error?
+    ) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard let request = self.pendingPhotoCaptures.removeValue(forKey: resolvedSettings.uniqueID) else {
+                if let error { self.showError("Photo capture failed: \(error.localizedDescription)") }
+                return
+            }
+
+            self.finishCameraSidePhotoCapture(request: request, succeeded: error == nil)
             if let error {
                 self.showError("Photo capture failed: \(error.localizedDescription)")
-                if !self.processingPhoto { self.photoProcessingResult = false }
             }
-            // The saved dimensions come from PhotoAspectProcessor, not resolvedSettings. The
-            // camera is intentionally captured at max resolution and lower MP choices are
-            // cropped/resized afterward so the selected MP and aspect stay exact.
-            self.finishPhotoIfReady()
         }
     }
 }
