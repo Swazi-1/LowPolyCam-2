@@ -22,6 +22,7 @@ struct CameraPreview: UIViewRepresentable {
         if uiView.previewLayer.session !== session { uiView.previewLayer.session = session }
         configure(uiView)
         uiView.enableStabilizationIfAvailable()
+        uiView.updateRotation()
     }
 
     private func configure(_ view: PreviewView) {
@@ -49,6 +50,8 @@ final class PreviewView: UIView {
     private var stabilizationEnabled = true
     private var transitionSnapshot: UIView?
     private var previewTransitioning = false
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    private var rotationDeviceID: String?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -68,6 +71,7 @@ final class PreviewView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         enableStabilizationIfAvailable()
+        updateRotation()
         transitionSnapshot?.frame = bounds
 
         lockLabel.sizeToFit()
@@ -77,6 +81,22 @@ final class PreviewView: UIView {
             width: lockLabel.bounds.width + 24,
             height: 30
         )
+    }
+
+    func updateRotation() {
+        guard let input = previewLayer.session?.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: {
+            $0.ports.contains(where: { $0.mediaType == .video })
+        }) else { return }
+
+        if rotationDeviceID != input.device.uniqueID {
+            rotationDeviceID = input.device.uniqueID
+            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: input.device, previewLayer: previewLayer)
+        }
+
+        guard let connection = previewLayer.connection,
+              let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview,
+              connection.isVideoRotationAngleSupported(angle) else { return }
+        connection.videoRotationAngle = angle
     }
 
     func enableStabilizationIfAvailable() {
@@ -125,9 +145,7 @@ final class PreviewView: UIView {
         if isLocked {
             hideFocusWorkItem?.cancel()
         } else if wasLocked {
-            UIView.animate(withDuration: 0.2) {
-                self.focusIndicator.alpha = 0
-            }
+            // Keep a freshly tapped focus box visible; its own timer fades it naturally.
         }
     }
 
@@ -189,7 +207,11 @@ final class PreviewView: UIView {
         )
         focusIndicator.transform = CGAffineTransform(scaleX: 1.22, y: 1.22)
         focusIndicator.alpha = 1
-        lockLabel.isHidden = !locked
+        // The lock pill reflects the hardware lock state published by CameraManager.
+        // A long press only shows the focus box until AF/AE has actually settled and locked.
+        if !locked {
+            lockLabel.isHidden = true
+        }
 
         UIView.animate(withDuration: 0.18) {
             self.focusIndicator.transform = .identity

@@ -26,7 +26,11 @@ enum VideoQuickPreset: String, CaseIterable, Identifiable {
     var resolution: VideoResolution { self == .highQuality ? .p4k : self == .allDay ? .p720 : .p1080 }
     var frameRate: VideoFrameRate { self == .allRounder ? .fps60 : .fps30 }
     var compression: VideoCompression {
-        switch self { case .highQuality, .allRounder: return .high; case .allDay: return .dataSaver; default: return .medium }
+        switch self {
+        case .highQuality, .allRounder: return .high
+        case .allDay, .social: return .dataSaver
+        case .balanced: return .medium
+        }
     }
     var detail: String { "\(resolution.rawValue) · \(compression.rawValue) · \(frameRate.rawValue) fps · HEVC" }
 }
@@ -35,9 +39,9 @@ enum CameraHaptics {
     private static let light = UIImpactFeedbackGenerator(style: .light)
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
-    static func fire(strength selectedStrength: String? = nil) {
+    static func fire(strength selectedStrength: String? = nil, captureOnly: Bool = false) {
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true else { return }
+        if captureOnly, !(defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true) { return }
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
         try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
@@ -82,8 +86,6 @@ struct CapturePreferencesView: View {
     @AppStorage("tapZoomReset") private var tapZoomReset = true
     @AppStorage("recordingLock") private var recordingLock = false
     @AppStorage("lowStorageWarning") private var lowStorageWarning = true
-    @AppStorage("thermalHUD") private var thermalHUD = false
-    @AppStorage("hudTextSize") private var hudTextSize = 10.0
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
@@ -105,21 +107,21 @@ struct CapturePreferencesView: View {
                     Text("Split clips save separately with a brief gap between files. Codec availability depends on the selected camera format.").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            SettingsCard(title: "Haptic Feedback", symbol: "waveform") {
+            SettingsCard(title: "Capture Haptics", symbol: "waveform") {
                 Toggle("Enabled", isOn: $haptics)
                 ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }, onSelect: { CameraHaptics.fire(strength: $0) }).disabled(!haptics)
             }
             SettingsCard(title: "Zoom & Recording", symbol: "plus.magnifyingglass") {
                 ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
                 Toggle("Tap Zoom to Reset to 1×", isOn: $tapZoomReset)
-                Toggle("Lock Recording Controls", isOn: $recordingLock)
-                Text("When locked, hold the shutter for one second to stop.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if camera.captureMode != .photo {
+                    Toggle("Lock Recording Controls", isOn: $recordingLock)
+                    Text("When locked, hold the shutter for one second to stop.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle("Low Storage Warning", isOn: $lowStorageWarning)
-                Toggle("Thermal Status in HUD", isOn: $thermalHUD)
             }
             SettingsCard(title: "More Controls", symbol: "slider.horizontal.3") {
-                ThemeMenu(title: "HUD Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
                 Toggle("Countdown Haptics", isOn: $countdownHaptics)
                 Toggle("Remember Last Camera Mode", isOn: $rememberCaptureMode)
                 Button("Reset Exposure & White Balance") { camera.setExposureBias(0); camera.selectWhiteBalancePreset(.auto) }

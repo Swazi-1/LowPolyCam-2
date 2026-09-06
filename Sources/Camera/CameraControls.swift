@@ -188,16 +188,23 @@ struct CameraHUD: View {
                     .foregroundStyle(.white)
             }
         }
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    Label(item, systemImage: symbol(for: item))
+        if !items.isEmpty {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        Label(item, systemImage: symbol(for: item))
+                    }
                 }
-            }.fixedSize(horizontal: true, vertical: false)
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    Label(item, systemImage: symbol(for: item)).lineLimit(1).minimumScaleFactor(0.75)
+                .fixedSize(horizontal: true, vertical: false)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        Label(item, systemImage: symbol(for: item))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
                 }
+                .frame(maxWidth: maxWidth - 20)
             }
         }
       }
@@ -206,7 +213,6 @@ struct CameraHUD: View {
             .foregroundStyle(theme)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .frame(maxWidth: maxWidth)
             .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
             .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
             .overlay {
@@ -215,10 +221,13 @@ struct CameraHUD: View {
             // Keep the black pill only as wide as its content. The outer frame centers it in the
             // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
             .frame(maxWidth: maxWidth)
-            .accessibilityLabel(items.joined(separator: ", "))
-            .task {
-                UIDevice.current.isBatteryMonitoringEnabled = true
-                batteryLevel = UIDevice.current.batteryLevel
+            .accessibilityLabel(([camera.captureMode.rawValue] + items).joined(separator: ", "))
+            .task(id: showBattery) {
+                UIDevice.current.isBatteryMonitoringEnabled = showBattery
+                batteryLevel = showBattery ? UIDevice.current.batteryLevel : -1
+            }
+            .onDisappear {
+                if showBattery { UIDevice.current.isBatteryMonitoringEnabled = false }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
                 batteryLevel = UIDevice.current.batteryLevel
@@ -252,7 +261,6 @@ struct CameraHUD: View {
         if showDroppedFrames, camera.captureMode != .photo {
             result.append(camera.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
         }
-        if result.isEmpty { result.append(camera.captureMode.rawValue) }
         return result
     }
 
@@ -272,7 +280,7 @@ struct CameraHUD: View {
         if item.contains("GB") { return "internaldrive" }
         if item.hasPrefix("Gaps") { return "waveform.path" }
         if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
-        if item.hasPrefix("~") { return "clock" }
+        if item.hasPrefix("~") { return camera.captureMode == .photo ? "photo.on.rectangle" : "clock" }
         if item == whiteBalanceShortLabel { return "sun.max" }
         return "viewfinder"
     }
@@ -469,8 +477,8 @@ final class CameraLevelMonitor: ObservableObject {
             }
             self.lastRawRoll = rawRoll
             let quarterTurn = Double.pi / 2
-            let nearestLevel = (self.unwrappedRoll / quarterTurn).rounded() * quarterTurn
-            self.levelDeviation = abs(self.unwrappedRoll - nearestLevel)
+            let nearestLevel = (self.angle / quarterTurn).rounded() * quarterTurn
+            self.levelDeviation = abs(self.angle - nearestLevel)
             self.isAvailable = true
         }
     }
@@ -483,6 +491,7 @@ final class CameraLevelMonitor: ObservableObject {
     private func resetMeasurement() {
         lastRawRoll = nil
         unwrappedRoll = 0
+        angle = 0
         levelDeviation = .infinity
         isAvailable = false
     }

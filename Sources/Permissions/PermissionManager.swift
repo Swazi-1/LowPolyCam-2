@@ -54,9 +54,6 @@ final class PermissionManager: ObservableObject {
         if AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
             missing.append("Camera")
         }
-        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
-            missing.append("Microphone")
-        }
         if PHPhotoLibrary.authorizationStatus(for: .addOnly) != .authorized {
             missing.append("Photos")
         }

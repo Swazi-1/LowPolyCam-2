@@ -20,7 +20,25 @@ struct VideoSettingsView: View {
                         photoSettings
                     }
 
-                    QuickCameraSettings(camera: camera)
+                    if camera.recoverableRecordingCount > 0 {
+                        SettingsCard(title: "Recovery", symbol: "arrow.clockwise.circle.fill") {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(camera.recoverableRecordingCount) recording\(camera.recoverableRecordingCount == 1 ? "" : "s") waiting")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text("Retry saving recordings that Photos could not import earlier.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Retry") {
+                                    camera.retryRecoverableRecordings()
+                                }
+                                .font(.caption.weight(.bold))
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
 
                     SettingsCard(title: "Settings", symbol: "slider.horizontal.3") {
                         if camera.captureMode == .video {
@@ -36,7 +54,7 @@ struct VideoSettingsView: View {
                         NavigationLink {
                             CapturePreferencesView(camera: camera)
                         } label: {
-                            SettingsNavigationRow(title: "Capture Controls", subtitle: "Timer, zoom, recording and haptics", symbol: "paintpalette.fill")
+                            SettingsNavigationRow(title: "Capture Controls", subtitle: "Timer, zoom, recording and haptics", symbol: "slider.horizontal.3")
                         }.buttonStyle(.plain)
                         SettingsDivider()
                         NavigationLink {
@@ -237,6 +255,8 @@ private struct CameraHUDSettingsMenu: View {
     @AppStorage("cameraHUDBattery") private var hudBattery = false
     @AppStorage("cameraHUDStorage") private var hudStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
+    @AppStorage("thermalHUD") private var hudThermal = false
+    @AppStorage("hudTextSize") private var hudTextSize = 10.0
 
     var body: some View {
         ScrollView {
@@ -254,6 +274,8 @@ private struct CameraHUDSettingsMenu: View {
                         SettingsToggleRow(title: "Battery", subtitle: "Show the current battery percentage", isOn: $hudBattery)
                         SettingsDivider()
                         SettingsToggleRow(title: "Free Storage", subtitle: "Show available space on this iPhone", isOn: $hudStorage)
+                        SettingsDivider()
+                        SettingsToggleRow(title: "Thermal Status", subtitle: "Show the current device thermal state", isOn: $hudThermal)
                         if camera.captureMode != .photo {
                             SettingsDivider()
                             SettingsToggleRow(title: "Frame Gaps", subtitle: "Check the last saved clip for missing frame intervals; not a live counter", isOn: $hudDroppedFrames)
@@ -289,6 +311,10 @@ private struct CameraHUDSettingsMenu: View {
                             subtitle: "Show the active white-balance preset",
                             isOn: $hudWhiteBalance
                         )
+                    }
+
+                    SettingsCard(title: "HUD Appearance", symbol: "textformat.size") {
+                        ThemeMenu(title: "Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
                     }
                 }
             }

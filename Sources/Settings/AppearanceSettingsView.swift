@@ -124,8 +124,9 @@ struct VideoPresetsView: View {
                     }.buttonStyle(.plain)
                 }
                 Button {
-                    camera.applyQuickPreset(preview)
-                    dismiss()
+                    camera.applyQuickPreset(preview) { success in
+                        if success { dismiss() }
+                    }
                 } label: {
                     Text("Use \(preview.rawValue)").font(.subheadline.weight(.bold))
                         .frame(maxWidth: .infinity).padding(.vertical, 13)
@@ -135,7 +136,10 @@ struct VideoPresetsView: View {
         }
         .onAppear {
             preview = VideoQuickPreset.allCases.first {
-                $0.resolution == camera.selectedResolution && $0.frameRate == camera.selectedFrameRate && $0.compression == camera.videoCompression
+                $0.resolution == camera.selectedResolution &&
+                $0.frameRate == camera.selectedFrameRate &&
+                $0.compression == camera.videoCompression &&
+                camera.selectedVideoCodec == "HEVC"
             } ?? .balanced
         }
         .navigationTitle("Video Presets").navigationBarTitleDisplayMode(.inline)

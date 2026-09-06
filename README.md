@@ -1,6 +1,6 @@
 # LowPolyCam
 
-SwiftUI iOS app targeting iOS 15 and newer.
+SwiftUI camera app targeting iOS 26 and newer (including iOS 27).
 
 ## Build from GitHub Actions
 

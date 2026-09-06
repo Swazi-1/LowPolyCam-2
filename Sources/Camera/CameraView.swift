@@ -28,6 +28,7 @@ struct CameraView: View {
     @AppStorage("lowStorageWarning") private var lowStorageWarning = true
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @State private var warnedAboutStorage = false
     private var accent = CameraAccent()
 
@@ -119,9 +120,10 @@ struct CameraView: View {
                         .padding(.bottom, 176)
                 }
                 .transition(.opacity)
-                .task(id: message) {
+                .task(id: camera.statusMessageID) {
+                    let id = camera.statusMessageID
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    if camera.statusMessage == message { camera.statusMessage = nil }
+                    camera.clearStatus(id: id)
                 }
             }
         }
@@ -149,6 +151,9 @@ struct CameraView: View {
         }
         .onChange(of: keepScreenAwakeEnabled) { _, _ in
             updateIdleTimer(for: scenePhase)
+        }
+        .onChange(of: mirrorSelfies) { _, _ in
+            camera.refreshMovieOutputSettings()
         }
         .onChange(of: scenePhase) { _, phase in
             updateIdleTimer(for: phase)
@@ -178,7 +183,7 @@ struct CameraView: View {
             if bytes > 1_000_000_000 { warnedAboutStorage = false }
             if lowStorageWarning, bytes > 0, bytes < 1_000_000_000, !warnedAboutStorage {
                 warnedAboutStorage = true
-                camera.statusMessage = "Storage is below 1 GB. Long recordings may stop early."
+                camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
             }
         }
         .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
@@ -194,12 +199,12 @@ struct CameraView: View {
                         camera.toggleTorch()
                     }
                     Spacer()
-                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isFinalizingRecording && !camera.isCapturingPhoto, color: accent.color) {
+                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto, color: accent.color) {
                         isShowingSettings = true
                     }
                 }
 
-                if isHUDEnabled || camera.isRecording {
+                if isHUDEnabled {
                     CameraHUD(
                         camera: camera,
                         showResolution: hudResolution,
@@ -234,12 +239,12 @@ struct CameraView: View {
 
                 CaptureModeSelector(
                     selectedMode: camera.captureMode,
-                    isEnabled: !camera.isRecording && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0,
+                    isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0,
                     onSelect: { camera.selectCaptureMode($0) }
                 )
 
             HStack {
-                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
+                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
                     withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
                 }
                 Spacer()
@@ -253,16 +258,16 @@ struct CameraView: View {
                         .frame(width: 76, height: 76)
                         .background(.black.opacity(0.6), in: Circle())
                         .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
+                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(captureOnly: true); camera.startOrStopRecording() }
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
-                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isFinalizingRecording) {
+                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording) {
                         shutterPressed()
                     }
                 }
             Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
+            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
                 camera.switchCamera()
             }
             }
@@ -292,7 +297,7 @@ struct CameraView: View {
 
     private func captureHaptic() {
         guard isHapticCaptureEnabled else { return }
-        CameraHaptics.fire()
+        CameraHaptics.fire(captureOnly: true)
     }
 
     private func cancelCountdown() {
@@ -304,7 +309,8 @@ struct CameraView: View {
     private func shutterPressed() {
         if countdown > 0 { cancelCountdown(); return }
         if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
-        guard shutterTask == nil, camera.isSessionRunning else { return }
+        guard !camera.isRecordingStarting, !camera.isFinalizingRecording,
+              shutterTask == nil, camera.isSessionRunning else { return }
         let mode = camera.captureMode
         shutterTask = Task { @MainActor in
             countdown = shutterDelay
