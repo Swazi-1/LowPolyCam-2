@@ -60,6 +60,7 @@ struct PhotoButton: View {
     let isCapturing: Bool
     let countdown: Int
     let countdownTotal: Int
+    let previewImage: UIImage?
     var isEnabled = true
     let action: () -> Void
     let onBurstStart: () -> Void
@@ -76,6 +77,17 @@ struct PhotoButton: View {
                 .fill(.white)
                 .frame(width: 62, height: 62)
                 .scaleEffect(isCapturing ? 0.86 : 1)
+
+            if let previewImage, !isCapturing, countdown == 0 {
+                Image(uiImage: previewImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 58, height: 58)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
+                    .transition(.scale(scale: 0.72).combined(with: .opacity))
+            }
+
             if countdown > 0 {
                 Circle()
                     .trim(from: 0, to: countdownProgress)
@@ -89,6 +101,7 @@ struct PhotoButton: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: isCapturing)
+        .animation(.spring(response: 0.24, dampingFraction: 0.78), value: previewImage != nil)
         .contentShape(Circle())
         .gesture(
             DragGesture(minimumDistance: 0)

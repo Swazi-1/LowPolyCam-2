@@ -200,7 +200,7 @@ struct VideoSettingsView: View {
                 .foregroundStyle(.secondary)
             SettingsDivider()
             ThemeMenu(title: "Burst Photos", selection: $burstCount, options: [(5, "5"), (10, "10"), (15, "15")])
-            Text("Hold the shutter to start a burst, then release to stop after the current photo saves.").font(.caption).foregroundStyle(.secondary)
+            Text("Hold the shutter to start a burst, then release to stop after the current shot finishes. Photos continue saving in the background.").font(.caption).foregroundStyle(.secondary)
             SettingsDivider()
             ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
             Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
