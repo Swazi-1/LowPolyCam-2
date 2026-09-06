@@ -223,6 +223,13 @@ final class CameraManager: NSObject, ObservableObject {
     private var sessionObserverTokens: [NSObjectProtocol] = []
     private var suppressPreferencePersistence = false
     private var suppressAutomaticReconfiguration = false
+    // Optional monitoring outputs must never be allowed to wedge the core capture session.
+    // After a runtime error they stay suppressed until the user explicitly toggles Live Stats
+    // again; core camera/movie/photo capture recovers first.
+    private var auxiliaryMonitoringSuppressedForRecovery = false
+    private var pendingSessionRecovery = false
+    private var sessionRecoveryAttempt = 0
+    private var captureLifecycleActive = true
 
 
     override init() {
@@ -307,13 +314,92 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func handleSessionRuntimeError(_ notification: Notification) {
         let nsError = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
+
+        // Runtime errors can be caused by an optional AVCaptureVideoDataOutput/AudioDataOutput
+        // combination that the current high-bandwidth format cannot sustain. Recover the core
+        // camera first and do not immediately recreate the same optional topology.
+        suppressOptionalMonitoringForRecovery()
+        if !pendingSessionRecovery { sessionRecoveryAttempt = 0 }
+        pendingSessionRecovery = true
+        requestGate.invalidate(.zoom)
+        requestGate.invalidate(.whiteBalance)
+        requestGate.invalidate(.configuration)
+        activeWhiteBalanceOperationID = nil
+        pendingFocusLockWorkItem?.cancel()
+        pendingFocusReturnWorkItem?.cancel()
+        pendingFocusLockWorkItem = nil
+        pendingFocusReturnWorkItem = nil
+        burstRemaining = 0
+        pendingPhotoCaptures.removeAll()
+        publish {
+            self.isCapturingPhoto = false
+            self.isFocusExposureLocked = false
+            self.isSessionRunning = false
+            self.isPreviewTransitioning = true
+        }
+
+        if movieOutput.isRecording || recordingOperation.requested || recordingOperation.startIssued || recordingOperation.segmentActive {
+            showError("Camera session interrupted. Saving and recovering…")
+            handleSessionInterrupted()
+            // didFinishRecordingTo owns the safe point for rebuilding if AVFoundation already
+            // accepted a recording start. If no delegate cleanup is pending, recover now.
+            performPendingSessionRecoveryIfPossible()
+            return
+        }
+
         if nsError?.code == AVError.Code.mediaServicesWereReset.rawValue {
-            rebuildSessionAfterMediaServicesReset()
+            showError("Camera services restarted. Recovering…")
         } else {
-            showError("Camera session error. Trying to recover…")
-            configureSessionIfNeeded(forceRebuild: true)
-            if !session.isRunning { session.startRunning() }
-            publish { self.isSessionRunning = self.session.isRunning }
+            showError("Camera session error. Recovering safely…")
+        }
+        performPendingSessionRecoveryIfPossible()
+    }
+
+    private func suppressOptionalMonitoringForRecovery() {
+        auxiliaryMonitoringSuppressedForRecovery = true
+        metricsTimer?.cancel()
+        metricsTimer = nil
+        liveMetrics.setRunning(false)
+        audioMeter.stop()
+        publish {
+            self.liveFPS = nil
+            self.liveMbps = nil
+            self.liveCaptureDrops = nil
+            self.liveMetricsAvailable = false
+            self.audioLevel = 0
+        }
+    }
+
+    private func performPendingSessionRecoveryIfPossible() {
+        guard pendingSessionRecovery,
+              captureLifecycleActive,
+              !movieOutput.isRecording,
+              !recordingOperation.requested,
+              !recordingOperation.startIssued,
+              !recordingOperation.segmentActive else { return }
+
+        pendingSessionRecovery = false
+        sessionRecoveryAttempt += 1
+        if session.isRunning { session.stopRunning() }
+        let configured = configureSessionIfNeeded(forceRebuild: true)
+        if configured, !session.isRunning { session.startRunning() }
+        let running = configured && session.isRunning
+        synchronizeTorchState()
+        publish {
+            self.isSessionRunning = running
+            self.isPreviewTransitioning = false
+        }
+        if running {
+            sessionRecoveryAttempt = 0
+            postStatus("Camera recovered. Optional monitoring was disabled for stability.")
+        } else if sessionRecoveryAttempt < 2 {
+            pendingSessionRecovery = true
+            sessionQueue.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.performPendingSessionRecoveryIfPossible()
+            }
+        } else {
+            sessionRecoveryAttempt = 0
+            showError("Camera recovery failed. Reopen LowPolyCam and try again.")
         }
     }
 
@@ -354,7 +440,16 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterruptionEnded() {
-        configureSessionIfNeeded()
+        guard captureLifecycleActive else { return }
+        if pendingSessionRecovery {
+            performPendingSessionRecoveryIfPossible()
+            if pendingSessionRecovery { return }
+        }
+        let configured = configureSessionIfNeeded()
+        guard configured else {
+            publish { self.isSessionRunning = false }
+            return
+        }
         if !recordingOperation.segmentActive,
            !recordingOperation.startIssued,
            !movieOutput.isRecording {
@@ -362,12 +457,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
         if !session.isRunning { session.startRunning() }
         synchronizeTorchState()
-        publish { self.isSessionRunning = self.session.isRunning }
-    }
-
-    private func rebuildSessionAfterMediaServicesReset() {
-        configureSessionIfNeeded(forceRebuild: true)
-        if !session.isRunning { session.startRunning() }
         publish { self.isSessionRunning = self.session.isRunning }
     }
 
@@ -418,22 +507,28 @@ final class CameraManager: NSObject, ObservableObject {
     func start() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.captureLifecycleActive = true
             self.requestedZoom = 1
-            self.configureSessionIfNeeded()
+            let configured = self.configureSessionIfNeeded()
             self.refreshAvailableStorage()
+            guard configured else {
+                self.publish { self.isSessionRunning = false }
+                return
+            }
             guard self.session.isRunning == false else {
                 self.publish { self.isSessionRunning = true }
                 return
             }
             self.session.startRunning()
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
-            self.publish { self.isSessionRunning = true }
+            self.publish { self.isSessionRunning = self.session.isRunning }
         }
     }
 
     func stop() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.captureLifecycleActive = false
             self.burstRemaining = 0
             self.requestGate.invalidate(.recordingStart)
             self.segmentTimer?.cancel()
@@ -473,6 +568,7 @@ final class CameraManager: NSObject, ObservableObject {
     func appDidBecomeInactive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.captureLifecycleActive = false
             self.burstRemaining = 0
             self.recordingOperation.cancelSegmentContinuation()
             self.requestGate.invalidate(.recordingStart)
@@ -521,7 +617,16 @@ final class CameraManager: NSObject, ObservableObject {
     func appDidBecomeActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.configureSessionIfNeeded()
+            self.captureLifecycleActive = true
+            if self.pendingSessionRecovery {
+                self.performPendingSessionRecoveryIfPossible()
+                if self.pendingSessionRecovery { return }
+            }
+            let configured = self.configureSessionIfNeeded()
+            guard configured else {
+                self.publish { self.isSessionRunning = false }
+                return
+            }
             if !self.recordingOperation.segmentActive,
                !self.recordingOperation.startIssued,
                !self.movieOutput.isRecording {
@@ -588,10 +693,15 @@ final class CameraManager: NSObject, ObservableObject {
         let requestSnapshot = makeConfigurationRequest(displayedZoom: requestedFactor)
         sessionQueue.async { [weak self] in
             guard let self, self.requestGate.isCurrent(requestID),
+                  !self.pendingSessionRecovery,
                   let currentDevice = self.videoInput?.device else { return }
 
             let legalDevices = self.legalZoomDevicesForCurrentMode(request: requestSnapshot)
-            let recordingOrStarting = self.movieOutput.isRecording || self.recordingOperation.requested
+            let recordingOrStarting = self.movieOutput.isRecording ||
+                self.recordingOperation.requested ||
+                self.recordingOperation.startIssued ||
+                self.recordingOperation.segmentActive ||
+                self.recordingOperation.finalizationPending
             let domainDevices = recordingOrStarting ? [currentDevice] : legalDevices
             let domain = CameraZoomController.displayedZoomDomain(for: domainDevices, currentDevice: currentDevice)
             let requested = CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
@@ -731,19 +841,79 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func refreshLiveMetrics() {
-        refreshAuxiliaryOutputs()
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            // An explicit user change is the only thing that retries monitoring after a runtime
+            // recovery. In Slo-Mo the extra capture outputs remain intentionally unavailable.
+            self.auxiliaryMonitoringSuppressedForRecovery = false
+
+            // Toggling stats during a clip may update timer/UI metrics, but it must never mutate
+            // AVCaptureSession topology while a recording operation owns the pipeline.
+            if self.movieOutput.isRecording || self.recordingOperation.requested || self.recordingOperation.startIssued || self.recordingOperation.segmentActive {
+                if self.captureSettingsStore.liveRecordingStatsEnabled {
+                    self.startLiveMetrics()
+                } else {
+                    self.metricsTimer?.cancel()
+                    self.metricsTimer = nil
+                    self.liveMetrics.setRunning(false)
+                    self.publish {
+                        self.liveFPS = nil
+                        self.liveMbps = nil
+                        self.liveCaptureDrops = nil
+                    }
+                }
+                return
+            }
+
+            self.refreshAuxiliaryOutputsOnSessionQueue()
+        }
     }
 
     func refreshAuxiliaryOutputs() {
         sessionQueue.async { [weak self] in
-            guard let self,
-                  !self.recordingOperation.requested,
-                  !self.movieOutput.isRecording,
-                  self.auxiliaryOutputsNeedUpdate() else { return }
-            self.session.beginConfiguration()
-            self.configureAuxiliaryOutputs()
-            self.session.commitConfiguration()
+            self?.refreshAuxiliaryOutputsOnSessionQueue()
         }
+    }
+
+    private func refreshAuxiliaryOutputsOnSessionQueue() {
+        guard !pendingSessionRecovery,
+              videoInput != nil,
+              session.outputs.contains(where: { $0 === movieOutput }),
+              session.outputs.contains(where: { $0 === photoOutput }),
+              !recordingOperation.requested,
+              !recordingOperation.startIssued,
+              !recordingOperation.segmentActive,
+              !recordingOperation.finalizationPending,
+              !movieOutput.isRecording,
+              pendingPhotoCaptures.isEmpty,
+              auxiliaryOutputsNeedUpdate() else { return }
+        session.beginConfiguration()
+        configureAuxiliaryOutputs()
+        session.commitConfiguration()
+    }
+
+    private var canChangeAuxiliaryCaptureTopology: Bool {
+        !recordingOperation.requested &&
+        !recordingOperation.startIssued &&
+        !recordingOperation.segmentActive &&
+        !recordingOperation.finalizationPending &&
+        !movieOutput.isRecording &&
+        pendingPhotoCaptures.isEmpty
+    }
+
+    // Extra sample-buffer outputs are intentionally disabled in HFR/Slo-Mo. On real devices,
+    // adding an AVCaptureVideoDataOutput while a 120/240-fps format is active can make an
+    // otherwise-valid capture graph fail at runtime. File bitrate stats still work without it.
+    private var shouldAttachLiveMetricsOutput: Bool {
+        !auxiliaryMonitoringSuppressedForRecovery &&
+        captureSettingsStore.liveRecordingStatsEnabled &&
+        captureMode == .video
+    }
+
+    private var shouldAttachAudioMeterOutput: Bool {
+        !auxiliaryMonitoringSuppressedForRecovery &&
+        captureSettingsStore.audioMeterEnabled &&
+        captureMode == .video
     }
 
     // Called inside the same transaction as the input/format change.
@@ -753,17 +923,22 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func configureLiveMetrics() {
-        let wanted = captureSettingsStore.liveRecordingStatsEnabled && captureMode != .photo
+        let wanted = shouldAttachLiveMetricsOutput
         let attached = session.outputs.contains { $0 === liveMetrics.output }
-        guard wanted != attached else { return }
-        if wanted && !attached && session.canAddOutput(liveMetrics.output) { session.addOutput(liveMetrics.output) }
+        guard wanted != attached else {
+            publish { self.liveMetricsAvailable = attached }
+            return
+        }
+        if wanted && !attached && session.canAddOutput(liveMetrics.output) {
+            session.addOutput(liveMetrics.output)
+        }
         if !wanted && attached { session.removeOutput(liveMetrics.output) }
         let available = session.outputs.contains { $0 === liveMetrics.output }
         publish { self.liveMetricsAvailable = available }
     }
 
     private func configureAudioMeter() {
-        let wanted = captureSettingsStore.audioMeterEnabled && captureMode != .photo
+        let wanted = shouldAttachAudioMeterOutput
         let attached = session.outputs.contains { $0 === audioMeter.output }
         guard wanted != attached else { return }
 
@@ -943,7 +1118,12 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self,
                   self.requestGate.isCurrent(requestID),
                   self.requestGate.isCurrent(configurationToken),
-                  !self.movieOutput.isRecording, !self.recordingOperation.requested else { return }
+                  !self.pendingSessionRecovery,
+                  !self.movieOutput.isRecording,
+                  !self.recordingOperation.requested,
+                  !self.recordingOperation.startIssued,
+                  !self.recordingOperation.segmentActive,
+                  !self.recordingOperation.finalizationPending else { return }
 
             let previousPreset = self.requestedWhiteBalancePreset
             let currentDevice = self.videoInput?.device
@@ -1275,7 +1455,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     func refreshMovieOutputSettings() {
         sessionQueue.async { [weak self] in
-            guard let self, !self.movieOutput.isRecording else { return }
+            guard let self,
+                  !self.pendingSessionRecovery,
+                  !self.movieOutput.isRecording,
+                  !self.recordingOperation.requested,
+                  !self.recordingOperation.startIssued,
+                  !self.recordingOperation.segmentActive,
+                  !self.recordingOperation.finalizationPending else { return }
             _ = self.configureMovieOutputSettings()
         }
     }
@@ -1414,7 +1600,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func configureSessionIfNeeded(forceRebuild: Bool = false) {
+    @discardableResult
+    private func configureSessionIfNeeded(forceRebuild: Bool = false) -> Bool {
         if forceRebuild {
             legalZoomCacheSignature = nil
             legalZoomCacheDevices.removeAll(keepingCapacity: true)
@@ -1425,7 +1612,7 @@ final class CameraManager: NSObject, ObservableObject {
         let hasMovie = session.outputs.contains(where: { $0 === movieOutput })
         let hasPhoto = session.outputs.contains(where: { $0 === photoOutput })
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
-            return
+            return true
         }
 
         session.beginConfiguration()
@@ -1447,7 +1634,7 @@ final class CameraManager: NSObject, ObservableObject {
         guard let device = preferredCamera(for: cameraPosition.avPosition) else {
             session.commitConfiguration()
             showError("Camera is unavailable on this device.")
-            return
+            return false
         }
 
         do {
@@ -1455,14 +1642,14 @@ final class CameraManager: NSObject, ObservableObject {
             guard session.canAddInput(input) else {
                 session.commitConfiguration()
                 showError("Couldn’t add the camera input.")
-                return
+                return false
             }
             session.addInput(input)
             videoInput = input
         } catch {
             session.commitConfiguration()
             showError("Couldn’t access the camera.")
-            return
+            return false
         }
 
         // Microphone is optional so Photo mode still works when microphone permission is denied.
@@ -1478,7 +1665,7 @@ final class CameraManager: NSObject, ObservableObject {
             videoInput = nil
             session.commitConfiguration()
             showError("Video recording is unavailable on this device.")
-            return
+            return false
         }
         session.addOutput(movieOutput)
 
@@ -1488,15 +1675,16 @@ final class CameraManager: NSObject, ObservableObject {
             videoInput = nil
             session.commitConfiguration()
             showError("Photo capture is unavailable on this device.")
-            return
+            return false
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
         session.addOutput(photoOutput)
         session.commitConfiguration()
 
         updateCapabilities()
-        _ = configureCurrentMode(phase: .preview)
+        let configured = configureCurrentMode(phase: .preview)
         synchronizeTorchState()
+        return configured
     }
 
 
@@ -1890,9 +2078,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func auxiliaryOutputsNeedUpdate() -> Bool {
-        let wantsMetrics = captureSettingsStore.liveRecordingStatsEnabled && captureMode != .photo
+        guard canChangeAuxiliaryCaptureTopology else { return false }
+        let wantsMetrics = shouldAttachLiveMetricsOutput
         let hasMetrics = session.outputs.contains { $0 === liveMetrics.output }
-        let wantsAudioMeter = captureSettingsStore.audioMeterEnabled && captureMode != .photo
+        let wantsAudioMeter = shouldAttachAudioMeterOutput
         let hasAudioMeter = session.outputs.contains { $0 === audioMeter.output }
         return wantsMetrics != hasMetrics || wantsAudioMeter != hasAudioMeter
     }
@@ -2884,6 +3073,10 @@ final class CameraManager: NSObject, ObservableObject {
             self.recordingLifecycle = .idle
             self.recordingDuration = 0
         }
+        // Reconcile any stats/HUD preference changed while recording only after the recorder no
+        // longer owns the capture graph. This prevents a mid-recording setting from leaking into
+        // a start/stop/split transaction.
+        refreshAuxiliaryOutputsOnSessionQueue()
         endBackgroundSaveIfPossible()
     }
 
@@ -3105,6 +3298,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            defer { self.performPendingSessionRecoveryIfPossible() }
             self.metricsTimer?.cancel()
             self.metricsTimer = nil
             self.liveMetrics.setRunning(false)
