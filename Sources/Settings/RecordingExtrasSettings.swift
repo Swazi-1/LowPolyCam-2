@@ -74,18 +74,31 @@ struct RecordingExtrasSettings: View {
     @AppStorage("longevityMode") private var longevity = false
     @AppStorage("liveRecordingStats") private var stats = false
     var body: some View {
-        SettingsCard(title: "Long Sessions & Stats", symbol: "battery.100percent") {
-            SettingsToggleRow(title: "Longevity Mode", subtitle: "Starts video at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording. You can customize quality afterward. Previous video settings return when disabled.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
-            SettingsDivider()
-            SettingsToggleRow(title: "Live Recording Stats", subtitle: "Measured capture FPS, file bitrate and capture-output drops. Encoder drops are not exposed by iOS. Adds some processing overhead.", isOn: $stats)
-            SettingsDivider()
-            NavigationLink {
-                LiveStatsSettings(positionStats: positionStats)
-            } label: {
-                SettingsNavigationRow(title: "Live Stats Settings", subtitle: "Size, information and position", symbol: "chart.bar.xaxis")
-            }.buttonStyle(.plain)
+        Group {
+            if camera.captureMode == .video {
+                SettingsCard(title: "Long Sessions & Stats", symbol: "battery.100percent") {
+                    SettingsToggleRow(title: "Longevity Mode", subtitle: "Starts video at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording. You can customize quality afterward. Previous video settings return when disabled.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
+                    SettingsDivider()
+                    liveStatsControls
+                }
+            } else if camera.captureMode == .sloMo {
+                SettingsCard(title: "Recording Stats", symbol: "chart.bar.xaxis") {
+                    liveStatsControls
+                }
+            }
         }
         .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
+    }
+
+    @ViewBuilder
+    private var liveStatsControls: some View {
+        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Measured capture FPS, file bitrate and capture-output drops. Encoder drops are not exposed by iOS. Adds some processing overhead.", isOn: $stats)
+        SettingsDivider()
+        NavigationLink {
+            LiveStatsSettings(positionStats: positionStats)
+        } label: {
+            SettingsNavigationRow(title: "Live Stats Settings", subtitle: "Size, information and position", symbol: "chart.bar.xaxis")
+        }.buttonStyle(.plain)
     }
 }
 

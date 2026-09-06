@@ -415,6 +415,18 @@ final class CameraManager: NSObject, ObservableObject {
             self.continuingSegment = false
             self.segmentTimer?.cancel()
 
+            // Keep hardware and UI in sync when the app/phone becomes inactive. iOS normally
+            // disables the torch itself, but doing it explicitly prevents a stale-on edge case.
+            if let device = self.videoInput?.device, device.hasTorch, device.torchMode == .on {
+                do {
+                    try device.lockForConfiguration()
+                    device.torchMode = .off
+                    device.unlockForConfiguration()
+                } catch {
+                    // The session interruption can already own the device; the state is synced below.
+                }
+            }
+
             if self.movieOutput.isRecording {
                 self.recordingRequested = false
                 self.recordingFinalizationRequested = true
@@ -454,15 +466,47 @@ final class CameraManager: NSObject, ObservableObject {
     func toggleTorch() {
         sessionQueue.async { [weak self] in
             guard let self, let device = self.videoInput?.device, device.hasTorch else { return }
-            do {
-                try device.lockForConfiguration()
-                device.torchMode = device.torchMode == .on ? .off : .on
-                let isOn = device.torchMode == .on
-                device.unlockForConfiguration()
-                self.publish { self.isTorchOn = isOn }
-            } catch {
-                self.showError("Couldn’t change the torch.")
+            if device.torchMode != .on && !device.isTorchAvailable {
+                self.synchronizeTorchState()
+                self.showError("Torch is temporarily unavailable.")
+                return
             }
+            self.setTorchEnabledOnCurrentDevice(device.torchMode != .on, showErrorOnFailure: true)
+        }
+    }
+
+    /// Applies the requested torch state to whichever camera input is currently active.
+    /// Mode changes can replace the AVCaptureDevice even though the user did not touch Flash,
+    /// so this is also used immediately after a successful mode reconfiguration.
+    private func setTorchEnabledOnCurrentDevice(_ enabled: Bool, showErrorOnFailure: Bool = false) {
+        guard let device = videoInput?.device, device.hasTorch else {
+            publish {
+                self.torchAvailable = false
+                self.isTorchOn = false
+            }
+            return
+        }
+
+        do {
+            if enabled && !device.isTorchAvailable {
+                publish {
+                    self.torchAvailable = false
+                    self.isTorchOn = false
+                }
+                if showErrorOnFailure { showError("Torch is temporarily unavailable.") }
+                return
+            }
+            try device.lockForConfiguration()
+            device.torchMode = enabled ? .on : .off
+            let actualState = device.torchMode == .on
+            device.unlockForConfiguration()
+            publish {
+                self.torchAvailable = device.isTorchAvailable
+                self.isTorchOn = actualState
+            }
+        } catch {
+            synchronizeTorchState()
+            if showErrorOnFailure { showError("Couldn’t change the torch.") }
         }
     }
 
@@ -577,6 +621,7 @@ final class CameraManager: NSObject, ObservableObject {
         let previous = cameraPosition
         let target: CameraPosition = previous == .back ? .front : .back
         let requestID = nextCameraSwitchRequestID()
+        _ = nextZoomRequestID() // Drop any drag command that belongs to the old camera.
 
         cameraPosition = target
         loadCameraPreferences(for: target)
@@ -602,11 +647,14 @@ final class CameraManager: NSObject, ObservableObject {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, captureMode != mode else { return }
         let previousMode = captureMode
         let requestID = nextModeChangeRequestID()
+        _ = nextZoomRequestID() // A queued old-mode zoom must not reconfigure the new mode.
         isPreviewTransitioning = true
         captureMode = mode
         sessionQueue.async { [weak self] in
             guard let self, self.isLatestModeChangeRequest(requestID) else { return }
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            if success { self.synchronizeTorchState() }
+
             self.publish {
                 self.isPreviewTransitioning = false
                 if success {
@@ -615,6 +663,7 @@ final class CameraManager: NSObject, ObservableObject {
                     self.captureMode = previousMode
                     self.sessionQueue.async {
                         _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+                        self.synchronizeTorchState()
                     }
                 }
             }
@@ -1026,6 +1075,7 @@ final class CameraManager: NSObject, ObservableObject {
         photoDimensions: CMVideoDimensions? = nil
     ) -> CGFloat? {
         let oldInput = videoInput
+        let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
         var replacementInput: AVCaptureDeviceInput?
 
@@ -1083,6 +1133,9 @@ final class CameraManager: NSObject, ObservableObject {
             let displayedZoom = snappedZoomFactor(requestedZoom, for: desiredDevice)
             desiredDevice.cancelVideoZoomRamp()
             desiredDevice.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: desiredDevice)
+            if shouldPreserveTorch, desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
+                desiredDevice.torchMode = .on
+            }
             desiredDevice.unlockForConfiguration()
             deviceLocked = false
 
@@ -1136,8 +1189,8 @@ final class CameraManager: NSObject, ObservableObject {
             let wasSuppressing = self.suppressPreferencePersistence
             self.suppressPreferencePersistence = true
             self.supportedResolutions = supported
-            self.torchAvailable = device.hasTorch
-            self.isTorchOn = device.torchMode == .on
+            self.torchAvailable = device.hasTorch && device.isTorchAvailable
+            self.isTorchOn = device.hasTorch && device.torchMode == .on
             self.minimumZoomFactor = self.minimumSupportedZoom(for: device)
             self.maximumZoomFactor = self.maximumSupportedZoom(for: device)
             let displayedZoom = self.displayedZoomFactor(for: device.videoZoomFactor, device: device)
@@ -1514,8 +1567,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.maximumZoomFactor = maximum
             self.zoomFactor = displayedZoom
             self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
-            self.torchAvailable = desiredDevice.hasTorch
-            self.isTorchOn = desiredDevice.torchMode == .on
+            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
             self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: photoChoice.dimensions)
             self.currentPhotoPixelCount = Int64(photoChoice.dimensions.width) * Int64(photoChoice.dimensions.height)
         }
@@ -1683,8 +1736,8 @@ final class CameraManager: NSObject, ObservableObject {
                 self.maximumZoomFactor = maxZoom
                 self.zoomFactor = displayed
                 self.zoomLabel = self.formattedZoomLabel(for: displayed)
-                self.torchAvailable = virtual.hasTorch
-                self.isTorchOn = virtual.torchMode == .on
+                self.torchAvailable = virtual.hasTorch && virtual.isTorchAvailable
+                self.isTorchOn = virtual.hasTorch && virtual.torchMode == .on
             }
             resetFocusAndExposureState()
             synchronizeWhiteBalanceAfterConfiguration()
@@ -1720,8 +1773,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.maximumZoomFactor = maxZoom
             self.zoomFactor = displayed
             self.zoomLabel = self.formattedZoomLabel(for: displayed)
-            self.torchAvailable = desiredDevice.hasTorch
-            self.isTorchOn = desiredDevice.torchMode == .on
+            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
@@ -1731,7 +1784,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func smoothPreviewFormat(for device: AVCaptureDevice, preferredFrameRate: VideoFrameRate) -> AVCaptureDevice.Format? {
         let requestedRate = Double(preferredFrameRate.rawValue)
 
-        // Slo-Mo-only idle preview; standard video always uses its recording format.
+        // Smooth virtual-camera preview used by Slo-Mo and by the special 4K60 idle-preview path.
         for resolution in [VideoResolution.p1080, .p720] {
             if let format = device.formats.first(where: {
                 self.format($0, supports: resolution, at: preferredFrameRate)
@@ -1796,12 +1849,67 @@ final class CameraManager: NSObject, ObservableObject {
         let supportedDevices = devices.filter {
             bestSlowMotionFormat(for: $0, resolution: resolution, frameRate: selectedRate) != nil
         }
-        let physical = desiredPhysicalDevice(in: supportedDevices, forDisplayedZoom: requestedZoom)
-        // Prefer a physical constituent for HFR so the lens and field of view are already the
-        // ones that will record. This avoids a virtual->physical jump on the first recorded frame.
+        guard !supportedDevices.isEmpty else {
+            showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this camera.")
+            return false
+        }
+
+        // The selected Slo-Mo quality determines which physical lenses are legal. Keep the
+        // viewfinder zoom range inside those lenses even while a virtual camera drives the idle
+        // preview, so the user never frames a 0.5×/tele view that cannot actually be recorded.
+        let physicalRecordingDevices = supportedDevices.filter { !$0.isVirtualDevice }
+        let recordingDevices = physicalRecordingDevices.isEmpty ? supportedDevices : physicalRecordingDevices
+        let sloMoMinimumZoom = recordingDevices.map { minimumSupportedZoom(for: $0) }.min() ?? 1
+        let sloMoMaximumZoom = recordingDevices.map { maximumSupportedZoom(for: $0) }.max() ?? 1
+        requestedZoom = min(max(requestedZoom, sloMoMinimumZoom), sloMoMaximumZoom)
+
+        // Idle Slo-Mo used to stay on a physical HFR lens. Crossing 0.5× <-> 1× therefore
+        // removed/added AVCaptureDeviceInput and caused the visible pause. While idle, use the
+        // same virtual-camera + 60 fps zoom path as normal Video. Recording still switches once
+        // to the real physical HFR format below via allowPreview == false.
+        if allowPreview,
+           !movieOutput.isRecording,
+           !requiresPhysicalWhiteBalanceInput,
+           let virtual = devices.first(where: { $0.isVirtualDevice }),
+           let previewFormat = smoothPreviewFormat(for: virtual, preferredFrameRate: .fps60),
+           let displayed = applyAtomicCaptureConfiguration(device: virtual, format: previewFormat, frameRate: 60) {
+            isUsingSlowMotionPreview = true
+            isUsingVideoPreviewProxy = false
+            _ = configureMovieOutputSettings()
+
+            let targetPhysical = desiredPhysicalDevice(in: recordingDevices, forDisplayedZoom: displayed)
+                ?? recordingDevices.first(where: { !$0.isVirtualDevice })
+                ?? recordingDevices.first
+            let lensResolutions = targetPhysical.map { slowMotionResolutions(for: [$0]) } ?? allResolutions
+            let lensRates = targetPhysical.map { slowMotionFrameRates(for: [$0], resolution: resolution) } ?? allRates
+
+            publish {
+                let wasSuppressing = self.suppressPreferencePersistence
+                self.suppressPreferencePersistence = true
+                self.supportedSlowMotionResolutions = lensResolutions.isEmpty ? allResolutions : lensResolutions
+                self.selectedSlowMotionResolution = resolution
+                self.supportedSlowMotionFrameRates = lensRates.isEmpty ? allRates : lensRates
+                self.selectedSlowMotionFrameRate = selectedRate
+                self.suppressPreferencePersistence = wasSuppressing
+                self.minimumZoomFactor = sloMoMinimumZoom
+                self.maximumZoomFactor = sloMoMaximumZoom
+                self.zoomFactor = displayed
+                self.zoomLabel = self.formattedZoomLabel(for: displayed)
+                self.torchAvailable = virtual.hasTorch && virtual.isTorchAvailable
+                self.isTorchOn = virtual.hasTorch && virtual.torchMode == .on
+            }
+            resetFocusAndExposureState()
+            synchronizeWhiteBalanceAfterConfiguration()
+            return true
+        }
+
+        let physical = desiredPhysicalDevice(in: recordingDevices, forDisplayedZoom: requestedZoom)
+        // Recording and manual-WB paths use a real constituent camera. This guarantees that the
+        // selected lens really supports the requested HFR format instead of relying on a virtual
+        // camera format that cannot encode the requested 120/240 fps stream.
         let desiredDevice = physical
-            ?? supportedDevices.first(where: { !$0.isVirtualDevice })
-            ?? supportedDevices.first
+            ?? recordingDevices.first(where: { !$0.isVirtualDevice })
+            ?? recordingDevices.first
         guard let desiredDevice,
               let hfrFormat = bestSlowMotionFormat(for: desiredDevice, resolution: resolution, frameRate: selectedRate) else {
             showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this lens.")
@@ -1810,10 +1918,9 @@ final class CameraManager: NSObject, ObservableObject {
 
         let requestedFPS = Double(selectedRate.rawValue)
         var appliedFPS = requestedFPS
-        if allowPreview, !movieOutput.isRecording {
-            if hfrFormat.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 60.5 && $0.maxFrameRate >= 59.5 }) {
-                appliedFPS = 60
-            }
+        if allowPreview, !movieOutput.isRecording,
+           hfrFormat.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 60.5 && $0.maxFrameRate >= 59.5 }) {
+            appliedFPS = 60
         }
 
         guard let displayed = applyAtomicCaptureConfiguration(
@@ -1839,12 +1946,12 @@ final class CameraManager: NSObject, ObservableObject {
             self.supportedSlowMotionFrameRates = lensRates.isEmpty ? allRates : lensRates
             self.selectedSlowMotionFrameRate = selectedRate
             self.suppressPreferencePersistence = wasSuppressing
-            self.minimumZoomFactor = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
-            self.maximumZoomFactor = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
+            self.minimumZoomFactor = sloMoMinimumZoom
+            self.maximumZoomFactor = sloMoMaximumZoom
             self.zoomFactor = displayed
             self.zoomLabel = self.formattedZoomLabel(for: displayed)
-            self.torchAvailable = desiredDevice.hasTorch
-            self.isTorchOn = desiredDevice.torchMode == .on
+            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
@@ -2114,7 +2221,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
         publish {
-            self.torchAvailable = device.hasTorch
+            self.torchAvailable = device.hasTorch && device.isTorchAvailable
             self.isTorchOn = device.hasTorch && device.torchMode == .on
         }
     }

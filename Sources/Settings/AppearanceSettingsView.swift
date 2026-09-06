@@ -7,7 +7,7 @@ struct AppearanceSettingsView: View {
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
     private var accent = CameraAccent()
-    private let names = ["Ice", "Sunset", "Mint", "Lavender", "Custom"]
+    private let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
     var body: some View {
         SettingsPage {
@@ -70,6 +70,7 @@ struct AppearanceSettingsView: View {
         case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
         case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
         case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
+        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
         case "Custom": return Color(red: red, green: green, blue: blue)
         default: return Color(red: 0.65, green: 0.88, blue: 1)
         }

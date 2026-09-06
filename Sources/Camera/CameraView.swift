@@ -151,7 +151,7 @@ struct CameraView: View {
             }
         }
         .onChange(of: camera.isRecording) { _, recording in
-            if recording && longevity {
+            if recording && longevity && camera.captureMode == .video {
                 if restoreBrightness == nil { restoreBrightness = UIScreen.main.brightness }
                 UIScreen.main.brightness = min(UIScreen.main.brightness, 0.25)
             } else if let brightness = restoreBrightness {
@@ -284,6 +284,7 @@ struct CameraView: View {
                     isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0,
                     onSelect: { camera.selectCaptureMode($0) }
                 )
+                .padding(.bottom, 8)
 
             HStack {
                 CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
