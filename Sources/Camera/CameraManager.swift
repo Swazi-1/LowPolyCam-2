@@ -132,6 +132,19 @@ final class CameraManager: NSObject, ObservableObject {
     private let storageQueue = DispatchQueue(label: "com.swazi.lowpolycam.storage", qos: .utility)
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
+    private let liveMetrics = LiveCaptureMetrics()
+    @Published private(set) var liveFPS: Double?
+    @Published private(set) var liveMbps: Double?
+    @Published private(set) var liveCaptureDrops: Int?
+    @Published private(set) var liveMetricsAvailable = false
+    private var metricsTimer: DispatchSourceTimer?
+    private var previousMetricBytes: Int64 = 0
+    private var previousMetricDuration: Double = 0
+    private var burstRemaining = 0
+    private var burstAspect = "4:3"
+    private var pendingPhotoAspect = "4:3"
+    private var processingPhoto = false
+
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
     private var recordingSessionStartedAt: Date?
@@ -592,6 +605,97 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func refreshLiveMetrics() {
+        sessionQueue.async { [weak self] in
+            guard let self, !self.recordingRequested, !self.movieOutput.isRecording else { return }
+            self.configureLiveMetrics()
+            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+        }
+    }
+
+    private func configureLiveMetrics() {
+        let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats")
+        let attached = session.outputs.contains { $0 === liveMetrics.output }
+        session.beginConfiguration()
+        if wanted && !attached && session.canAddOutput(liveMetrics.output) { session.addOutput(liveMetrics.output) }
+        if !wanted && attached { session.removeOutput(liveMetrics.output) }
+        session.commitConfiguration()
+        let available = session.outputs.contains { $0 === liveMetrics.output }
+        publish { self.liveMetricsAvailable = available }
+    }
+
+    private func startLiveMetrics() {
+        metricsTimer?.cancel()
+        previousMetricBytes = 0
+        previousMetricDuration = 0
+        liveMetrics.setRunning(true)
+        publish { self.liveFPS = nil; self.liveMbps = nil; self.liveCaptureDrops = nil }
+        guard UserDefaults.standard.bool(forKey: "liveRecordingStats") else { return }
+        let timer = DispatchSource.makeTimerSource(queue: sessionQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.movieOutput.isRecording else { return }
+            let duration = self.movieOutput.recordedDuration.seconds
+            let bytes = self.movieOutput.recordedFileSize
+            let delta = duration - self.previousMetricDuration
+            let bits = bytes - self.previousMetricBytes
+            let mbps: Double? = delta > 0 && bits > 0 ? Double(bits) * 8 / delta / 1_000_000 : nil
+            self.previousMetricBytes = bytes
+            self.previousMetricDuration = duration
+            let measurement = self.liveMetrics.read()
+            let attached = self.session.outputs.contains { $0 === self.liveMetrics.output }
+            self.publish {
+                self.liveFPS = attached ? measurement.fps : nil
+                self.liveMbps = mbps
+                self.liveCaptureDrops = attached ? measurement.drops : nil
+            }
+        }
+        metricsTimer = timer
+        timer.resume()
+    }
+
+    func applyLongevityMode(_ enabled: Bool) {
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else { return }
+        let defaults = UserDefaults.standard
+        if enabled {
+            defaults.set(selectedResolution.rawValue, forKey: "longevityPreviousResolution")
+            defaults.set(selectedFrameRate.rawValue, forKey: "longevityPreviousFPS")
+            defaults.set(selectedVideoCodec, forKey: "longevityPreviousCodec")
+            defaults.set(videoCompression.rawValue, forKey: "longevityPreviousCompression")
+        }
+        suppressAutomaticReconfiguration = true
+        if enabled {
+            selectedResolution = .p720
+            selectedFrameRate = .fps30
+            selectedVideoCodec = "HEVC"
+            videoCompression = .dataSaver
+        } else {
+            selectedResolution = VideoResolution(rawValue: defaults.string(forKey: "longevityPreviousResolution") ?? "") ?? .p1080
+            selectedFrameRate = VideoFrameRate(rawValue: defaults.integer(forKey: "longevityPreviousFPS")) ?? .fps30
+            selectedVideoCodec = defaults.string(forKey: "longevityPreviousCodec") ?? "HEVC"
+            videoCompression = VideoCompression(rawValue: defaults.string(forKey: "longevityPreviousCompression") ?? "") ?? .high
+        }
+        suppressAutomaticReconfiguration = false
+        defaults.set(enabled, forKey: "longevityMode")
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+        }
+    }
+
+    func captureBurst() {
+        guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
+        let count = UserDefaults.standard.integer(forKey: "burstCount")
+        guard [5, 10, 15].contains(count) else { return }
+        isCapturingPhoto = true
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.burstRemaining = count
+            self.burstAspect = UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
+            self.beginPhotoCapture()
+        }
+    }
+
     func capturePhoto() {
         guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
         isCapturingPhoto = true
@@ -888,6 +992,7 @@ final class CameraManager: NSObject, ObservableObject {
         session.addOutput(photoOutput)
         session.commitConfiguration()
 
+        configureLiveMetrics()
         updateCapabilities()
         _ = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         synchronizeTorchState()
@@ -1719,8 +1824,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.supportedSlowMotionFrameRates = lensRates.isEmpty ? allRates : lensRates
             self.selectedSlowMotionFrameRate = selectedRate
             self.suppressPreferencePersistence = wasSuppressing
-            self.minimumZoomFactor = self.minimumSupportedZoom(for: desiredDevice)
-            self.maximumZoomFactor = self.maximumSupportedZoom(for: desiredDevice)
+            self.minimumZoomFactor = supportedDevices.map { self.minimumSupportedZoom(for: $0) }.min() ?? 1
+            self.maximumZoomFactor = supportedDevices.map { self.maximumSupportedZoom(for: $0) }.max() ?? 1
             self.zoomFactor = displayed
             self.zoomLabel = self.formattedZoomLabel(for: displayed)
             self.torchAvailable = desiredDevice.hasTorch
@@ -1864,6 +1969,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
+        pendingPhotoAspect = burstRemaining > 0 ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
@@ -1876,7 +1982,7 @@ final class CameraManager: NSObject, ObservableObject {
         let settings = useHEIC
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-        settings.photoQualityPrioritization = .quality
+        settings.photoQualityPrioritization = burstRemaining > 0 ? .balanced : .quality
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
@@ -2148,6 +2254,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 return
             }
 
+            self.startLiveMetrics()
             self.segmentTimer?.cancel()
             if self.segmentSeconds > 0 {
                 let timer = DispatchWorkItem { [weak self] in
@@ -2181,6 +2288,9 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.metricsTimer?.cancel()
+            self.metricsTimer = nil
+            self.liveMetrics.setRunning(false)
             self.segmentTimer?.cancel()
 
             if self.discardCurrentRecordingWhenFinished {
@@ -2263,45 +2373,61 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraManager: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        if let error {
-            showError("Photo failed: \(error.localizedDescription)")
+        guard error == nil, let data = photo.fileDataRepresentation() else {
+            showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
+            completePhoto(saveSucceeded: false)
             return
         }
-
-        guard let data = photo.fileDataRepresentation() else {
-            showError("Couldn’t create the photo file.")
-            return
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.processingPhoto = true
+            let filename = self.pendingPhotoFilename ?? self.nextMediaFilename(fileExtension: "jpg")
+            let square = self.pendingPhotoAspect == "1:1"
+            self.pendingPhotoFilename = nil
+            self.storageQueue.async {
+                let result = square ? PhotoAspectProcessor.square(data) : data
+                guard let result else {
+                    self.showError("Couldn’t crop the photo. Please try again.")
+                    self.completePhoto(saveSucceeded: false)
+                    return
+                }
+                PHPhotoLibrary.shared().performChanges({
+                    let request = PHAssetCreationRequest.forAsset()
+                    let options = PHAssetResourceCreationOptions()
+                    options.originalFilename = filename
+                    request.addResource(with: .photo, data: result, options: options)
+                }) { success, error in
+                    if !success { self.showError(error?.localizedDescription ?? "Couldn’t save the photo.") }
+                    self.completePhoto(saveSucceeded: success)
+                }
+            }
         }
+    }
 
-        let filename = pendingPhotoFilename ?? nextMediaFilename(fileExtension: "jpg")
-        pendingPhotoFilename = nil
-        PHPhotoLibrary.shared().performChanges({
-            let request = PHAssetCreationRequest.forAsset()
-            let options = PHAssetResourceCreationOptions()
-            options.originalFilename = filename
-            request.addResource(with: .photo, data: data, options: options)
-        }) { [weak self] success, error in
-            self?.refreshAvailableStorage()
-            if success {
-                self?.postStatus("Photo saved to Photos")
+    private func completePhoto(saveSucceeded: Bool) {
+        sessionQueue.async {
+            self.processingPhoto = false
+            self.burstRemaining = saveSucceeded ? max(0, self.burstRemaining - 1) : 0
+            if self.burstRemaining > 0 && self.session.isRunning {
+                self.beginPhotoCapture()
             } else {
-                self?.showError(error?.localizedDescription ?? "Couldn’t save the photo to Photos.")
+                self.burstRemaining = 0
+                self.publish { self.isCapturingPhoto = false }
+                if saveSucceeded { self.postStatus("Photos saved to Photos") }
+                self.refreshAvailableStorage()
             }
         }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
-        let delivered = resolvedSettings.photoDimensions
-        publish {
-            self.isCapturingPhoto = false
-            if delivered.width > 0, delivered.height > 0 {
-                self.currentPhotoResolutionLabel = self.photoResolutionLabel(for: delivered)
-                self.currentPhotoPixelCount = Int64(delivered.width) * Int64(delivered.height)
-            }
-        }
-
         if let error {
             showError("Photo capture failed: \(error.localizedDescription)")
+            sessionQueue.async {
+                if !self.processingPhoto {
+                    self.burstRemaining = 0
+                    self.publish { self.isCapturingPhoto = false }
+                }
+            }
         }
     }
 }

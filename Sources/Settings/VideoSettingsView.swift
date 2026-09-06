@@ -3,6 +3,9 @@ import SwiftUI
 struct VideoSettingsView: View {
     @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
+    var positionStats: () -> Void = {}
+    @AppStorage("photoAspect") private var photoAspect = "4:3"
+    @AppStorage("burstCount") private var burstCount = 5
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -19,6 +22,9 @@ struct VideoSettingsView: View {
                     case .photo:
                         photoSettings
                     }
+
+                    QuickCameraSettings(camera: camera)
+                    RecordingExtrasSettings(camera: camera, positionStats: positionStats)
 
                     if camera.recoverableRecordingCount > 0 {
                         SettingsCard(title: "Recovery", symbol: "arrow.clockwise.circle.fill") {
@@ -174,6 +180,10 @@ struct VideoSettingsView: View {
 
     private var photoSettings: some View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
+            ThemeMenu(title: "Aspect Ratio", selection: $photoAspect, options: [("4:3", "4:3"), ("1:1", "1:1")])
+            ThemeMenu(title: "Burst Photos", selection: $burstCount, options: [(5, "5"), (10, "10"), (15, "15")])
+            Text("Hold the shutter to take the selected number of photos. Each photo saves separately.").font(.caption).foregroundStyle(.secondary)
+            SettingsDivider()
             ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
             Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -217,8 +227,6 @@ private struct CameraSettingsMenu: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                QuickCameraSettings(camera: camera)
-
                 SettingsCard(title: "Camera Experience", symbol: "sparkles") {
                     SettingsToggleRow(
                         title: "Haptic Capture",

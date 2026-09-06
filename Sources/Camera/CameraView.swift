@@ -30,6 +30,11 @@ struct CameraView: View {
     @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @State private var warnedAboutStorage = false
+    @AppStorage("liveRecordingStats") private var liveStats = false
+    @AppStorage("photoAspect") private var photoAspect = "4:3"
+    @AppStorage("longevityMode") private var longevity = false
+    @State private var editingStats = false
+    @State private var restoreBrightness: CGFloat?
     private var accent = CameraAccent()
 
     var body: some View {
@@ -39,10 +44,21 @@ struct CameraView: View {
                 isFocusExposureLocked: camera.isFocusExposureLocked,
                 stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
                 isPreviewTransitioning: camera.isPreviewTransitioning,
-                onTapToFocus: { camera.focusAndExpose(at: $0) },
-                onLongPressToLock: { camera.lockFocusAndExposure(at: $0) }
+                onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
+                onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
             )
             .ignoresSafeArea()
+
+            if camera.captureMode == .photo && photoAspect == "1:1" {
+                GeometryReader { proxy in
+                    let side = min(proxy.size.width, proxy.size.height)
+                    VStack(spacing: 0) {
+                        Color.black.opacity(0.7)
+                        Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
+                        Color.black.opacity(0.7)
+                    }
+                }.allowsHitTesting(false)
+            }
 
             LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
@@ -90,6 +106,7 @@ struct CameraView: View {
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
+            .allowsHitTesting(!editingStats)
 
             if isShowingProTools {
                 Color.black.opacity(0.001)
@@ -125,6 +142,20 @@ struct CameraView: View {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     camera.clearStatus(id: id)
                 }
+            }
+        }
+        .overlay {
+            if editingStats || (liveStats && camera.isRecording) {
+                LiveStatsOverlay(camera: camera, editing: editingStats) { editingStats = false }
+            }
+        }
+        .onChange(of: camera.isRecording) { _, recording in
+            if recording && longevity {
+                if restoreBrightness == nil { restoreBrightness = UIScreen.main.brightness }
+                UIScreen.main.brightness = min(UIScreen.main.brightness, 0.25)
+            } else if let brightness = restoreBrightness {
+                UIScreen.main.brightness = brightness
+                restoreBrightness = nil
             }
         }
         .preferredColorScheme(.dark)
@@ -163,6 +194,10 @@ struct CameraView: View {
                 if isLevelMeterEnabled { levelMonitor.start() }
             } else {
                 cancelCountdown()
+                if let brightness = restoreBrightness {
+                    UIScreen.main.brightness = brightness
+                    restoreBrightness = nil
+                }
                 camera.appDidBecomeInactive()
                 levelMonitor.stop()
             }
@@ -171,10 +206,16 @@ struct CameraView: View {
             cancelCountdown()
             levelMonitor.stop()
             camera.stop()
+            if let brightness = restoreBrightness { UIScreen.main.brightness = brightness; restoreBrightness = nil }
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .sheet(isPresented: $isShowingSettings) {
-            VideoSettingsView(camera: camera)
+            VideoSettingsView(camera: camera) {
+                isShowingSettings = false
+                isShowingProTools = false
+                cancelCountdown()
+                editingStats = true
+            }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -249,9 +290,20 @@ struct CameraView: View {
                 }
                 Spacer()
                 if camera.captureMode == .photo {
-                    PhotoButton(isCapturing: camera.isCapturingPhoto) {
-                        shutterPressed()
-                    }
+                    PhotoButton(isCapturing: camera.isCapturingPhoto) {}
+                        .highPriorityGesture(
+                            LongPressGesture(minimumDuration: 0.45).exclusively(before: TapGesture())
+                                .onEnded { value in
+                                    guard !editingStats else { return }
+                                    switch value {
+                                    case .first:
+                                        cancelCountdown()
+                                        captureHaptic()
+                                        camera.captureBurst()
+                                    case .second: shutterPressed()
+                                    }
+                                }
+                        )
                 } else if camera.isRecording && recordingLock {
                     Image(systemName: "lock.fill")
                         .font(.title2).foregroundStyle(accent.color)
