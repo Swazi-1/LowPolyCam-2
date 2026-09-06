@@ -67,9 +67,9 @@ enum CameraFormatSelector {
             format($0, supports: resolution, frameRate: frameRate)
         }
         if codec == "H264" {
-            // Preserve the original fallback: prefer an 8-bit source for H.264, but do not make
-            // format selection fail solely because a device reports an unusual source subtype.
-            return formats.first(where: { supports(codec: codec, format: $0) }) ?? formats.first
+            // An explicit H.264 request must resolve to a format that actually satisfies the
+            // codec policy. Do not silently pick an unrelated fallback and advertise it as valid.
+            return formats.first(where: { supports(codec: codec, format: $0) })
         }
         return formats.first
     }
@@ -154,6 +154,42 @@ enum CameraFormatSelector {
         }
     }
 
+
+    static func videoDevices(
+        from devices: [AVCaptureDevice],
+        resolution: VideoResolution,
+        frameRate: VideoFrameRate,
+        codec: String
+    ) -> [AVCaptureDevice] {
+        devices.filter {
+            preferredRecordingFormat(for: $0, resolution: resolution, frameRate: frameRate, codec: codec) != nil
+        }
+    }
+
+    static func slowMotionDevices(
+        from devices: [AVCaptureDevice],
+        resolution: VideoResolution,
+        frameRate: CameraManager.SlowMotionFrameRate,
+        codec: String
+    ) -> [AVCaptureDevice] {
+        devices.filter {
+            bestSlowMotionFormat(for: $0, resolution: resolution, frameRate: frameRate, codec: codec) != nil
+        }
+    }
+
+    static func activeFrameDurationsMatch(
+        device: AVCaptureDevice,
+        frameRate: Double,
+        tolerance: Double
+    ) -> Bool {
+        let minSeconds = device.activeVideoMinFrameDuration.seconds
+        let maxSeconds = device.activeVideoMaxFrameDuration.seconds
+        guard minSeconds > 0, maxSeconds > 0 else { return false }
+        let minFPS = 1 / minSeconds
+        let maxFPS = 1 / maxSeconds
+        return abs(minFPS - frameRate) < tolerance && abs(maxFPS - frameRate) < tolerance
+    }
+
     static func activeVideoFormatMatches(
         device: AVCaptureDevice,
         resolution: VideoResolution,
@@ -165,8 +201,11 @@ enum CameraFormatSelector {
         guard dimensions.width == resolution.dimensions.width,
               dimensions.height == resolution.dimensions.height,
               supports(codec: codec, format: active) else { return false }
-        let duration = device.activeVideoMinFrameDuration.seconds
-        return duration > 0 && abs(1 / duration - Double(frameRate.rawValue)) < 0.5
+        return activeFrameDurationsMatch(
+            device: device,
+            frameRate: Double(frameRate.rawValue),
+            tolerance: 0.5
+        )
     }
 
     static func activeSlowMotionFormatMatches(
@@ -182,7 +221,10 @@ enum CameraFormatSelector {
               dimensions.height == resolution.dimensions.height,
               supports(codec: codec, format: active),
               supports(frameRate: requestedFPS, format: active) else { return false }
-        let duration = device.activeVideoMinFrameDuration.seconds
-        return duration > 0 && abs(1 / duration - requestedFPS) < 1
+        return activeFrameDurationsMatch(
+            device: device,
+            frameRate: requestedFPS,
+            tolerance: 1
+        )
     }
 }

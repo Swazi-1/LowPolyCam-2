@@ -61,6 +61,20 @@ enum CameraZoomController {
         min(8, displayedZoom(forDeviceZoom: device.maxAvailableVideoZoomFactor, device: device))
     }
 
+    /// Idle navigation is a union across legal optical inputs, not the digital range of whichever
+    /// physical sensor happens to be active right now. This is what keeps 0.5x reachable after a
+    /// manual-WB handoff to the 1x wide camera.
+    static func displayedZoomDomain(for devices: [AVCaptureDevice]) -> ClosedRange<CGFloat> {
+        guard !devices.isEmpty else { return 1...1 }
+        let minimum = devices.map(minimumDisplayedZoom(for:)).min() ?? 1
+        let maximum = devices.map(maximumDisplayedZoom(for:)).max() ?? 1
+        return min(minimum, maximum)...max(minimum, maximum)
+    }
+
+    static func clampDisplayedZoom(_ requested: CGFloat, to domain: ClosedRange<CGFloat>) -> CGFloat {
+        min(max(requested, domain.lowerBound), domain.upperBound)
+    }
+
     static func snappedDisplayedZoom(_ requested: CGFloat, for device: AVCaptureDevice) -> CGFloat {
         let minimum = minimumDisplayedZoom(for: device)
         let maximum = maximumDisplayedZoom(for: device)

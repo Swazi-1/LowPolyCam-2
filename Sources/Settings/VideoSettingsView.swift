@@ -242,6 +242,17 @@ private struct PhotoResolutionPicker: View {
         camera.supportedPhotoResolutions.first { $0.id == camera.selectedPhotoResolutionID }
     }
 
+    private var nativeSelection: Binding<String> {
+        Binding(
+            get: { camera.selectedPhotoResolutionID },
+            set: { id in
+                guard id != camera.selectedPhotoResolutionID,
+                      let option = camera.supportedPhotoResolutions.first(where: { $0.id == id }) else { return }
+                camera.selectPhotoResolution(option)
+            }
+        )
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -257,16 +268,9 @@ private struct PhotoResolutionPicker: View {
                 ProgressView().controlSize(.small)
             } else {
                 Menu {
-                    ForEach(camera.supportedPhotoResolutions) { option in
-                        Button {
-                            camera.selectPhotoResolution(option)
-                        } label: {
-                            HStack {
-                                Text(option.label)
-                                if camera.selectedPhotoResolutionID == option.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
+                    Picker("Photo Resolution", selection: nativeSelection) {
+                        ForEach(camera.supportedPhotoResolutions) { option in
+                            Text(option.label).tag(option.id)
                         }
                     }
                 } label: {
@@ -458,31 +462,44 @@ private struct SettingsPickerRow<Option: Identifiable & Equatable>: View {
     let label: (Option) -> String
     let onSelect: (Option) -> Void
 
+    private var nativeSelection: Binding<Option.ID> {
+        Binding(
+            get: { selection.id },
+            set: { id in
+                guard id != selection.id, let option = options.first(where: { $0.id == id }) else { return }
+                onSelect(option)
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
 
-            HStack(spacing: 8) {
-                ForEach(options) { option in
-                    Button {
-                        onSelect(option)
-                    } label: {
-                        Text(label(option))
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .background(
-                                selection == option ? theme : Color.primary.opacity(0.07),
-                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            )
-                            .foregroundStyle(selection == option ? .black : .primary)
+            Menu {
+                Picker(title, selection: nativeSelection) {
+                    ForEach(options) { option in
+                        Text(label(option)).tag(option.id)
                     }
-                    .buttonStyle(.plain)
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(label(selection))
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(theme)
+                .padding(.horizontal, 11)
+                .frame(maxWidth: .infinity, minHeight: 38)
+                .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(Rectangle())
             }
+            .disabled(options.isEmpty)
         }
     }
 }
