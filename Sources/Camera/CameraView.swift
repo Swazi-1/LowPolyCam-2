@@ -107,7 +107,7 @@ struct CameraView: View {
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
-            .allowsHitTesting(!editingStats)
+            .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning)
 
             if isShowingProTools {
                 Color.black.opacity(0.001)
