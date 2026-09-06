@@ -722,13 +722,19 @@ final class CameraManager: NSObject, ObservableObject {
     func updateInteractiveZoom(_ requestedFactor: CGFloat) {
         let request = makeConfigurationRequest(displayedZoom: requestedFactor)
         if usesPhysicalPreviewZoomRouting(request) {
+            // Mid-drag, behave exactly like Photo mode: stay on whichever device is already
+            // active and let AVFoundation's ramp handle the motion. Forcing a physical lens
+            // swap (session reconfiguration) on every drag sample is what caused the lag when
+            // crossing the 0.5x/1x boundary. The optical handoff still happens, but only once
+            // the gesture settles in endInteractiveZoom.
             let token = currentInteractiveZoomToken()
             enqueueZoomRequest(
                 requestedFactor,
                 settleOpticalRoute: false,
                 animate: false,
                 requestID: token,
-                forcePhysicalOpticalRouting: true
+                forcePhysicalOpticalRouting: true,
+                preferCurrentDeviceWhenPossible: true
             )
         } else {
             enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false)
@@ -775,7 +781,8 @@ final class CameraManager: NSObject, ObservableObject {
         settleOpticalRoute: Bool,
         animate: Bool,
         requestID suppliedRequestID: CaptureRequestGate.Token? = nil,
-        forcePhysicalOpticalRouting: Bool = false
+        forcePhysicalOpticalRouting: Bool = false,
+        preferCurrentDeviceWhenPossible: Bool = false
     ) {
         let requestID = suppliedRequestID ?? requestGate.next(.zoom)
         let requestSnapshot = makeConfigurationRequest(displayedZoom: requestedFactor)
@@ -799,6 +806,7 @@ final class CameraManager: NSObject, ObservableObject {
                 availableDevices: legalDevices,
                 mode: requestSnapshot.mode,
                 recordingOrStarting: recordingOrStarting,
+                preferCurrentDeviceWhenPossible: preferCurrentDeviceWhenPossible,
                 forcePhysicalOpticalRouting: forcePhysicalOpticalRouting && !recordingOrStarting
             )
 
