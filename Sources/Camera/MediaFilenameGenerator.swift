@@ -6,16 +6,14 @@ enum MediaFilenameGenerator {
 
     static func nextFilename(fileExtension: String, defaults: UserDefaults = .standard) -> String {
         let ext = fileExtension.lowercased()
-        let recoveryNames = Set(CameraRecoveryStore.recordings().map(\.lastPathComponent))
         var number = defaults.integer(forKey: sequenceKey)
         if number < 1 || number > 9_999 { number = 1 }
 
         for _ in 0..<9_999 {
             let filename = String(format: "img_%04d.%@", number, ext)
-            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
             let next = number == 9_999 ? 1 : number + 1
             defaults.set(next, forKey: sequenceKey)
-            if !FileManager.default.fileExists(atPath: tempURL.path), !recoveryNames.contains(filename) {
+            if !CameraRecoveryStore.containsFilename(filename) {
                 return filename
             }
             number = next

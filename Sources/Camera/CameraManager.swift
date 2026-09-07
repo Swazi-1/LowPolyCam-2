@@ -47,7 +47,9 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var lastFrameGaps: Int?
     @Published private(set) var codecAvailabilityMessage: String?
     @Published private(set) var unavailableVideoCodecs: Set<String> = []
+    @Published private(set) var recoverableMediaCount = 0
     @Published private(set) var recoverableRecordingCount = 0
+    @Published private(set) var recoverablePhotoCount = 0
     @Published private(set) var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
@@ -55,6 +57,13 @@ final class CameraManager: NSObject, ObservableObject {
                 if !suppressPreferencePersistence {
                     UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
                 }
+                return
+            }
+
+            // Codec is a recording-only preference. Photo mode stores the choice without touching
+            // AVCaptureMovieFileOutput; it is validated when Video or Slo-Mo becomes active.
+            if captureMode == .photo {
+                UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
                 return
             }
 
@@ -110,6 +119,13 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
 
+            // Compression affects only movie encoding. Never mutate movie output while Photo mode
+            // owns the preview graph; save the preference and apply it on entry to a recording mode.
+            if captureMode == .photo {
+                UserDefaults.standard.set(videoCompression.rawValue, forKey: "videoCompression")
+                return
+            }
+
             let requested = videoCompression
             let previous = oldValue
             let configurationToken = requestGate.next(.configuration)
@@ -136,6 +152,7 @@ final class CameraManager: NSObject, ObservableObject {
                     self.isPreviewTransitioning = false
                     if success {
                         UserDefaults.standard.set(requested.rawValue, forKey: "videoCompression")
+                        self.updateStableConfigurationAfterOutputOnlyChange(configurationRequest)
                     } else {
                         self.suppressAutomaticReconfiguration = true
                         self.videoCompression = previous
@@ -200,6 +217,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var activeMaximumPhotoDimensions = CMVideoDimensions(width: 0, height: 0)
     private var pendingPhotoCaptures: [Int64: PendingPhotoCapture] = [:]
     private var pendingPhotoSaves = 0
+    private var photoProcessingGate = BoundedInFlightGate(capacity: 3)
+    private var reservedPhotoProcessingSlots = Set<Int64>()
 
     private var videoInput: AVCaptureDeviceInput?
     private var durationTimer: Timer?
@@ -267,7 +286,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var activeRecordingConfigurationRequest: CaptureConfigurationRequest?
     private var segmentTimer: DispatchWorkItem?
     private var pendingVideoSaves = 0
-    private var recoveryRetriesInFlight = Set<URL>()
+    private var recoveryRetryState = RecoveryRetryState()
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var rotationCoordinatorDeviceID: String?
@@ -284,6 +303,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var sessionObserverTokens: [NSObjectProtocol] = []
     private var suppressPreferencePersistence = false
     private var suppressAutomaticReconfiguration = false
+    private var longevityModeEnabled = UserDefaults.standard.bool(forKey: "longevityMode")
+    private var longevityState = LongevityModeState()
     // Optional monitoring outputs must never be allowed to wedge the core capture session.
     // After a runtime error they stay suppressed until the user explicitly toggles Live Stats
     // again; core camera/movie/photo capture recovers first.
@@ -291,6 +312,22 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingSessionRecovery = false
     private var sessionRecoveryAttempt = 0
     private var captureLifecycleActive = true
+
+    private struct StableMovieOutputConfiguration {
+        let settings: [String: Any]
+        let automaticallyAdjustsVideoMirroring: Bool?
+        let isVideoMirrored: Bool?
+        let stabilizationMode: AVCaptureVideoStabilizationMode?
+        let signature: String?
+    }
+
+    private struct StableCaptureConfiguration {
+        var request: CaptureConfigurationRequest
+        var torchEnabled: Bool
+        var movieOutput: StableMovieOutputConfiguration
+    }
+    private var lastSuccessfulCaptureConfiguration: StableCaptureConfiguration?
+    private var isRollingBackCaptureConfiguration = false
 
 
     override init() {
@@ -304,8 +341,23 @@ final class CameraManager: NSObject, ObservableObject {
         selectedPhotoResolutionID = preferences.photoResolutionID
         super.init()
         if let mode = preferences.rememberedCaptureMode() { captureMode = mode }
+        if longevityModeEnabled {
+            suppressPreferencePersistence = true
+            suppressAutomaticReconfiguration = true
+            selectedResolution = .p720
+            selectedFrameRate = .fps30
+            selectedVideoCodec = "HEVC"
+            videoCompression = .dataSaver
+            suppressAutomaticReconfiguration = false
+            suppressPreferencePersistence = false
+            longevityState.commitEnabled(true)
+        }
         installSessionObservers()
-        recoverableRecordingCount = CameraRecoveryStore.recordings().count
+        _ = CameraRecoveryStore.reconcilePendingRecordings()
+        let recoveryItems = CameraRecoveryStore.items()
+        recoverableMediaCount = recoveryItems.count
+        recoverableRecordingCount = recoveryItems.filter { $0.kind == .recording }.count
+        recoverablePhotoCount = recoveryItems.filter { $0.kind == .photo }.count
     }
 
     deinit {
@@ -338,6 +390,9 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func persistCameraPreferences() {
+        // Longevity is a derived override. Never let its 720p/30 values replace the user's normal
+        // front/rear selections in CameraPreferenceStore.
+        guard !longevityModeEnabled else { return }
         preferenceStore.save(
             CameraPreferenceStore.Selection(
                 resolution: selectedResolution,
@@ -349,14 +404,64 @@ final class CameraManager: NSObject, ObservableObject {
         )
     }
 
-    private func loadCameraPreferences(for position: CameraPosition) {
+    private func longevityCamera(for position: CameraPosition) -> LongevityModeState.Camera {
+        position == .back ? .back : .front
+    }
+
+    private func rememberNormalLongevitySelection(for position: CameraPosition) {
+        let saved = preferenceStore.selection(for: position)
+        let selection = LongevityModeState.NormalVideoSelection(
+            resolution: saved.resolution.rawValue,
+            frameRate: saved.frameRate.rawValue,
+            codec: UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC",
+            compression: UserDefaults.standard.string(forKey: "videoCompression") ?? VideoCompression.high.rawValue
+        )
+        longevityState.rememberNormalSelection(selection, for: longevityCamera(for: position))
+    }
+
+    private func applyLongevityOverrideToPublishedSelection(for position: CameraPosition) {
+        rememberNormalLongevitySelection(for: position)
+        suppressPreferencePersistence = true
+        suppressAutomaticReconfiguration = true
+        selectedResolution = .p720
+        selectedFrameRate = .fps30
+        selectedVideoCodec = "HEVC"
+        videoCompression = .dataSaver
+        suppressAutomaticReconfiguration = false
+        suppressPreferencePersistence = false
+    }
+
+    private func loadNormalVideoPreferences(for position: CameraPosition) {
         let saved = preferenceStore.selection(for: position)
         suppressPreferencePersistence = true
-        defer { suppressPreferencePersistence = false }
+        suppressAutomaticReconfiguration = true
         selectedResolution = saved.resolution
         selectedFrameRate = saved.frameRate
         selectedSlowMotionResolution = saved.slowMotionResolution
         selectedSlowMotionFrameRate = saved.slowMotionFrameRate
+        selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC"
+        videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high
+        suppressAutomaticReconfiguration = false
+        suppressPreferencePersistence = false
+    }
+
+    private func loadCameraPreferences(for position: CameraPosition) {
+        let saved = preferenceStore.selection(for: position)
+        suppressPreferencePersistence = true
+        suppressAutomaticReconfiguration = true
+        selectedResolution = saved.resolution
+        selectedFrameRate = saved.frameRate
+        selectedSlowMotionResolution = saved.slowMotionResolution
+        selectedSlowMotionFrameRate = saved.slowMotionFrameRate
+        if longevityModeEnabled {
+            rememberNormalLongevitySelection(for: position)
+            selectedResolution = .p720
+            selectedFrameRate = .fps30
+            selectedVideoCodec = "HEVC"
+            videoCompression = .dataSaver
+        }
+        suppressAutomaticReconfiguration = false
+        suppressPreferencePersistence = false
     }
 
     private func installSessionObservers() {
@@ -771,6 +876,10 @@ final class CameraManager: NSObject, ObservableObject {
             device.torchMode = enabled ? .on : .off
             let actualState = device.torchMode == .on
             device.unlockForConfiguration()
+            if var stable = lastSuccessfulCaptureConfiguration {
+                stable.torchEnabled = actualState
+                lastSuccessfulCaptureConfiguration = stable
+            }
             publish {
                 self.torchAvailable = device.isTorchAvailable
                 self.isTorchOn = actualState
@@ -1066,10 +1175,15 @@ final class CameraManager: NSObject, ObservableObject {
 #endif
         // Best-effort idle preparation only. startRecording revalidates the exact current
         // connection/settings before capture, so zoom responsiveness never weakens recording safety.
-        _ = configureMovieOutputSettings(
+        let success = configureMovieOutputSettings(
             requestToken: preparation.requestToken,
             request: preparation.request
         )
+        if success {
+            rememberStableCaptureConfiguration(request: preparation.request)
+        } else {
+            _ = rollbackToLastSuccessfulCaptureConfiguration(excludingToken: preparation.requestToken)
+        }
     }
 
     private func reconcileLatestZoomBeforePreviewReveal(
@@ -1145,6 +1259,12 @@ final class CameraManager: NSObject, ObservableObject {
             }
             if requestGate.isCurrent(requestID) {
                 requestedZoom = factor
+                if var stable = lastSuccessfulCaptureConfiguration,
+                   stable.request.mode == zoomRequest.configuration.mode,
+                   stable.request.position == zoomRequest.configuration.position {
+                    stable.request = stable.request.replacingDisplayedZoom(factor)
+                    lastSuccessfulCaptureConfiguration = stable
+                }
                 publishIfCurrent(requestID) {
                     self.zoomFactor = factor
                     self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
@@ -1531,38 +1651,85 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func applyLongevityMode(_ enabled: Bool) {
-        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else {
+            postStatus("Stop recording before changing Longevity Mode.")
+            return
+        }
+        guard enabled != longevityModeEnabled else { return }
+
+        let previousResolution = selectedResolution
+        let previousFrameRate = selectedFrameRate
+        let previousSlowResolution = selectedSlowMotionResolution
+        let previousSlowFrameRate = selectedSlowMotionFrameRate
+        let previousCodec = selectedVideoCodec
+        let previousCompression = videoCompression
+        let previousEnabled = longevityModeEnabled
         let configurationToken = requestGate.next(.configuration)
         requestGate.invalidate(.zoom)
         requestGate.invalidate(.whiteBalance)
-        let defaults = UserDefaults.standard
+        isPreviewTransitioning = true
+
         if enabled {
-            defaults.set(selectedResolution.rawValue, forKey: "longevityPreviousResolution")
-            defaults.set(selectedFrameRate.rawValue, forKey: "longevityPreviousFPS")
-            defaults.set(selectedVideoCodec, forKey: "longevityPreviousCodec")
-            defaults.set(videoCompression.rawValue, forKey: "longevityPreviousCompression")
-        }
-        suppressAutomaticReconfiguration = true
-        if enabled {
-            selectedResolution = .p720
-            selectedFrameRate = .fps30
-            selectedVideoCodec = "HEVC"
-            videoCompression = .dataSaver
+            applyLongevityOverrideToPublishedSelection(for: cameraPosition)
         } else {
-            selectedResolution = VideoResolution(rawValue: defaults.string(forKey: "longevityPreviousResolution") ?? "") ?? .p1080
-            selectedFrameRate = VideoFrameRate(rawValue: defaults.integer(forKey: "longevityPreviousFPS")) ?? .fps30
-            selectedVideoCodec = defaults.string(forKey: "longevityPreviousCodec") ?? "HEVC"
-            videoCompression = VideoCompression(rawValue: defaults.string(forKey: "longevityPreviousCompression") ?? "") ?? .high
+            loadNormalVideoPreferences(for: cameraPosition)
         }
-        suppressAutomaticReconfiguration = false
-        defaults.set(enabled, forKey: "longevityMode")
         let request = makeConfigurationRequest()
+
         sessionQueue.async { [weak self] in
-            guard let self, self.requestGate.isCurrent(configurationToken),
-                  !self.movieOutput.isRecording, !self.recordingOperation.requested,
-                  !self.recordingOperation.startIssued, !self.recordingOperation.segmentActive,
-                  !self.recordingOperation.finalizationPending else { return }
-            _ = self.configureCurrentMode(phase: .preview, requestToken: configurationToken, request: request)
+            guard let self, self.requestGate.isCurrent(configurationToken) else { return }
+            guard !self.movieOutput.isRecording,
+                  !self.recordingOperation.requested,
+                  !self.recordingOperation.startIssued,
+                  !self.recordingOperation.segmentActive,
+                  !self.recordingOperation.finalizationPending else {
+                self.publishIfCurrent(configurationToken) {
+                    self.suppressPreferencePersistence = true
+                    self.suppressAutomaticReconfiguration = true
+                    self.selectedResolution = previousResolution
+                    self.selectedFrameRate = previousFrameRate
+                    self.selectedSlowMotionResolution = previousSlowResolution
+                    self.selectedSlowMotionFrameRate = previousSlowFrameRate
+                    self.selectedVideoCodec = previousCodec
+                    self.videoCompression = previousCompression
+                    self.suppressAutomaticReconfiguration = false
+                    self.suppressPreferencePersistence = false
+                    self.isPreviewTransitioning = false
+                    self.postStatus("Stop recording before changing Longevity Mode.")
+                }
+                return
+            }
+
+            let success = self.configureCurrentMode(
+                phase: .preview,
+                requestToken: configurationToken,
+                request: request
+            )
+            self.publishIfCurrent(configurationToken) {
+                self.isPreviewTransitioning = false
+                if success {
+                    self.longevityModeEnabled = enabled
+                    self.longevityState.commitEnabled(enabled)
+                    UserDefaults.standard.set(enabled, forKey: "longevityMode")
+                } else {
+                    self.suppressPreferencePersistence = true
+                    self.suppressAutomaticReconfiguration = true
+                    self.selectedResolution = previousResolution
+                    self.selectedFrameRate = previousFrameRate
+                    self.selectedSlowMotionResolution = previousSlowResolution
+                    self.selectedSlowMotionFrameRate = previousSlowFrameRate
+                    self.selectedVideoCodec = previousCodec
+                    self.videoCompression = previousCompression
+                    self.suppressAutomaticReconfiguration = false
+                    self.suppressPreferencePersistence = false
+                    self.longevityModeEnabled = previousEnabled
+                    self.longevityState.commitEnabled(previousEnabled)
+                    UserDefaults.standard.set(previousEnabled, forKey: "longevityMode")
+                    self.postStatus(enabled
+                        ? "Longevity Mode isn’t available with the current camera configuration."
+                        : "Couldn’t restore the normal camera settings, so Longevity Mode stayed on.")
+                }
+            }
         }
     }
 
@@ -1779,6 +1946,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     func isVideoCodecUnavailable(_ codec: String) -> Bool {
         guard codec == "H264" || codec == "HEVC" else { return true }
+        // Photo mode only stores the future recording preference. Do not disable choices based on
+        // a stale movie-output connection that Photo mode is intentionally not reconfiguring.
+        if captureMode == .photo { return false }
         // 4K60 is HEVC-only in LowPolyCam. Keep this policy deterministic even while a newer
         // quality request is still being committed on the session queue, so a fast tap can never
         // sneak H.264 into an invalid 4K60 reconfiguration.
@@ -1792,6 +1962,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectVideoCodec(_ codec: String) {
+        if longevityModeEnabled && captureMode == .video {
+            postStatus("Turn off Longevity Mode before changing the codec.")
+            return
+        }
         guard codec != selectedVideoCodec else { return }
         guard codec == "H264" || codec == "HEVC" else { return }
         guard !isVideoCodecUnavailable(codec) else {
@@ -1804,11 +1978,19 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectVideoCompression(_ compression: VideoCompression) {
+        if longevityModeEnabled && captureMode == .video {
+            postStatus("Turn off Longevity Mode before changing compression.")
+            return
+        }
         guard compression != videoCompression else { return }
         videoCompression = compression
     }
 
     func selectResolution(_ resolution: VideoResolution) {
+        if longevityModeEnabled && captureMode == .video {
+            postStatus("Turn off Longevity Mode before changing video quality.")
+            return
+        }
         guard resolution != selectedResolution else { return }
         let previous = selectedResolution
         let token = requestGate.next(.configuration)
@@ -1854,6 +2036,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
+        if longevityModeEnabled && captureMode == .video {
+            postStatus("Turn off Longevity Mode before changing frame rate.")
+            return
+        }
         guard frameRate != selectedFrameRate else { return }
         let previous = selectedFrameRate
         let token = requestGate.next(.configuration)
@@ -2024,6 +2210,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.isPreviewTransitioning = false
                 if success {
                     self.preferenceStore.saveVideoStabilization(enabled)
+                    self.updateStableConfigurationAfterOutputOnlyChange(configurationRequest)
                 } else {
                     self.suppressPreferencePersistence = true
                     self.isVideoStabilizationEnabled = previous
@@ -2107,6 +2294,11 @@ final class CameraManager: NSObject, ObservableObject {
 
 
     func applyQuickPreset(_ preset: VideoQuickPreset, completion: ((Bool) -> Void)? = nil) {
+        guard !longevityModeEnabled else {
+            postStatus("Turn off Longevity Mode before applying a quick preset.")
+            completion?(false)
+            return
+        }
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else {
             completion?(false)
             return
@@ -3134,6 +3326,42 @@ final class CameraManager: NSObject, ObservableObject {
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
         let request = suppliedRequest ?? makeConfigurationRequest()
+        var transaction = CaptureConfigurationTransaction()
+        transaction.begin()
+
+        let success = configureCurrentModeRaw(
+            phase: phase,
+            preferVirtualCamera: override,
+            synchronizeWhiteBalance: synchronizeWhiteBalance,
+            deferMovieOutputConfiguration: deferMovieOutputConfiguration,
+            requestToken: requestToken,
+            request: request
+        )
+
+        if transaction.finish(success: success) {
+            if !isRollingBackCaptureConfiguration {
+                _ = rollbackToLastSuccessfulCaptureConfiguration(excludingToken: requestToken)
+            }
+            transaction.didRollback()
+            return false
+        }
+
+        // Only a complete idle/preview graph becomes the new rollback baseline. Recording-phase
+        // changes intentionally keep the last stable preview as their fallback.
+        if phase == .preview && !deferMovieOutputConfiguration && !isRollingBackCaptureConfiguration {
+            rememberStableCaptureConfiguration(request: request)
+        }
+        return true
+    }
+
+    private func configureCurrentModeRaw(
+        phase: CaptureConfigurationPhase,
+        preferVirtualCamera override: Bool? = nil,
+        synchronizeWhiteBalance: Bool = true,
+        deferMovieOutputConfiguration: Bool = false,
+        requestToken: CaptureRequestGate.Token? = nil,
+        request: CaptureConfigurationRequest
+    ) -> Bool {
         let requiresPhysicalWB = WhiteBalanceController.requiresPhysicalRearInput(
             preset: request.whiteBalancePreset,
             position: request.position
@@ -3143,7 +3371,12 @@ final class CameraManager: NSObject, ObservableObject {
         switch request.mode {
         case .photo:
             guard phase == .preview else { return false }
-            return applyBestPhotoFormat(preferVirtualCamera: preferVirtualCamera, synchronizeWhiteBalance: synchronizeWhiteBalance, requestToken: requestToken, request: request)
+            return applyBestPhotoFormat(
+                preferVirtualCamera: preferVirtualCamera,
+                synchronizeWhiteBalance: synchronizeWhiteBalance,
+                requestToken: requestToken,
+                request: request
+            )
 
         case .video:
             return applySelectedFormat(
@@ -3163,6 +3396,84 @@ final class CameraManager: NSObject, ObservableObject {
                 request: request
             )
         }
+    }
+
+    private func rememberStableCaptureConfiguration(request: CaptureConfigurationRequest) {
+        guard let movieOutput = currentStableMovieOutputConfiguration() else { return }
+        let torchEnabled = videoInput?.device.hasTorch == true && videoInput?.device.torchMode == .on
+        lastSuccessfulCaptureConfiguration = StableCaptureConfiguration(
+            request: request.replacingDisplayedZoom(requestedZoom),
+            torchEnabled: torchEnabled,
+            movieOutput: movieOutput
+        )
+    }
+
+    /// Compression and stabilization can be applied without rebuilding the whole capture graph.
+    /// Once AVFoundation verifies those output-only changes, fold them into the rollback baseline.
+    private func updateStableConfigurationAfterOutputOnlyChange(_ request: CaptureConfigurationRequest) {
+        guard let movieOutput = currentStableMovieOutputConfiguration() else { return }
+        guard var stable = lastSuccessfulCaptureConfiguration else {
+            rememberStableCaptureConfiguration(request: request)
+            return
+        }
+        stable.request = request.replacingDisplayedZoom(requestedZoom)
+        stable.movieOutput = movieOutput
+        lastSuccessfulCaptureConfiguration = stable
+    }
+
+    @discardableResult
+    private func rollbackToLastSuccessfulCaptureConfiguration(
+        excludingToken requestToken: CaptureRequestGate.Token? = nil
+    ) -> Bool {
+        guard let stable = lastSuccessfulCaptureConfiguration else { return false }
+        if let requestToken, !requestGate.isCurrent(requestToken) {
+            // A newer request owns the graph now; never let an older failed operation roll it back.
+            return false
+        }
+        guard !isRollingBackCaptureConfiguration else { return false }
+
+        isRollingBackCaptureConfiguration = true
+        defer { isRollingBackCaptureConfiguration = false }
+
+        requestedZoom = stable.request.displayedZoom
+        requestedWhiteBalancePreset = stable.request.whiteBalancePreset
+        let restored = configureCurrentModeRaw(
+            phase: .preview,
+            synchronizeWhiteBalance: true,
+            deferMovieOutputConfiguration: false,
+            requestToken: nil,
+            request: stable.request
+        )
+        guard restored,
+              restoreStableMovieOutputConfiguration(stable.movieOutput) else {
+            showError("Camera configuration failed and the previous camera state couldn’t be restored.")
+            return false
+        }
+
+        if let device = videoInput?.device, device.hasTorch {
+            _ = setTorchEnabledOnCurrentDevice(stable.torchEnabled, showErrorOnFailure: false)
+        }
+
+        // Restore the published intent to the same request that rebuilt the real capture graph.
+        publish {
+            self.suppressPreferencePersistence = true
+            self.suppressAutomaticReconfiguration = true
+            self.captureMode = stable.request.mode
+            self.cameraPosition = stable.request.position
+            self.selectedResolution = stable.request.resolution
+            self.selectedFrameRate = stable.request.frameRate
+            self.selectedSlowMotionResolution = stable.request.slowMotionResolution
+            self.selectedSlowMotionFrameRate = stable.request.slowMotionFrameRate
+            self.selectedVideoCodec = stable.request.codec
+            self.videoCompression = stable.request.compression
+            self.isVideoStabilizationEnabled = stable.request.stabilizationEnabled
+            self.whiteBalancePreset = stable.request.whiteBalancePreset
+            self.suppressAutomaticReconfiguration = false
+            self.suppressPreferencePersistence = false
+        }
+        updateCapabilities(request: stable.request)
+        synchronizeTorchState()
+        return true
     }
 
     @discardableResult
@@ -3584,6 +3895,112 @@ final class CameraManager: NSObject, ObservableObject {
         return true
     }
 
+    private func currentStableMovieOutputConfiguration() -> StableMovieOutputConfiguration? {
+        guard let connection = movieOutput.connection(with: .video),
+              movieOutput.connections.contains(where: { $0 === connection }) else { return nil }
+
+        // outputSettings(for:) can contain a fully populated dictionary on iOS. Apple explicitly
+        // requires callers to remove keys that are not listed by supportedOutputSettingsKeys(for:)
+        // before feeding a dictionary back into setOutputSettings(_:for:).
+        let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
+        var restorableSettings = movieOutput.outputSettings(for: connection).filter {
+            supportedKeys.contains($0.key)
+        }
+        if restorableSettings[AVVideoCodecKey] == nil {
+            restorableSettings.removeValue(forKey: AVVideoCompressionPropertiesKey)
+        }
+
+        return StableMovieOutputConfiguration(
+            settings: restorableSettings,
+            automaticallyAdjustsVideoMirroring: connection.isVideoMirroringSupported
+                ? connection.automaticallyAdjustsVideoMirroring
+                : nil,
+            isVideoMirrored: connection.isVideoMirroringSupported ? connection.isVideoMirrored : nil,
+            stabilizationMode: connection.isVideoStabilizationSupported
+                ? connection.preferredVideoStabilizationMode
+                : nil,
+            signature: lastAppliedMovieSettingsSignature
+        )
+    }
+
+    private func validatedMovieOutputSettings(
+        _ settings: [String: Any],
+        for connection: AVCaptureConnection
+    ) -> [String: Any]? {
+        guard !movieOutput.isRecording,
+              movieOutput.connection(with: .video) === connection,
+              movieOutput.connections.contains(where: { $0 === connection }) else { return nil }
+
+        let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
+        guard supportedKeys.isSuperset(of: settings.keys) else { return nil }
+
+        if let codecValue = settings[AVVideoCodecKey] {
+            let rawCodec = (codecValue as? String)
+                ?? (codecValue as? NSString).map { String($0) }
+            guard let rawCodec,
+                  movieOutput.availableVideoCodecTypes.contains(AVVideoCodecType(rawValue: rawCodec)) else {
+                return nil
+            }
+        } else if settings[AVVideoCompressionPropertiesKey] != nil {
+            return nil
+        }
+
+        if let compressionValue = settings[AVVideoCompressionPropertiesKey] {
+            guard let compression = compressionValue as? NSDictionary else { return nil }
+            if let bitrateValue = compression[AVVideoAverageBitRateKey] {
+                guard let bitrate = bitrateValue as? NSNumber,
+                      bitrate.doubleValue.isFinite,
+                      bitrate.doubleValue > 0 else { return nil }
+            }
+        }
+
+        return settings
+    }
+
+    @discardableResult
+    private func applyValidatedMovieOutputSettings(
+        _ settings: [String: Any],
+        to connection: AVCaptureConnection
+    ) -> Bool {
+        guard let validated = validatedMovieOutputSettings(settings, for: connection) else { return false }
+        let current = movieOutput.outputSettings(for: connection)
+        if NSDictionary(dictionary: current).isEqual(NSDictionary(dictionary: validated)) { return true }
+        movieOutput.setOutputSettings(validated, for: connection)
+        return NSDictionary(dictionary: movieOutput.outputSettings(for: connection)).isEqual(NSDictionary(dictionary: validated))
+    }
+
+    @discardableResult
+    private func restoreStableMovieOutputConfiguration(_ stable: StableMovieOutputConfiguration) -> Bool {
+        guard !movieOutput.isRecording,
+              let connection = movieOutput.connection(with: .video),
+              movieOutput.connections.contains(where: { $0 === connection }) else { return false }
+
+        if stable.settings.isEmpty {
+            // Apple documents an empty dictionary as the explicit "do not change the connection
+            // media format" state. This is different from nil, which derives settings from the
+            // session preset and can unexpectedly change the encoder configuration.
+            guard validatedMovieOutputSettings([:], for: connection) != nil else { return false }
+            movieOutput.setOutputSettings([:], for: connection)
+        } else if !applyValidatedMovieOutputSettings(stable.settings, to: connection) {
+            return false
+        }
+
+        if connection.isVideoMirroringSupported,
+           let automatic = stable.automaticallyAdjustsVideoMirroring,
+           let mirrored = stable.isVideoMirrored {
+            connection.automaticallyAdjustsVideoMirroring = automatic
+            if !automatic { connection.isVideoMirrored = mirrored }
+            if !automatic && connection.isVideoMirrored != mirrored { return false }
+        }
+        if connection.isVideoStabilizationSupported,
+           let stabilizationMode = stable.stabilizationMode {
+            connection.preferredVideoStabilizationMode = stabilizationMode
+            guard connection.preferredVideoStabilizationMode == stabilizationMode else { return false }
+        }
+        lastAppliedMovieSettingsSignature = stable.signature
+        return true
+    }
+
     @discardableResult
     private func configureMovieOutputSettings(
         requestToken: CaptureRequestGate.Token? = nil,
@@ -3591,35 +4008,59 @@ final class CameraManager: NSObject, ObservableObject {
     ) -> Bool {
         let request = suppliedRequest ?? makeConfigurationRequest()
         if let requestToken, !requestGate.isCurrent(requestToken) { return false }
-        guard let connection = movieOutput.connection(with: .video) else { return false }
+
+        // Codec/compression are recording-only preferences. Photo mode intentionally leaves the
+        // movie output untouched and validates the saved preference when Video/Slo-Mo becomes active.
+        guard request.mode != .photo else { return true }
+        guard !movieOutput.isRecording,
+              let device = videoInput?.device,
+              device.position == request.position.avPosition,
+              let connection = movieOutput.connection(with: .video),
+              connection.isEnabled,
+              movieOutput.connections.contains(where: { $0 === connection }) else {
+            return false
+        }
+
+        let requestedResolution = request.mode == .sloMo ? request.slowMotionResolution : request.resolution
+        let activeDimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard activeDimensions.width == requestedResolution.dimensions.width,
+              activeDimensions.height == requestedResolution.dimensions.height else {
+            publishIfCurrent(requestToken) {
+                self.codecAvailabilityMessage = "The encoder wasn’t applied because the active camera format no longer matches the selected resolution."
+            }
+            return false
+        }
+
+        let requestedFPS = request.mode == .sloMo
+            ? Double(request.slowMotionFrameRate.rawValue)
+            : Double(request.frameRate.rawValue)
+        let formatSupportsRequestedFPS = device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= requestedFPS + 0.5 && $0.maxFrameRate >= requestedFPS - 0.5
+        }
+        guard formatSupportsRequestedFPS else {
+            publishIfCurrent(requestToken) {
+                self.codecAvailabilityMessage = "The active camera format doesn’t support the selected frame rate."
+            }
+            return false
+        }
 
         let shouldMirror = request.position == .front && request.mirrorSelfies
-        if connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            if connection.isVideoMirrored != shouldMirror { connection.isVideoMirrored = shouldMirror }
-        }
-
         let shouldStabilize = request.mode == .video && request.stabilizationEnabled
-        if connection.isVideoStabilizationSupported {
-            let requestedMode: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
-            if connection.preferredVideoStabilizationMode != requestedMode {
-                connection.preferredVideoStabilizationMode = requestedMode
-            }
-        }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
         let availableCodecs = movieOutput.availableVideoCodecTypes
         var unavailableCodecs = Set<String>()
         if !availableCodecs.contains(.h264) { unavailableCodecs.insert("H264") }
         if !availableCodecs.contains(.hevc) { unavailableCodecs.insert("HEVC") }
-        // AVCaptureMovieFileOutput can expose transient codec state while a format handoff is
-        // settling. LowPolyCam intentionally treats rear/front 4K60 as HEVC-only, matching the
-        // actual recorder path and preventing an invalid H.264 write from reaching AVFoundation.
         if request.mode == .video, request.resolution == .p4k, request.frameRate == .fps60 {
             unavailableCodecs.insert("H264")
         }
         publishIfCurrent(requestToken) { self.unavailableVideoCodecs = unavailableCodecs }
 
+        guard request.codec == "H264" || request.codec == "HEVC" else {
+            publishIfCurrent(requestToken) { self.codecAvailabilityMessage = "The selected codec value is invalid." }
+            return false
+        }
         let preferred: AVVideoCodecType = request.codec == "H264" ? .h264 : .hevc
         let codecAvailable = !unavailableCodecs.contains(request.codec) &&
             availableCodecs.contains(preferred) &&
@@ -3638,24 +4079,33 @@ final class CameraManager: NSObject, ObservableObject {
         guard codecAvailable else { return false }
 
         let expectedBitrate = estimatedVideoBitsPerSecond(for: request)
+        guard expectedBitrate.isFinite, expectedBitrate > 0, expectedBitrate <= Double(Int.max) else {
+            publishIfCurrent(requestToken) { self.codecAvailabilityMessage = "The selected compression profile produced an invalid bitrate." }
+            return false
+        }
         if request.compression != .high && !supportedKeys.contains(AVVideoCompressionPropertiesKey) {
             publishIfCurrent(requestToken) { self.codecAvailabilityMessage = "This camera configuration can’t apply the selected bitrate profile." }
             return false
         }
 
-        // Keep the dictionary sparse. Apple documents that MovieFileOutput fills in defaults for
-        // omitted values, while unsupported top-level keys cause an Objective-C exception.
-        var requestedSettings: [String: Any] = [AVVideoCodecKey: preferred]
+        // Only Objective-C bridgeable values reach AVFoundation. Apple documents that unsupported
+        // top-level keys can raise an Objective-C invalid-argument exception, so keep this sparse.
+        var requestedSettings: [String: Any] = [
+            AVVideoCodecKey: preferred.rawValue as NSString
+        ]
         if request.compression != .high {
-            requestedSettings[AVVideoCompressionPropertiesKey] = [
-                AVVideoAverageBitRateKey: Int(expectedBitrate)
-            ]
+            let compression = NSDictionary(dictionary: [
+                AVVideoAverageBitRateKey: NSNumber(value: Int64(expectedBitrate.rounded()))
+            ])
+            requestedSettings[AVVideoCompressionPropertiesKey] = compression
         }
 
         func settingsMatch(_ applied: [String: Any]) -> Bool {
-            guard (applied[AVVideoCodecKey] as? String) == preferred.rawValue else { return false }
+            let rawCodec = (applied[AVVideoCodecKey] as? String)
+                ?? (applied[AVVideoCodecKey] as? NSString).map { String($0) }
+            guard rawCodec == preferred.rawValue else { return false }
             if request.compression != .high {
-                guard let compression = applied[AVVideoCompressionPropertiesKey] as? [String: Any],
+                guard let compression = applied[AVVideoCompressionPropertiesKey] as? NSDictionary,
                       let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber else { return false }
                 if abs(bitrate.doubleValue - expectedBitrate) > max(expectedBitrate * 0.20, 1_000_000) {
                     return false
@@ -3664,27 +4114,59 @@ final class CameraManager: NSObject, ObservableObject {
             return true
         }
 
-        // Do not clear/reapply output settings on an unchanged ready pipeline. This avoids extra
-        // encoder/connection churn at Record and Stop.
+        let previousSettings = movieOutput.outputSettings(for: connection)
+        let previousMovieOutput = StableMovieOutputConfiguration(
+            settings: previousSettings,
+            automaticallyAdjustsVideoMirroring: connection.isVideoMirroringSupported
+                ? connection.automaticallyAdjustsVideoMirroring
+                : nil,
+            isVideoMirrored: connection.isVideoMirroringSupported ? connection.isVideoMirrored : nil,
+            stabilizationMode: connection.isVideoStabilizationSupported
+                ? connection.preferredVideoStabilizationMode
+                : nil,
+            signature: lastAppliedMovieSettingsSignature
+        )
+
+        func restorePreviousMovieOutputState() {
+            _ = restoreStableMovieOutputConfiguration(previousMovieOutput)
+        }
+
         let requestedSignature = request.compression == .high
             ? "\(preferred.rawValue)|high"
             : "\(preferred.rawValue)|\(request.compression.rawValue)|\(Int(expectedBitrate))"
-        var applied = movieOutput.outputSettings(for: connection)
+        var applied = previousSettings
         if lastAppliedMovieSettingsSignature != requestedSignature || !settingsMatch(applied) {
-            // Never clear to nil first. A nil reset is unnecessary and briefly replaces the
-            // validated encoder configuration with session-preset defaults. Apply only the sparse,
-            // prevalidated dictionary for the current connection.
-            movieOutput.setOutputSettings(requestedSettings, for: connection)
+            // Revalidate the exact dynamic state immediately before the exception-prone call.
+            guard movieOutput.availableVideoCodecTypes.contains(preferred),
+                  let validatedSettings = validatedMovieOutputSettings(requestedSettings, for: connection) else {
+                return false
+            }
+            movieOutput.setOutputSettings(validatedSettings, for: connection)
             applied = movieOutput.outputSettings(for: connection)
         }
 
-        guard settingsMatch(applied) else { return false }
-        lastAppliedMovieSettingsSignature = requestedSignature
-        if connection.isVideoMirroringSupported, connection.isVideoMirrored != shouldMirror { return false }
-        if connection.isVideoStabilizationSupported {
-            let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
-            if connection.preferredVideoStabilizationMode != expected { return false }
+        guard settingsMatch(applied) else {
+            restorePreviousMovieOutputState()
+            return false
         }
+
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = shouldMirror
+        }
+        if connection.isVideoStabilizationSupported {
+            connection.preferredVideoStabilizationMode = shouldStabilize ? .auto : .off
+        }
+
+        let mirroringMatches = !connection.isVideoMirroringSupported || connection.isVideoMirrored == shouldMirror
+        let stabilizationMatches = !connection.isVideoStabilizationSupported ||
+            connection.preferredVideoStabilizationMode == (shouldStabilize ? .auto : .off)
+        guard mirroringMatches, stabilizationMatches else {
+            restorePreviousMovieOutputState()
+            return false
+        }
+
+        lastAppliedMovieSettingsSignature = requestedSignature
         return true
     }
 
@@ -3705,6 +4187,12 @@ final class CameraManager: NSObject, ObservableObject {
         let angle = rotationCoordinator.videoRotationAngleForHorizonLevelCapture
         if connection.isVideoRotationAngleSupported(angle) {
             connection.videoRotationAngle = angle
+        }
+    }
+
+    private func releasePhotoProcessingSlot(_ captureID: Int64) {
+        if reservedPhotoProcessingSlots.remove(captureID) != nil {
+            photoProcessingGate.release()
         }
     }
 
@@ -3744,12 +4232,21 @@ final class CameraManager: NSObject, ObservableObject {
             settings.maxPhotoDimensions = dimensions
         }
 
+        guard photoProcessingGate.reserve() else {
+            // Already captured frames keep processing; simply stop scheduling more burst frames.
+            burstRemaining = 0
+            publish { self.isCapturingPhoto = false }
+            postStatus("Burst paused while previous full-resolution photos finish processing.")
+            return
+        }
+
         let request = PendingPhotoCapture(
             aspect: aspect,
             outputDimensions: resolutionState.selected.dimensions,
             filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
             isBurst: isBurstShot
         )
+        reservedPhotoProcessingSlots.insert(settings.uniqueID)
         pendingPhotoCaptures[settings.uniqueID] = request
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -3835,7 +4332,13 @@ final class CameraManager: NSObject, ObservableObject {
 
         guard requestGate.isCurrent(requestToken), recordingOperation.requested else { return }
         let filename = nextMediaFilename(fileExtension: "mov")
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        guard let url = CameraRecoveryStore.prepareRecordingDestination(filename: filename) else {
+            recordingOperation.reset()
+            activeRecordingConfigurationRequest = nil
+            publish { self.recordingLifecycle = .idle }
+            showError("Couldn’t prepare durable storage for the recording.")
+            return
+        }
         recordingOperation.markStartIssued()
         movieOutput.startRecording(to: url, recordingDelegate: self)
     }
@@ -3874,26 +4377,45 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func refreshRecoveryCount() {
-        let count = CameraRecoveryStore.recordings().count
-        publish { self.recoverableRecordingCount = count }
+        let items = CameraRecoveryStore.items()
+        let recordings = items.filter { $0.kind == .recording }.count
+        let photos = items.filter { $0.kind == .photo }.count
+        publish {
+            self.recoverableMediaCount = items.count
+            self.recoverableRecordingCount = recordings
+            self.recoverablePhotoCount = photos
+        }
     }
 
-    func retryRecoverableRecordings() {
+    func retryRecoverableMedia() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            let files = CameraRecoveryStore.recordings().filter { !self.recoveryRetriesInFlight.contains($0) }
-            guard !files.isEmpty else {
+            let inventory = CameraRecoveryStore.items()
+            let acceptedURLs = Set(self.recoveryRetryState.begin(inventory.map(\.url)))
+            let items = inventory.filter { acceptedURLs.contains($0.url) }
+            guard !items.isEmpty else {
                 self.refreshRecoveryCount()
                 return
             }
-            self.pendingVideoSaves += files.count
-            self.recoveryRetriesInFlight.formUnion(files)
+
+            let recordings = items.filter { $0.kind == .recording }
+            let photos = items.filter { $0.kind == .photo }
+            self.pendingVideoSaves += recordings.count
+            self.pendingPhotoSaves += photos.count
             self.beginBackgroundSaveIfNeeded()
-            for file in files {
-                self.saveVideoResourceToPhotos(file, runDiagnostics: false, recoveryRetry: true)
+
+            for item in recordings {
+                self.saveVideoResourceToPhotos(item.url, runDiagnostics: false, recoveryRetry: true)
             }
-            self.postStatus("Retrying \(files.count) recovered recording\(files.count == 1 ? "" : "s")…")
+            for item in photos {
+                self.savePhotoResourceToPhotos(item.url, recoveryRetry: true)
+            }
+            self.postStatus("Retrying \(items.count) recovered item\(items.count == 1 ? "" : "s")…")
         }
+    }
+
+    func retryRecoverableRecordings() {
+        retryRecoverableMedia()
     }
 
     private func beginBackgroundSaveIfNeeded() {
@@ -4018,75 +4540,84 @@ final class CameraManager: NSObject, ObservableObject {
             publish { self.lastFrameGaps = nil }
         }
         let generation = diagnosticsGeneration
-        let performSave: () -> Void = { [weak self] in
-            guard let self else { return }
-            PHPhotoLibrary.shared().performChanges({
-                let request = PHAssetCreationRequest.forAsset()
-                let options = PHAssetResourceCreationOptions()
-                options.originalFilename = fileURL.lastPathComponent
-                options.shouldMoveFile = !runDiagnostics
-                request.addResource(with: .video, fileURL: fileURL, options: options)
-            }) { [weak self] success, error in
-                guard let self else { return }
-                self.sessionQueue.async {
-                    self.pendingVideoSaves = max(self.pendingVideoSaves - 1, 0)
-                    if recoveryRetry { self.recoveryRetriesInFlight.remove(fileURL) }
-                    if success {
-                        if runDiagnostics {
-                            // Photos already owns the saved copy. Diagnose the temporary source
-                            // without holding the capture UI in its finalizing state.
-                            ClipFrameDiagnostics.inspect(fileURL) { [weak self] gaps in
-                                try? FileManager.default.removeItem(at: fileURL)
-                                self?.sessionQueue.async { [weak self] in
-                                    guard let self, self.diagnosticsGeneration == generation else { return }
-                                    self.publish { self.lastFrameGaps = gaps }
-                                    self.refreshAvailableStorage()
-                                }
-                            }
-                        }
-                        self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
-                    } else {
-                        let preserved = CameraRecoveryStore.preserve(fileURL) != nil
-                        self.showError(preserved
-                            ? "Couldn’t save to Photos. The recording is kept in Recovery. \(error?.localizedDescription ?? "")"
-                            : "Couldn’t save to Photos or preserve the recording in Recovery. \(error?.localizedDescription ?? "")")
-                    }
-                    self.refreshRecoveryCount()
-                    self.refreshAvailableStorage()
-                    if self.recordingOperation.finalizationPending {
-                        self.finishFinalizingIfPossible()
-                    } else {
-                        self.endBackgroundSaveIfPossible()
-                    }
-                }
+
+        // Photos moves the durable pending file on success. If the process terminates after the
+        // import commits, there is no source file left to retry, which prevents duplicate imports.
+        var diagnosticsCopy: URL?
+        if runDiagnostics {
+            let copy = FileManager.default.temporaryDirectory
+                .appendingPathComponent("diagnostic-\(UUID().uuidString).mov")
+            if (try? FileManager.default.copyItem(at: fileURL, to: copy)) != nil {
+                diagnosticsCopy = copy
             }
         }
-
-        performSave()
-    }
-
-    private func savePhotoResourceToPhotos(_ data: Data, filename: String) {
-        // didFinishProcessingPhoto reserved this save before off-queue processing began.
 
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCreationRequest.forAsset()
             let options = PHAssetResourceCreationOptions()
-            options.originalFilename = filename
-            request.addResource(with: .photo, data: data, options: options)
+            options.originalFilename = fileURL.lastPathComponent
+            options.shouldMoveFile = true
+            request.addResource(with: .video, fileURL: fileURL, options: options)
+        }) { [weak self] success, error in
+            guard let self else { return }
+            self.sessionQueue.async {
+                self.pendingVideoSaves = max(self.pendingVideoSaves - 1, 0)
+                if recoveryRetry { self.recoveryRetryState.finish(fileURL) }
+
+                if success {
+                    if let diagnosticsCopy {
+                        ClipFrameDiagnostics.inspect(diagnosticsCopy) { [weak self] gaps in
+                            try? FileManager.default.removeItem(at: diagnosticsCopy)
+                            self?.sessionQueue.async { [weak self] in
+                                guard let self, self.diagnosticsGeneration == generation else { return }
+                                self.publish { self.lastFrameGaps = gaps }
+                                self.refreshAvailableStorage()
+                            }
+                        }
+                    }
+                    self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
+                } else {
+                    if let diagnosticsCopy { try? FileManager.default.removeItem(at: diagnosticsCopy) }
+                    let preserved = CameraRecoveryStore.preserve(fileURL) != nil
+                    self.showError(preserved
+                        ? "Couldn’t save to Photos. The recording is kept in Recovery. \(error?.localizedDescription ?? "")"
+                        : "Couldn’t save to Photos or preserve the recording in Recovery. \(error?.localizedDescription ?? "")")
+                }
+                self.refreshRecoveryCount()
+                self.refreshAvailableStorage()
+                if self.recordingOperation.finalizationPending {
+                    self.finishFinalizingIfPossible()
+                } else {
+                    self.endBackgroundSaveIfPossible()
+                }
+            }
+        }
+    }
+
+    private func savePhotoResourceToPhotos(_ fileURL: URL, recoveryRetry: Bool = false) {
+        PHPhotoLibrary.shared().performChanges({
+            let request = PHAssetCreationRequest.forAsset()
+            let options = PHAssetResourceCreationOptions()
+            options.originalFilename = fileURL.lastPathComponent
+            options.shouldMoveFile = true
+            request.addResource(with: .photo, fileURL: fileURL, options: options)
         }) { [weak self] success, error in
             guard let self else { return }
             self.sessionQueue.async {
                 self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
+                if recoveryRetry { self.recoveryRetryState.finish(fileURL) }
                 if success {
-                    self.postStatus("Saved to Photos")
+                    self.postStatus(recoveryRetry ? "Recovered photo saved to Photos" : "Saved to Photos")
                 } else {
-                    self.showError(error?.localizedDescription ?? "Couldn’t save the photo.")
+                    let retained = FileManager.default.fileExists(atPath: fileURL.path) ||
+                        CameraRecoveryStore.preserve(fileURL) != nil
+                    self.showError(retained
+                        ? "Couldn’t save to Photos. The photo is kept in Recovery. \(error?.localizedDescription ?? "")"
+                        : "Couldn’t save to Photos or preserve the photo in Recovery. \(error?.localizedDescription ?? "")")
                 }
-
-                if self.pendingPhotoSaves == 0 {
-                    self.refreshAvailableStorage()
-                    self.endBackgroundSaveIfPossible()
-                }
+                self.refreshRecoveryCount()
+                self.refreshAvailableStorage()
+                self.endBackgroundSaveIfPossible()
             }
         }
     }
@@ -4218,12 +4749,27 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 return
             }
 
+            guard let stagedRecordingURL = CameraRecoveryStore.preserve(outputFileURL) else {
+                self.recordingOperation.requestFinalStop()
+                self.recordingSessionStartedAt = nil
+                self.publish {
+                    self.durationTimer?.invalidate()
+                    self.durationTimer = nil
+                    self.recordingDuration = 0
+                    self.recordingLifecycle = .idle
+                }
+                self.restoreIdleCaptureConfigurationAfterRecording()
+                self.showError("Recording finished, but LowPolyCam couldn’t stage it for a safe Photos import. The pending file will be reconciled on the next launch if it is still present.")
+                return
+            }
+
+            self.refreshRecoveryCount()
             self.pendingVideoSaves += 1
             self.beginBackgroundSaveIfNeeded()
             let diagnosticsEnabled = captureSettingsStore.droppedFrameDiagnosticsEnabled
             // Avoid decoding a completed split segment while the next HFR/4K segment is recording.
             self.saveVideoResourceToPhotos(
-                outputFileURL,
+                stagedRecordingURL,
                 runDiagnostics: diagnosticsEnabled && !shouldContinue
             )
 
@@ -4269,6 +4815,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 // didFinishCaptureFor is the camera-side finish point and will release the shutter.
                 // Stop a burst now so a failed frame does not queue another capture.
                 self.burstRemaining = 0
+                self.releasePhotoProcessingSlot(captureID)
                 self.showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
                 return
             }
@@ -4285,6 +4832,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                     targetDimensions: request.outputDimensions
                 ) else {
                     self.sessionQueue.async {
+                        self.releasePhotoProcessingSlot(captureID)
                         self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
                         self.endBackgroundSaveIfPossible()
                         self.showError("Couldn’t prepare the selected photo size. Please try again.")
@@ -4292,12 +4840,24 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                     return
                 }
 
+                guard let stagedURL = CameraRecoveryStore.stagePhoto(processed.data, filename: request.filename) else {
+                    self.sessionQueue.async {
+                        self.releasePhotoProcessingSlot(captureID)
+                        self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
+                        self.endBackgroundSaveIfPossible()
+                        self.showError("Couldn’t stage the photo safely before saving to Photos.")
+                    }
+                    return
+                }
+
                 self.sessionQueue.async {
+                    self.releasePhotoProcessingSlot(captureID)
                     self.publish {
                         self.currentPhotoResolutionLabel = PhotoResolutionCatalog.label(for: processed.dimensions)
                         self.currentPhotoPixelCount = PhotoResolutionCatalog.pixelCount(processed.dimensions)
                     }
-                    self.savePhotoResourceToPhotos(processed.data, filename: request.filename)
+                    self.refreshRecoveryCount()
+                    self.savePhotoResourceToPhotos(stagedURL)
                 }
             }
         }
@@ -4327,6 +4887,9 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 return
             }
 
+            if error != nil {
+                self.releasePhotoProcessingSlot(resolvedSettings.uniqueID)
+            }
             self.finishCameraSidePhotoCapture(request: request, succeeded: error == nil)
             if let error {
                 self.showError("Photo capture failed: \(error.localizedDescription)")

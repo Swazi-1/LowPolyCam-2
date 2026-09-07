@@ -49,7 +49,7 @@ struct VideoSettingsView: View {
         SettingsSectionHeader(title: "More Settings")
         moreSettings
 
-        if camera.recoverableRecordingCount > 0 {
+        if camera.recoverableMediaCount > 0 {
           SettingsSectionHeader(title: "Recovery")
           recoveryCard
         }
@@ -441,19 +441,30 @@ struct VideoSettingsView: View {
         SettingsSymbolBox(symbol: "arrow.clockwise.circle.fill")
         VStack(alignment: .leading, spacing: 3) {
           Text(
-            "\(camera.recoverableRecordingCount) recording\(camera.recoverableRecordingCount == 1 ? "" : "s") waiting"
+            "\(camera.recoverableMediaCount) item\(camera.recoverableMediaCount == 1 ? "" : "s") waiting"
           )
           .font(.subheadline.weight(.semibold))
-          Text("Photos couldn’t import these recordings earlier.")
+          Text(recoveryBreakdown)
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Button("Retry") { camera.retryRecoverableRecordings() }
+        Button("Retry") { camera.retryRecoverableMedia() }
           .font(.caption.weight(.bold))
           .buttonStyle(.borderedProminent)
       }
     }
+  }
+
+  private var recoveryBreakdown: String {
+    var parts: [String] = []
+    if camera.recoverablePhotoCount > 0 {
+      parts.append("\(camera.recoverablePhotoCount) photo\(camera.recoverablePhotoCount == 1 ? "" : "s")")
+    }
+    if camera.recoverableRecordingCount > 0 {
+      parts.append("\(camera.recoverableRecordingCount) recording\(camera.recoverableRecordingCount == 1 ? "" : "s")")
+    }
+    return parts.joined(separator: " • ") + " kept for Photos retry"
   }
 
   private var modeDisplayName: String {
