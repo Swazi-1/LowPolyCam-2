@@ -2466,7 +2466,7 @@ final class CameraManager: NSObject, ObservableObject {
         } else if captureMode == .sloMo {
             guard applySlowMotionFormat(allowPreview: false),
                   let device = videoInput?.device,
-                  device.formats.contains({
+                  device.formats.contains(where: {
                       supportsSlowMotion(
                           $0,
                           resolution: selectedSlowMotionResolution,
