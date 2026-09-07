@@ -31,6 +31,7 @@ private enum ZoomRegressionTests {
         latestPendingValue()
         producerDuringConsumption()
         concurrentProducers()
+        previewTransitionOwnership()
         print("Zoom regression tests passed")
     }
 
@@ -131,4 +132,30 @@ private enum ZoomRegressionTests {
                    "The last zoom request was lost during a producer/consumer handoff")
         }
     }
+    private static func previewTransitionOwnership() {
+        var transitions = PreviewTransitionStateMachine()
+        let a = PreviewTransitionRequest(id: 1, reason: .lens, targetDeviceID: "wide", blocksControls: false)
+        let b = PreviewTransitionRequest(id: 2, reason: .lens, targetDeviceID: "ultra", blocksControls: false)
+
+        expect(transitions.begin(a) == nil, "The first transition must acquire visual ownership")
+        expect(transitions.acknowledgeCovered(id: 1), "The current transition may acknowledge its cover")
+        expect(transitions.begin(b) == a, "A reverse request must replace the old transition without clearing ownership")
+        expect(!transitions.acknowledgeCovered(id: 1), "An invalidated cover acknowledgement must not apply old hardware")
+        expect(!transitions.hardwareCommitted(id: 1, deviceID: "wide"), "Old transition A cannot commit after B owns the cover")
+        expect(transitions.acknowledgeCovered(id: 2), "The replacement transition owns the cover")
+        expect(transitions.hardwareCommitted(id: 2, deviceID: "ultra"), "The current target can commit")
+        expect(!transitions.previewResumed(id: 1, deviceID: "wide"), "Old transition A cannot dismiss newer transition B")
+        expect(!transitions.previewResumed(id: 2, deviceID: "wide"), "Readiness from the wrong physical device cannot dismiss the cover")
+        expect(transitions.previewResumed(id: 2, deviceID: "ultra"), "The committed target can dismiss its own cover")
+        expect(transitions.activeRequest == nil, "Successful readiness must release visual ownership")
+
+        let unbound = PreviewTransitionRequest(id: 3, reason: .cameraFlip, targetDeviceID: nil, blocksControls: true)
+        _ = transitions.begin(unbound)
+        expect(transitions.acknowledgeCovered(id: 3), "A camera flip can acknowledge before the exact selected input is known")
+        expect(transitions.hardwareCommitted(id: 3, deviceID: "front-wide"), "Commit binds an initially unknown target identity")
+        expect(transitions.activeRequest?.targetDeviceID == "front-wide", "The committed device identity must be retained")
+        expect(transitions.cancel(id: 3), "Cancellation releases ownership once")
+        expect(!transitions.cancel(id: 3), "Cancellation must not release the same ownership twice")
+    }
+
 }

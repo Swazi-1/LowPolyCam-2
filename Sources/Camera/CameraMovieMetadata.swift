@@ -31,7 +31,7 @@ enum CameraMovieMetadata {
             return item
         }
 
-        if isSlowMotion, #available(iOS 18.0, *) {
+        if isSlowMotion {
             let intent = AVMutableMetadataItem()
             intent.identifier = .quickTimeMetadataFullFrameRatePlaybackIntent
             // 0 tells players the HFR movie is intended for slow-motion playback.

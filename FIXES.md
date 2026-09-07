@@ -1,51 +1,62 @@
-# LowPolyCam bug-fix review — 7 September 2026
+# LowPolyCam handoff implementation — 7 September 2026
 
-Reviewed the supplied `LowPolyCam-2-main (2).zip`, including capture, recording, photo processing, permissions, settings, and UI code. Changes are based on identifiable code paths; this is not a claim that every possible camera or beta-OS bug has been eliminated.
+This source applies the supplied Sol handoff to the current edited LowPolyCam baseline. It intentionally targets iOS 26/27 only and preserves the existing recording lifecycle, zoom routing policy, white-balance safety, recovery behavior, Photo resolution policy, and native 4K60/HFR capture architecture.
 
-## Zoom and physical lenses
+## Physical lens and preview handoffs
 
-- Removed the explicit policy that kept the current physical lens throughout a held 4K60/Slo-Mo drag. When both physical lenses support the selected resolution/FPS, crossing 1x now requests the Wide camera during the drag.
-- Replaced one queued operation per drag sample with a thread-safe single pending value. Updates arriving during a slow input handoff replace older pending positions. The consumer yields between updates so recording and lifecycle operations can run.
-- Interactive zoom applies the latest factor directly. Lens-button taps still use an animated ramp. Previously every drag sample restarted a ramp, even though the caller asked for no animation.
-- Added a small reverse-direction boundary dead band to avoid repeatedly exchanging inputs when a finger jitters around 1x. Snapping happens before final route selection at finger-up, not on every drag sample or inside the new lens configuration.
-- Removed the full mode-transition overlay from zoom handoffs, which could interrupt the held gesture.
-- Camera/mode changes and app suspension invalidate the gesture. Canceled gestures discard their old drag origin. Zoom work no longer supersedes a newer unrelated configuration token.
-- High-bandwidth zoom domains use physical devices that pass the existing exact resolution/FPS/codec selection. A virtual camera's range no longer advertises an unavailable physical lens in those domains.
-- Slo-Mo digital zoom stays usable during recording. A movie retains its current physical input; this change does not add seamless physical input replacement in the middle of one movie.
+- Added an identity-based preview transition state machine and main-thread transition controller. Old asynchronous completions cannot dismiss a newer cover, and camera/lifecycle invalidation cancels stale transition ownership.
+- Replaced per-handoff snapshot allocation with one reusable preview-only `UIVisualEffectView` plus a subtle tonal cover. The lens handoff uses a short blur-in, a minimum covered interval, a bounded preview-readiness heuristic, a smooth blur-out, and a 1-second watchdog.
+- The blur is entirely inside `PreviewView`; it is not a capture output and therefore is not encoded into saved photos or movies.
+- Lens covers no longer reuse the broad `isPreviewTransitioning` interaction lock. A held zoom drag can continue publishing the newest value while the physical sensor/input swap is covered.
+- Zoom mailbox ownership is asynchronous now: a handoff releases the consumer exactly once after safe hardware commit/failure, while incoming drag values continue replacing one latest pending value. A reverse request can reuse/replace the existing cover instead of building a queue of stale lens swaps.
+- Record presses received during a real idle handoff are retained as one pending intent and executed after the hardware reaches a stable committed target.
+- Preview readiness deliberately does **not** claim a private/exact first-frame callback. It validates the committed input identity plus `AVCaptureVideoPreviewLayer.isPreviewing`, gives Core Animation display opportunities, and relies on the watchdog if readiness never appears.
 
-## Other fixes
+## Video flip and first-use work
 
-- Manual white balance checks custom-gain support and clamps finite RGB gains on every OS version. Removed an unchecked temperature/tint setter that could raise an Objective-C exception.
-- Photo dimension limits are checked against the new active format when changing modes or lenses.
-- Photo processing reserves its pending save and requests background time before cropping/encoding, rather than only when the Photos import starts.
-- Recovery refuses missing sources and preserves stable URLs on failed retries. Save errors only say a recording is in Recovery when preservation actually succeeded.
-- Compressed-video frame diagnostics retain timestamp lookahead across batches, avoiding false dropped-frame counts caused by decode-order delivery.
-- Preview rotation observes the rotation coordinator while idle. Older OS versions use orientation fallbacks. Focus gestures ignore photo letterboxing, and a rejected focus lock no longer leaves its indicator stuck.
-- A held burst cannot repeatedly restart after reaching its configured count. Interrupted presses cancel correctly. Delayed video recording displays its countdown.
-- Permission state remains stable until the sequence of system permission prompts finishes.
-- Longevity-mode configuration invalidates old zoom work and captures a configuration snapshot. Restarting an existing camera manager no longer silently resets its requested zoom while retaining the old hardware zoom.
+- Added a session-queue-owned capability cache for stable device discovery, format inventories, exact Video/Slo-Mo selector results, supported menu choices, and reusable selector work. Dynamic zoom/WB/readiness facts are still revalidated against the active format.
+- `configureCurrentMode(Video)` and `configureCurrentMode(Slo-Mo)` now resolve/apply through their existing selectors once instead of performing the same discovery/selection before calling the apply path again.
+- Successful front/back switching publishes the resolved active mode state directly instead of immediately running a full cross-mode capability rescan. Failure still rolls the UI/hardware state back and refreshes the previous state.
+- Reuses a small bounded cache of `AVCaptureDeviceInput` objects on the serial session queue. The cache is invalidated on rebuild, media/device topology change, and recovery paths.
+- Input replacement no longer rewrites `activeFormat` merely because the input changed. Frame durations and connection-dependent settings are still revalidated after input installation.
+- HDR, distortion correction, zoom, photo-dimension limits, and movie-output configuration retain their correctness checks while avoiding writes when the active value already matches.
+- Full-resolution Photo policy is preserved. Photo format candidates are cached by device; no lower-quality still format was introduced as a speed shortcut.
 
-## Compatibility and verification
+## White balance
 
-- Minimum deployment target is iOS 15.0. Photo-dimension APIs (iOS 16), RotationCoordinator/rotation-angle APIs (iOS 17), metadata (iOS 18), and newer SwiftUI navigation/layout APIs have fallbacks or availability guards.
-- Optional sample-buffer monitoring outputs are disabled below iOS 16, where their simultaneous use with movie-file capture is unsupported. Core photo and movie capture remain available.
-- The existing build workflow still uses Xcode 26; no iOS 27-only API was introduced.
-- Local validation: all 42 Swift source/test files parse without syntax errors using the Swift tree-sitter grammar; shell-script syntax, project/resource configuration, archive integrity, and the changes against the original ZIP are checked separately.
-- **Not run here:** Swift regression executables, Xcode compilation, signing/installation, or physical camera tests. This Windows environment has no Swift compiler, Xcode, or connected iPhone camera. The included workflow runs both regression suites before its iOS build when uploaded and triggered.
+- Preserved finite RGB gain validation and hardware clamping.
+- Verified Auto and manual no-op paths avoid unnecessary device writes when the actual hardware mode/gains already match.
+- Same-device preset changes stay WB-only; they do not run the full session/format pipeline.
+- A virtual-to-physical input change required for manual WB uses the same transition coordinator, suppresses duplicate WB synchronization during the swap, then applies the requested WB exactly once through the existing completion-owned operation.
 
-## Required iPhone checks
+## iOS 26/27 policy
 
-1. On the iPhone 11/iOS 27 beta, preview 4K60 and drag from 0.5x through 1x to 3x without lifting. Check that the handoff occurs while held and reversing through 1x does not repeatedly switch lenses.
-2. Repeat at each supported Slo-Mo rate. If 0.5x is absent at a particular rate, check the device's exact physical Ultra Wide formats; the app must not pretend an unsupported lens/FPS combination exists.
-3. Record 4K60 and 120/240-fps Slo-Mo on each supported lens; zoom during recording, stop, and inspect saved resolution, frame cadence, duration, playback, and audio. Physical lens changes during one recording remain restricted.
-4. Rapidly reverse a drag, change mode, open Control Center, and return. Verify no old zoom continues and Record/Stop remain responsive. Repeat with optional monitoring off and on.
-5. Rotate while idle and recording; switch cameras; test Auto/manual WB, Photo-to-Slo-Mo transitions, short/held/canceled burst presses, delayed video, and backgrounding immediately after a photo.
-6. Exercise a failed Photos save/retry and confirm the retained recording is listed and recoverable. Verify first-launch permission prompts and an iOS 15 device build/run separately.
+- Minimum deployment target is **iOS 26.0**.
+- Removed the compatibility-only legacy preview/capture rotation path and uses typed `AVCaptureDevice.RotationCoordinator` directly.
+- Uses `supportedMaxPhotoDimensions` / `maxPhotoDimensions` directly and removes the old below-iOS-16 monitoring compatibility gate while retaining the real HFR/topology restrictions.
+- Removed iOS 15 SwiftUI fallbacks for navigation/layout and the now-obsolete iOS 18 metadata guard.
+- No iOS 27-only API was added, so iOS 26 remains the deployment floor.
 
-## API references used during review
+## Debug timing
 
-- [Apple: zoom ramps](https://developer.apple.com/documentation/avfoundation/avcapturedevice/ramp(tovideozoomfactor:withrate:))
-- [Apple: maximum photo dimensions](https://developer.apple.com/documentation/avfoundation/avcapturephotooutput/maxphotodimensions)
-- [Apple: white-balance temperature/tint setter](https://developer.apple.com/documentation/avfoundation/avcapturedevice/setwhitebalancemodelocked(whitebalancetemperatureandtintvalues:handler:))
-- [Apple: camera capture changes in iOS 16](https://developer.apple.com/videos/play/wwdc2022/110429/)
-- [Apple: iOS 27 beta release notes](https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-27-release-notes)
+Debug builds include `Logger`/`os_signpost` instrumentation for preview-transition request/cover/commit/readiness and the hardware configuration path, including input creation, device lock, format writes, photo-limit writes, session commit, and handoff duration. This is diagnostic timing only; it does not log camera images.
+
+## Portable verification performed in this package
+
+- `bash scripts/run-zoom-regressions.sh`
+- `bash scripts/run-recording-regressions.sh`
+- Swift parser pass across every `.swift` file in `Sources` and `Tests` using Swift 6.2.1.
+- ZIP integrity/content validation is performed when the deliverable is packaged.
+
+The zoom regression suite includes transition ownership checks: stale A cannot dismiss B, target identity is required, unbound targets bind only at commit, and cancel ownership releases once. Existing mailbox tests continue to cover latest-value backpressure and held-drag route changes.
+
+## Requires macOS / iPhone validation
+
+This source package can be syntax/regression validated on non-macOS hosts, but Apple SDK type/concurrency validation requires Xcode and physical smoothness requires the target device. On an iPhone 11/iOS 27 beta, specifically verify:
+
+1. Cold Photo, rear 4K60, and every supported Slo-Mo rate: hold a 0.5x -> 1x -> 2x -> 0.5x drag, then repeat it five times. The cold physical handoff should be covered without a clear freeze/black flash and the finger must remain responsive.
+2. Auto -> first manual WB -> same preset -> another preset -> Auto, followed immediately by lens zoom. Check that WB settles once and no stale transition remains.
+3. Video front/back at supported 720p/1080p/4K and 24/30/60 choices. Compare first and repeated timings with the already-fast Slo-Mo path.
+4. Reverse a drag during the blur; flip/mode/record at the handoff boundary; interrupt with Control Center, lock/background, then return. Verify no stuck cover, no stale zoom backlog, and preserved useful zoom state.
+5. Record/stop on every supported tested path and inspect saved dimensions, cadence, codec, audio, duration, and playback. The preview blur must never appear in media.
+6. Test Reduce Motion, optional monitoring off/on, and a warm device. Unsupported Ultra Wide HFR combinations must stay unavailable rather than being fabricated.

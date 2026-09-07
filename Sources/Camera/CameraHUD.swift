@@ -44,18 +44,14 @@ struct CameraHUD: View {
             }
 
             if !items.isEmpty {
-                if #available(iOS 16.0, *) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 8) {
-                            ForEach(items) { item in
-                                Label(item.text, systemImage: item.symbol)
-                            }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(items) { item in
+                            Label(item.text, systemImage: item.symbol)
                         }
-                        .fixedSize(horizontal: true, vertical: false)
-
-                        itemGrid
                     }
-                } else {
+                    .fixedSize(horizontal: true, vertical: false)
+
                     itemGrid
                 }
             }

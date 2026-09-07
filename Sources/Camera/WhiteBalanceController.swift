@@ -16,18 +16,30 @@ enum WhiteBalanceController {
         to device: AVCaptureDevice,
         completion: ((Bool) -> Void)? = nil
     ) -> Bool {
+        // A verified no-op avoids the first unnecessary device write when Auto is already active.
+        if preset == .auto,
+           device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance),
+           device.whiteBalanceMode == .continuousAutoWhiteBalance {
+            completion?(true)
+            return true
+        }
+
         do {
             try device.lockForConfiguration()
 
             if preset == .auto {
                 if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                    device.whiteBalanceMode = .continuousAutoWhiteBalance
+                    if device.whiteBalanceMode != .continuousAutoWhiteBalance {
+                        device.whiteBalanceMode = .continuousAutoWhiteBalance
+                    }
                     device.unlockForConfiguration()
                     completion?(true)
                     return true
                 }
                 if device.isWhiteBalanceModeSupported(.autoWhiteBalance) {
-                    device.whiteBalanceMode = .autoWhiteBalance
+                    if device.whiteBalanceMode != .autoWhiteBalance {
+                        device.whiteBalanceMode = .autoWhiteBalance
+                    }
                     device.unlockForConfiguration()
                     completion?(true)
                     return true
@@ -48,10 +60,8 @@ enum WhiteBalanceController {
                 tint: preset.tint
             )
 
-            // Temperature/tint can convert to gains outside this sensor's legal range. The
-            // direct temperature setter also raises an Objective-C exception for unsupported
-            // values, which Swift's catch cannot recover from. Clamp the converted gains on every
-            // OS version, including betas, using the same API supported by older iPhones.
+            // Temperature/tint can convert to gains outside this sensor's legal range. Keep the
+            // finite validation and clamping; never send unchecked gains to AVFoundation.
             var gains = device.deviceWhiteBalanceGains(for: values)
             let maximum = device.maxWhiteBalanceGain
             guard maximum.isFinite, maximum >= 1,
@@ -62,6 +72,18 @@ enum WhiteBalanceController {
             gains.redGain = min(max(gains.redGain, 1), maximum)
             gains.greenGain = min(max(gains.greenGain, 1), maximum)
             gains.blueGain = min(max(gains.blueGain, 1), maximum)
+
+            let current = device.deviceWhiteBalanceGains
+            let alreadyLockedToRequestedGains = device.whiteBalanceMode == .locked &&
+                abs(current.redGain - gains.redGain) < 0.01 &&
+                abs(current.greenGain - gains.greenGain) < 0.01 &&
+                abs(current.blueGain - gains.blueGain) < 0.01
+            if alreadyLockedToRequestedGains {
+                device.unlockForConfiguration()
+                completion?(true)
+                return true
+            }
+
             device.setWhiteBalanceModeLocked(with: gains) { _ in
                 completion?(true)
             }

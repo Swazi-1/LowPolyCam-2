@@ -2,7 +2,7 @@ name: LowPolyCam
 options:
   bundleIdPrefix: com.swazi
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "26.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"

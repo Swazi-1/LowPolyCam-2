@@ -8,6 +8,7 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 swiftc -swift-version 5 -O \
   "$ROOT/Sources/Camera/LatestValueMailbox.swift" \
   "$ROOT/Sources/Camera/ZoomRoutingPolicy.swift" \
+  "$ROOT/Sources/Camera/PreviewTransitionStateMachine.swift" \
   "$ROOT/Tests/ZoomRegressionTests.swift" \
   -o "$BUILD_DIR/zoom-regressions"
 "$BUILD_DIR/zoom-regressions"

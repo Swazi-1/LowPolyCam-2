@@ -8,6 +8,7 @@ struct CameraPreview: UIViewRepresentable {
     let isFocusExposureLocked: Bool
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
+    let transitionController: PreviewTransitionController
     var fitsPhoto = false
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
@@ -15,15 +16,27 @@ struct CameraPreview: UIViewRepresentable {
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.previewLayer.session = session
+        transitionController.attach(view)
+        view.transitionController = transitionController
         configure(view)
         return view
     }
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
         if uiView.previewLayer.session !== session { uiView.previewLayer.session = session }
+        if uiView.transitionController !== transitionController {
+            uiView.transitionController?.detach(uiView)
+            transitionController.attach(uiView)
+            uiView.transitionController = transitionController
+        }
         configure(uiView)
         guard !isPreviewTransitioning else { return }
         uiView.updateRotation()
+    }
+
+    static func dismantleUIView(_ uiView: PreviewView, coordinator: ()) {
+        uiView.transitionController?.detach(uiView)
+        uiView.transitionController = nil
     }
 
     private func configure(_ view: PreviewView) {
@@ -52,10 +65,16 @@ final class PreviewView: UIView {
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
     private var stabilizationEnabled = true
-    private var transitionSnapshot: UIView?
+    weak var transitionController: PreviewTransitionController?
+    private let transitionBlurView = UIVisualEffectView(effect: nil)
+    private let transitionToneView = UIView()
+    private var transitionAnimator: UIViewPropertyAnimator?
+    private var transitionReadinessWorkItem: DispatchWorkItem?
+    private var activeTransitionRequest: PreviewTransitionRequest?
+    private var transitionVisibleAt: CFTimeInterval?
+    private var legacyCoverVisible = false
     private var previewTransitioning = false
-    // Type-erased storage allows the view itself to remain available on iOS 15/16.
-    private var rotationCoordinator: AnyObject?
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var rotationObservation: NSKeyValueObservation?
     private var orientationObserver: NSObjectProtocol?
     private var rotationDeviceID: String?
@@ -63,6 +82,7 @@ final class PreviewView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         previewLayer.videoGravity = .resizeAspectFill
+        configureTransitionCover()
         configureOverlays()
         configureGestures()
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -77,6 +97,8 @@ final class PreviewView: UIView {
 
     deinit {
         hideFocusWorkItem?.cancel()
+        transitionReadinessWorkItem?.cancel()
+        transitionAnimator?.stopAnimation(true)
         rotationObservation?.invalidate()
         if let orientationObserver { NotificationCenter.default.removeObserver(orientationObserver) }
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -94,7 +116,8 @@ final class PreviewView: UIView {
             enableStabilizationIfAvailable()
             updateRotation()
         }
-        transitionSnapshot?.frame = bounds
+        transitionBlurView.frame = bounds
+        transitionToneView.frame = transitionBlurView.bounds
 
         lockLabel.sizeToFit()
         lockLabel.frame = CGRect(
@@ -108,23 +131,6 @@ final class PreviewView: UIView {
     func updateRotation() {
         guard !previewTransitioning else { return }
         guard let connection = previewLayer.connection else { return }
-        guard #available(iOS 17.0, *) else {
-            guard connection.isVideoOrientationSupported,
-                  let orientation = window?.windowScene?.interfaceOrientation else { return }
-            let videoOrientation: AVCaptureVideoOrientation
-            switch orientation {
-            case .portrait: videoOrientation = .portrait
-            case .portraitUpsideDown: videoOrientation = .portraitUpsideDown
-            case .landscapeLeft: videoOrientation = .landscapeLeft
-            case .landscapeRight: videoOrientation = .landscapeRight
-            default: return
-            }
-            if connection.videoOrientation != videoOrientation {
-                connection.videoOrientation = videoOrientation
-            }
-            return
-        }
-
         guard let input = previewLayer.session?.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: {
             $0.ports.contains(where: { $0.mediaType == .video })
         }) else { return }
@@ -134,10 +140,8 @@ final class PreviewView: UIView {
             rotationDeviceID = input.device.uniqueID
             let coordinator = AVCaptureDevice.RotationCoordinator(device: input.device, previewLayer: previewLayer)
             rotationCoordinator = coordinator
-            // Rotation changes must update the preview even while the camera is idle and no
-            // SwiftUI state happens to be publishing. Discard notifications from an old lens.
-            rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self] coordinator, _ in
-                DispatchQueue.main.async { [weak self, weak coordinator] in
+            rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self, weak coordinator] _, _ in
+                DispatchQueue.main.async {
                     guard let self, let coordinator, self.rotationCoordinator === coordinator,
                           !self.previewTransitioning else { return }
                     self.applyPreviewRotation(coordinator.videoRotationAngleForHorizonLevelPreview)
@@ -145,12 +149,11 @@ final class PreviewView: UIView {
             }
         }
 
-        if let coordinator = rotationCoordinator as? AVCaptureDevice.RotationCoordinator {
+        if let coordinator = rotationCoordinator {
             applyPreviewRotation(coordinator.videoRotationAngleForHorizonLevelPreview)
         }
     }
 
-    @available(iOS 17.0, *)
     private func applyPreviewRotation(_ angle: CGFloat) {
         guard let connection = previewLayer.connection,
               connection.isVideoRotationAngleSupported(angle) else { return }
@@ -177,24 +180,125 @@ final class PreviewView: UIView {
         previewTransitioning = transitioning
 
         if transitioning {
-            transitionSnapshot?.removeFromSuperview()
-            transitionSnapshot = nil
-            guard bounds.width > 0, bounds.height > 0,
-                  let snapshot = snapshotView(afterScreenUpdates: false) else { return }
-            snapshot.frame = bounds
-            snapshot.isUserInteractionEnabled = false
-            addSubview(snapshot)
-            transitionSnapshot = snapshot
-        } else if let snapshot = transitionSnapshot {
-            UIView.animate(withDuration: 0.14, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                snapshot.alpha = 0
-            } completion: { [weak self, weak snapshot] _ in
-                snapshot?.removeFromSuperview()
-                if self?.transitionSnapshot === snapshot {
-                    self?.transitionSnapshot = nil
+            if activeTransitionRequest == nil {
+                legacyCoverVisible = true
+                showTransitionCoverIfNeeded()
+            }
+        } else {
+            // A broad camera-flip lock can hand ownership of the same visual cover to an
+            // identity-based transition. Clear the legacy owner even while that transition is
+            // active so its eventual readiness completion is allowed to dissolve the cover.
+            legacyCoverVisible = false
+            if activeTransitionRequest == nil {
+                hideTransitionCover()
+                updateRotation()
+            }
+        }
+    }
+
+    private func configureTransitionCover() {
+        transitionBlurView.isUserInteractionEnabled = false
+        transitionBlurView.isHidden = true
+        transitionBlurView.alpha = 1
+        transitionToneView.isUserInteractionEnabled = false
+        transitionToneView.backgroundColor = UIColor.black.withAlphaComponent(0.14)
+        transitionToneView.alpha = 0
+        transitionBlurView.contentView.addSubview(transitionToneView)
+        addSubview(transitionBlurView)
+    }
+
+    private func showTransitionCoverIfNeeded() {
+        transitionAnimator?.stopAnimation(true)
+        transitionBlurView.isHidden = false
+        transitionBlurView.alpha = 1
+        if transitionVisibleAt == nil { transitionVisibleAt = CACurrentMediaTime() }
+
+        if UIAccessibility.isReduceMotionEnabled {
+            transitionBlurView.effect = nil
+            UIView.animate(withDuration: 0.06, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+                self.transitionToneView.alpha = 1
+            }
+            return
+        }
+
+        let animator = UIViewPropertyAnimator(duration: 0.08, curve: .easeOut) {
+            self.transitionBlurView.effect = UIBlurEffect(style: .systemChromeMaterialDark)
+            self.transitionToneView.alpha = 0.72
+        }
+        transitionAnimator = animator
+        animator.startAnimation()
+    }
+
+    private func hideTransitionCover() {
+        transitionReadinessWorkItem?.cancel()
+        transitionReadinessWorkItem = nil
+        let elapsed = transitionVisibleAt.map { CACurrentMediaTime() - $0 } ?? 0
+        let delay = max(0, 0.12 - elapsed)
+        transitionAnimator?.stopAnimation(false)
+
+        if UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.08, delay: delay, options: [.beginFromCurrentState, .allowUserInteraction]) {
+                self.transitionToneView.alpha = 0
+            } completion: { _ in
+                guard self.activeTransitionRequest == nil, !self.legacyCoverVisible else { return }
+                self.transitionBlurView.isHidden = true
+                self.transitionVisibleAt = nil
+            }
+            return
+        }
+
+        let animator = UIViewPropertyAnimator(duration: 0.14, curve: .easeOut) {
+            self.transitionBlurView.effect = nil
+            self.transitionToneView.alpha = 0
+        }
+        transitionAnimator = animator
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak animator] in
+            guard let self, let animator,
+                  self.activeTransitionRequest == nil, !self.legacyCoverVisible else { return }
+            animator.addCompletion { [weak self] _ in
+                guard let self, self.activeTransitionRequest == nil, !self.legacyCoverVisible else { return }
+                self.transitionBlurView.isHidden = true
+                self.transitionVisibleAt = nil
+            }
+            animator.startAnimation()
+        }
+    }
+
+    private func schedulePreviewReadiness(for request: PreviewTransitionRequest, attempt: Int = 0) {
+        transitionReadinessWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.activeTransitionRequest?.id == request.id,
+                  let targetDeviceID = request.targetDeviceID else { return }
+            let activeDeviceID = self.previewLayer.session?.inputs
+                .compactMap { $0 as? AVCaptureDeviceInput }
+                .first(where: { $0.ports.contains(where: { $0.mediaType == .video }) })?
+                .device.uniqueID
+
+            guard self.previewLayer.isPreviewing, activeDeviceID == targetDeviceID else {
+                if attempt < 12 { self.schedulePreviewReadiness(for: request, attempt: attempt + 1) }
+                return
+            }
+
+            // Public AVFoundation does not expose an exact "first frame from this new lens" callback.
+            // Require the target input identity + active preview state, then give Core Animation two
+            // display opportunities before dissolving the cover. The controller watchdog handles stalls.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 60.0)) { [weak self] in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.activeTransitionRequest?.id == request.id else { return }
+                    let confirmedDeviceID = self.previewLayer.session?.inputs
+                        .compactMap { $0 as? AVCaptureDeviceInput }
+                        .first(where: { $0.ports.contains(where: { $0.mediaType == .video }) })?
+                        .device.uniqueID
+                    guard self.previewLayer.isPreviewing, confirmedDeviceID == targetDeviceID else {
+                        self.schedulePreviewReadiness(for: request, attempt: attempt + 1)
+                        return
+                    }
+                    self.transitionController?.reportPreviewResumed(id: request.id, deviceID: targetDeviceID)
                 }
             }
         }
+        transitionReadinessWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0 : 0.016), execute: work)
     }
 
     func setFocusExposureLocked(_ isLocked: Bool) {
@@ -296,5 +400,49 @@ final class PreviewView: UIView {
         // Leave enough time for an AF/AE lock request to settle; a rejected or unsupported
         // lock still fades instead of leaving the focus box permanently on screen.
         DispatchQueue.main.asyncAfter(deadline: .now() + (locked ? 3.0 : 1.15), execute: workItem)
+    }
+}
+
+
+extension PreviewView: PreviewTransitionPresenting {
+    func preparePreviewTransition(_ request: PreviewTransitionRequest, covered: @escaping (UInt64) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        transitionReadinessWorkItem?.cancel()
+        activeTransitionRequest = request
+        showTransitionCoverIfNeeded()
+
+        // Do not wait for the full blur animation. Give the cover one display opportunity,
+        // then let the serial camera queue perform the hardware transaction.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 60.0)) { [weak self] in
+            guard let self, self.activeTransitionRequest?.id == request.id else { return }
+            covered(request.id)
+        }
+    }
+
+    func commitPreviewTransition(_ request: PreviewTransitionRequest) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard activeTransitionRequest?.id == request.id else { return }
+        updateRotation()
+        schedulePreviewReadiness(for: request)
+    }
+
+    func finishPreviewTransition(id: UInt64) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard activeTransitionRequest?.id == id else { return }
+        activeTransitionRequest = nil
+        if !legacyCoverVisible { hideTransitionCover() }
+        if !previewTransitioning { updateRotation() }
+    }
+
+    func cancelPreviewTransition(id: UInt64, keepCoverForReplacement: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard activeTransitionRequest?.id == id else { return }
+        transitionReadinessWorkItem?.cancel()
+        transitionReadinessWorkItem = nil
+        activeTransitionRequest = nil
+        if !keepCoverForReplacement, !legacyCoverVisible {
+            hideTransitionCover()
+        }
+        if !previewTransitioning { updateRotation() }
     }
 }
