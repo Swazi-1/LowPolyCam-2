@@ -1,0 +1,134 @@
+import Foundation
+import Dispatch
+
+private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+    precondition(condition(), message)
+}
+
+private final class ConcurrentDrain {
+    let mailbox = LatestValueMailbox<Int>()
+    let completed = DispatchSemaphore(value: 0)
+    private let queue = DispatchQueue(label: "zoomRegression.consumer")
+
+    func submit(_ value: Int) {
+        if mailbox.submit(value) { schedule() }
+    }
+
+    private func schedule() {
+        queue.async {
+            if let value = self.mailbox.take(), value == Int.max {
+                self.completed.signal()
+            }
+            if self.mailbox.finish() { self.schedule() }
+        }
+    }
+}
+
+@main
+private enum ZoomRegressionTests {
+    static func main() {
+        opticalRouting()
+        latestPendingValue()
+        producerDuringConsumption()
+        concurrentProducers()
+        print("Zoom regression tests passed")
+    }
+
+    private static func opticalRouting() {
+        let bases: [CGFloat] = [1, 0.5]
+        expect(ZoomRoutingPolicy.opticalBase(for: 0.5, availableBases: bases) == 0.5,
+               "0.5x must use an available Ultra Wide lens")
+        expect(ZoomRoutingPolicy.opticalBase(for: 1, availableBases: bases,
+                                            currentBase: 0.5, interactive: true) == 1,
+               "A held drag crossing 1x must switch to Wide before finger release")
+        expect(ZoomRoutingPolicy.opticalBase(for: 1.8, availableBases: bases,
+                                            currentBase: 0.5, interactive: true) == 1,
+               "A large held drag must not leave Ultra Wide selected above 1x")
+        expect(ZoomRoutingPolicy.opticalBase(for: 0.98, availableBases: bases,
+                                            currentBase: 1, interactive: true) == 1,
+               "Boundary jitter must not immediately swap back to Ultra Wide")
+        expect(ZoomRoutingPolicy.opticalBase(for: 0.95, availableBases: bases,
+                                            currentBase: 1, interactive: true) == 0.5,
+               "A deliberate reverse drag must leave the Wide hysteresis band")
+        expect(ZoomRoutingPolicy.opticalBase(for: 0.7, availableBases: [1],
+                                            currentBase: 1, interactive: true) == 1,
+               "Unsupported Ultra Wide must never be invented for a selected format")
+        expect(ZoomRoutingPolicy.opticalBase(for: 3, availableBases: [0.5, 3, 1]) == 3,
+               "Select the longest legal optical lens from unordered capabilities")
+        expect(ZoomRoutingPolicy.opticalBase(for: 1, availableBases: []) == nil,
+               "No capability must yield no route")
+        expect(ZoomRoutingPolicy.opticalBase(for: .nan, availableBases: bases) == nil,
+               "An invalid gesture value must not choose a lens")
+        expect(ZoomRoutingPolicy.opticalBase(for: 1, availableBases: [.nan, -1, 0, 1]) == 1,
+               "Invalid optical bases must not corrupt capability selection")
+
+        expect(ZoomRoutingPolicy.clamp(0.5, to: 1...8) == 1,
+               "A Wide-only recording range must clamp a request for another physical input")
+        expect(ZoomRoutingPolicy.clamp(2, to: 0.5...4) == 2,
+               "Ultra Wide digital zoom above 1x must remain possible while recording")
+        expect(ZoomRoutingPolicy.clamp(.nan, to: 1...8) == 1,
+               "An invalid zoom must resolve to a safe active minimum")
+        expect(ZoomRoutingPolicy.settledZoom(0.98, in: 0.5...8) == 1,
+               "Gesture settlement must snap near 1x before final optical routing")
+        let settled = ZoomRoutingPolicy.settledZoom(0.98, in: 0.5...8)
+        expect(ZoomRoutingPolicy.opticalBase(for: settled, availableBases: bases) == 1,
+               "A settled 1x request must use Wide rather than a digital Ultra Wide crop")
+        expect(ZoomRoutingPolicy.settledZoom(0.55, in: 0.5...8) == 0.5,
+               "Settling near the available Ultra Wide base must return exactly 0.5x")
+        expect(ZoomRoutingPolicy.settledZoom(2.4, in: 1...8) == 2.4,
+               "Settlement must preserve arbitrary zoom away from optical detents")
+    }
+
+    private static func latestPendingValue() {
+        let mailbox = LatestValueMailbox<Int>()
+        expect(mailbox.submit(1), "The first pending value must schedule a consumer")
+        expect(!mailbox.submit(2), "Overwriting a pending value must not schedule a second consumer")
+        expect(mailbox.take() == 2, "A busy queue must consume the latest value, not the stale first one")
+        expect(!mailbox.finish(), "An empty mailbox must release consumer ownership")
+        expect(mailbox.submit(3), "A producer arriving after idle must wake a fresh consumer")
+        expect(mailbox.take() == 3, "The next drain must receive the wakeup value")
+        expect(!mailbox.finish(), "The fresh consumer must return to idle after draining")
+    }
+
+    private static func producerDuringConsumption() {
+        let mailbox = LatestValueMailbox<Int>()
+        expect(mailbox.submit(10), "Begin one drain")
+        expect(mailbox.take() == 10, "Begin processing the first value")
+
+        // This producer runs after take() but before finish(), precisely the handoff window
+        // that used to lose an interactive update when the consumer dropped its busy flag.
+        let producerFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            expect(!mailbox.submit(20), "The existing consumer owns updates submitted during processing")
+            expect(!mailbox.submit(30), "Only the newest in-flight update needs another queue turn")
+            producerFinished.signal()
+        }
+        expect(producerFinished.wait(timeout: .now() + 5) == .success, "Producer failed to complete")
+        expect(mailbox.finish(), "A producer during processing must request another drain turn")
+        expect(mailbox.take() == 30, "The follow-up turn must consume the newest in-flight update")
+        expect(!mailbox.finish(), "The consumer must become idle when no work remains")
+        expect(mailbox.submit(40), "A producer after ownership release must schedule the next drain")
+        expect(mailbox.take() == 40, "No wakeup may be lost at the idle handoff")
+        expect(!mailbox.finish(), "Drain the final value")
+    }
+
+    private static func concurrentProducers() {
+        // Exercise real concurrent submit/take/finish interleavings. Intermediate values may
+        // coalesce, but the last request must always reach the single serial consumer.
+        for _ in 0..<20 {
+            let drain = ConcurrentDrain()
+            let producers = DispatchGroup()
+            for producer in 0..<4 {
+                producers.enter()
+                DispatchQueue.global().async {
+                    for update in 0..<500 { drain.submit(producer * 500 + update) }
+                    producers.leave()
+                }
+            }
+            expect(producers.wait(timeout: .now() + 10) == .success, "Concurrent producers stalled")
+            drain.submit(Int.max)
+            expect(drain.completed.wait(timeout: .now() + 5) == .success,
+                   "The last zoom request was lost during a producer/consumer handoff")
+        }
+    }
+}

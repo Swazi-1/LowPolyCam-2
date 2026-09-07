@@ -1,5 +1,34 @@
 import SwiftUI
 
+struct SettingsNavigationContainer<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(iOS 16.0, *) {
+            NavigationStack { content }
+        } else {
+            NavigationView { content }
+                .navigationViewStyle(.stack)
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func cameraSettingsSheetPresentation() -> some View {
+        if #available(iOS 16.0, *) {
+            presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        } else {
+            self
+        }
+    }
+}
+
 /// Shared exclusive-choice control used throughout Settings.
 /// Short lists are direct one-tap choices; longer lists use a native Menu with Button actions.
 /// Both paths call the same setter exactly once and keep stable value identities.

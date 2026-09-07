@@ -167,7 +167,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     let session = AVCaptureSession()
-    private let sessionQueue = DispatchQueue(label: "com.swazi.lowpolycam.camera")
+    private let sessionQueue = DispatchQueue(label: "com.swazi.lowpolycam.camera", qos: .userInitiated)
     private let storageQueue = DispatchQueue(label: "com.swazi.lowpolycam.storage", qos: .utility)
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
@@ -201,10 +201,15 @@ final class CameraManager: NSObject, ObservableObject {
     private var durationTimer: Timer?
     private var recordingSessionStartedAt: Date?
     private var requestedZoom: CGFloat = 1
-    // One continuous high-bandwidth preview drag owns one zoom generation. Without this, every
-    // DragGesture sample invalidates the previous 0.5x<->1x handoff before sessionQueue can
-    // perform it, so the optical switch only happens after finger-up.
+    // Gesture generations cancel unrelated work; the mailbox replaces stale drag positions.
     private var interactiveZoomRequestID: CaptureRequestGate.Token?
+    private struct ZoomRequest {
+        let configuration: CaptureConfigurationRequest
+        let token: CaptureRequestGate.Token
+        let settleOpticalRoute: Bool
+        let animate: Bool
+    }
+    private let zoomRequests = LatestValueMailbox<ZoomRequest>()
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var activeWhiteBalanceOperationID: UUID?
@@ -218,8 +223,10 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingVideoSaves = 0
     private var recoveryRetriesInFlight = Set<URL>()
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
-    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    // Store the iOS 17 coordinator opaquely so this class remains loadable on iOS 15/16.
+    private var rotationCoordinator: AnyObject?
     private var rotationCoordinatorDeviceID: String?
+    private var legacyCaptureOrientation: AVCaptureVideoOrientation = .portrait
     private var lastHardwareConfigurationChangeAt: Date?
     private var lastAppliedMovieSettingsSignature: String?
     private var legalZoomCacheSignature: String?
@@ -255,6 +262,7 @@ final class CameraManager: NSObject, ObservableObject {
         metricsTimer?.cancel()
         durationTimer?.invalidate()
         sessionObserverTokens.forEach(NotificationCenter.default.removeObserver)
+        DispatchQueue.main.async { UIDevice.current.endGeneratingDeviceOrientationNotifications() }
         if backgroundSaveTask != .invalid {
             let task = backgroundSaveTask
             DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(task) }
@@ -303,7 +311,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func installSessionObservers() {
         let center = NotificationCenter.default
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        updateLegacyCaptureOrientation(UIDevice.current.orientation)
         sessionObserverTokens = [
+            center.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                let orientation = UIDevice.current.orientation
+                self?.sessionQueue.async { self?.updateLegacyCaptureOrientation(orientation) }
+            },
             center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] note in
                 self?.sessionQueue.async { self?.handleSessionRuntimeError(note) }
             },
@@ -520,7 +534,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureLifecycleActive = true
-            self.requestedZoom = 1
+            if self.videoInput == nil { self.requestedZoom = 1 }
             let configured = self.configureSessionIfNeeded()
             self.refreshAvailableStorage()
             guard configured else {
@@ -539,6 +553,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        requestGate.invalidate(.zoom)
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureLifecycleActive = false
@@ -579,6 +594,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func appDidBecomeInactive() {
+        requestGate.invalidate(.zoom)
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureLifecycleActive = false
@@ -703,64 +719,24 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func beginInteractiveZoom() {
-        // Rear 4K60 and rear HFR use physical recording-capable inputs. Keep one zoom generation
-        // for the whole held gesture so an optical handoff cannot be invalidated by the next
-        // DragGesture sample before sessionQueue gets to execute it. Normal Video/Photo keep their
-        // existing Apple virtual-camera path.
-        let requestSnapshot = makeConfigurationRequest()
-        if usesPhysicalPreviewZoomRouting(requestSnapshot) {
-            interactiveZoomRequestID = requestGate.next(.zoom)
-        } else {
-            interactiveZoomRequestID = nil
-        }
-        sessionQueue.async { [weak self] in
-            guard let self, !self.pendingSessionRecovery else { return }
-            _ = self.legalZoomDevicesForCurrentMode(request: requestSnapshot)
-        }
+        // Keep the gesture token alive across samples so input swaps can complete while held.
+        interactiveZoomRequestID = requestGate.next(.zoom)
     }
 
     func updateInteractiveZoom(_ requestedFactor: CGFloat) {
-        let request = makeConfigurationRequest(displayedZoom: requestedFactor)
-        if usesPhysicalPreviewZoomRouting(request) {
-            // Mid-drag, behave exactly like Photo mode: stay on whichever device is already
-            // active and let AVFoundation's ramp handle the motion. Forcing a physical lens
-            // swap (session reconfiguration) on every drag sample is what caused the lag when
-            // crossing the 0.5x/1x boundary. The optical handoff still happens, but only once
-            // the gesture settles in endInteractiveZoom.
-            let token = currentInteractiveZoomToken()
-            enqueueZoomRequest(
-                requestedFactor,
-                settleOpticalRoute: false,
-                animate: false,
-                requestID: token,
-                forcePhysicalOpticalRouting: true,
-                preferCurrentDeviceWhenPossible: true
-            )
-        } else {
-            enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false)
-        }
+        guard let token = currentInteractiveZoomToken() else { return }
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: false, animate: false, requestID: token)
     }
 
     func endInteractiveZoom(_ requestedFactor: CGFloat) {
-        let request = makeConfigurationRequest(displayedZoom: requestedFactor)
-        if usesPhysicalPreviewZoomRouting(request) {
-            let token = currentInteractiveZoomToken()
-            enqueueZoomRequest(
-                requestedFactor,
-                settleOpticalRoute: true,
-                animate: false,
-                requestID: token,
-                forcePhysicalOpticalRouting: true
-            )
-            interactiveZoomRequestID = nil
-        } else {
-            enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false)
-        }
+        defer { interactiveZoomRequestID = nil }
+        guard let token = currentInteractiveZoomToken() else { return }
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false, requestID: token)
     }
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
         interactiveZoomRequestID = nil
-        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: true)
+        enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: true, requestID: requestGate.next(.zoom))
     }
 
     private func usesPhysicalPreviewZoomRouting(_ request: CaptureConfigurationRequest) -> Bool {
@@ -769,8 +745,11 @@ final class CameraManager: NSObject, ObservableObject {
         return request.mode == .video && request.resolution == .p4k && request.frameRate == .fps60
     }
 
-    private func currentInteractiveZoomToken() -> CaptureRequestGate.Token {
-        if let token = interactiveZoomRequestID, requestGate.isCurrent(token) { return token }
+    private func currentInteractiveZoomToken() -> CaptureRequestGate.Token? {
+        if let token = interactiveZoomRequestID {
+            // A camera/mode/recording change cancels this gesture; do not revive it mid-drag.
+            return requestGate.isCurrent(token) ? token : nil
+        }
         let token = requestGate.next(.zoom)
         interactiveZoomRequestID = token
         return token
@@ -780,103 +759,104 @@ final class CameraManager: NSObject, ObservableObject {
         _ requestedFactor: CGFloat,
         settleOpticalRoute: Bool,
         animate: Bool,
-        requestID suppliedRequestID: CaptureRequestGate.Token? = nil,
-        forcePhysicalOpticalRouting: Bool = false,
-        preferCurrentDeviceWhenPossible: Bool = false
+        requestID: CaptureRequestGate.Token
     ) {
-        let requestID = suppliedRequestID ?? requestGate.next(.zoom)
-        let requestSnapshot = makeConfigurationRequest(displayedZoom: requestedFactor)
-        sessionQueue.async { [weak self] in
-            guard let self, self.requestGate.isCurrent(requestID),
-                  !self.pendingSessionRecovery,
-                  let currentDevice = self.videoInput?.device else { return }
-
-            let legalDevices = self.legalZoomDevicesForCurrentMode(request: requestSnapshot)
-            let recordingOrStarting = self.movieOutput.isRecording ||
-                self.recordingOperation.requested ||
-                self.recordingOperation.startIssued ||
-                self.recordingOperation.segmentActive ||
-                self.recordingOperation.finalizationPending
-            let domainDevices = recordingOrStarting ? [currentDevice] : legalDevices
-            let domain = CameraZoomController.displayedZoomDomain(for: domainDevices, currentDevice: currentDevice)
-            let requested = CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
-            let plan = CameraZoomController.planRequest(
-                displayedZoom: requested,
-                currentDevice: currentDevice,
-                availableDevices: legalDevices,
-                mode: requestSnapshot.mode,
-                recordingOrStarting: recordingOrStarting,
-                preferCurrentDeviceWhenPossible: preferCurrentDeviceWhenPossible,
-                forcePhysicalOpticalRouting: forcePhysicalOpticalRouting && !recordingOrStarting
-            )
-
-            switch plan {
-            case .blockedPhysicalSwitch:
-                self.showError("Stop recording to switch physical lenses.")
-                return
-
-            case .reconfigureLens(let targetZoom):
-                let previousRequested = self.requestedZoom
-                self.requestedZoom = targetZoom
-                let configurationToken = self.requestGate.next(.configuration)
-                self.requestGate.invalidate(.whiteBalance)
-                let configurationRequest = requestSnapshot.replacingDisplayedZoom(targetZoom)
-                self.publishIfCurrent(configurationToken) {
-                    self.isPreviewTransitioning = true
-                }
-                guard self.requestGate.isCurrent(requestID),
-                      self.requestGate.isCurrent(configurationToken),
-                      self.configureCurrentMode(
-                        phase: .preview,
-                        preferVirtualCamera: forcePhysicalOpticalRouting ? false : nil,
-                        requestToken: configurationToken,
-                        request: configurationRequest
-                      ),
-                      self.requestGate.isCurrent(requestID),
-                      self.requestGate.isCurrent(configurationToken) else {
-                    if self.requestGate.isCurrent(requestID) {
-                        self.requestedZoom = previousRequested
-                    }
-                    self.publishIfCurrent(configurationToken) {
-                        self.isPreviewTransitioning = false
-                    }
-                    return
-                }
-                self.publishIfCurrent(configurationToken) {
-                    self.isPreviewTransitioning = false
-                }
-                return
-
-            case .applyToCurrentDevice(let targetZoom):
-                guard self.requestGate.isCurrent(requestID),
-                      let device = self.videoInput?.device else { return }
-                let factor = CameraZoomController.snappedDisplayedZoom(targetZoom, for: device)
-                if !animate, abs(factor - self.requestedZoom) < 0.001 { return }
-                let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
-
-                do {
-                    if abs(device.videoZoomFactor - deviceFactor) >= 0.001 {
-                        try device.lockForConfiguration()
-                        defer { device.unlockForConfiguration() }
-                        // Use the exact same zoom application path as the already-good Photo
-                        // and normal Video modes. AVFoundation owns the ramp between optical
-                        // handoffs; the only special handling for 4K60/HFR is keeping one gesture
-                        // token alive long enough for its physical lens switch to execute.
-                        device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
-                    }
-                    guard self.requestGate.isCurrent(requestID) else { return }
-                    self.requestedZoom = factor
-                    self.publishIfCurrent(requestID) {
-                        self.zoomFactor = factor
-                        self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
-                    }
-                } catch {
-                    self.showError("Couldn’t change the zoom.")
-                }
-            }
+        guard requestedFactor.isFinite else { return }
+        let request = ZoomRequest(
+            configuration: makeConfigurationRequest(displayedZoom: requestedFactor),
+            token: requestID,
+            settleOpticalRoute: settleOpticalRoute,
+            animate: animate
+        )
+        if zoomRequests.submit(request) {
+            sessionQueue.async { [weak self] in self?.drainZoomRequest() }
         }
     }
 
+    private func drainZoomRequest() {
+        if let request = zoomRequests.take() { applyZoomRequest(request) }
+        if zoomRequests.finish() {
+            // Yield between updates so stop/record/configuration requests cannot be starved.
+            sessionQueue.async { [weak self] in self?.drainZoomRequest() }
+        }
+    }
+
+    private func applyZoomRequest(_ zoomRequest: ZoomRequest) {
+        let requestID = zoomRequest.token
+        let requestSnapshot = zoomRequest.configuration
+        guard requestGate.isCurrent(requestID), !pendingSessionRecovery, captureLifecycleActive,
+              let currentDevice = videoInput?.device else { return }
+
+        let legalDevices = legalZoomDevicesForCurrentMode(request: requestSnapshot)
+        let recordingOrStarting = movieOutput.isRecording ||
+            recordingOperation.requested || recordingOperation.startIssued ||
+            recordingOperation.segmentActive || recordingOperation.finalizationPending
+        let domainDevices = recordingOrStarting || legalDevices.isEmpty ? [currentDevice] : legalDevices
+        let domain = CameraZoomController.displayedZoomDomain(for: domainDevices, currentDevice: currentDevice)
+        let requested = zoomRequest.settleOpticalRoute
+            ? ZoomRoutingPolicy.settledZoom(requestSnapshot.displayedZoom, in: domain)
+            : CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
+        let forcePhysical = usesPhysicalPreviewZoomRouting(requestSnapshot)
+        let plan = CameraZoomController.planRequest(
+            displayedZoom: requested,
+            currentDevice: currentDevice,
+            availableDevices: legalDevices,
+            recordingOrStarting: recordingOrStarting,
+            interactive: !zoomRequest.settleOpticalRoute,
+            forcePhysicalOpticalRouting: forcePhysical
+        )
+
+        switch plan {
+        case .blockedPhysicalSwitch:
+            showError("Stop recording to switch physical lenses.")
+
+        case .reconfigureLens(let targetZoom):
+            guard requestGate.isCurrent(requestID) else { return }
+            let previousRequested = requestedZoom
+            requestedZoom = targetZoom
+            let configurationRequest = requestSnapshot.replacingDisplayedZoom(targetZoom)
+            // Physical handoffs happen at optical boundaries, including while a finger is down.
+            // Avoid the full mode-change overlay: it disables/cancels the active drag gesture.
+            let configured = configureCurrentMode(
+                phase: .preview,
+                preferVirtualCamera: forcePhysical ? false : nil,
+                requestToken: requestID,
+                request: configurationRequest
+            )
+            if !configured, requestGate.isCurrent(requestID) {
+                requestedZoom = previousRequested
+            }
+
+        case .applyToCurrentDevice(let targetZoom):
+            guard requestGate.isCurrent(requestID), let device = videoInput?.device else { return }
+            let factor = CameraZoomController.clampDisplayedZoom(
+                targetZoom, to: CameraZoomController.activeDisplayedZoomRange(for: device)
+            )
+            let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
+            do {
+                if abs(device.videoZoomFactor - deviceFactor) >= 0.001 || device.isRampingVideoZoom {
+                    try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
+                    if zoomRequest.animate {
+                        device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
+                    } else {
+                        // A drag already supplies its own animation. Apply its latest position
+                        // directly instead of restarting an asynchronous ramp at every sample.
+                        if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+                        device.videoZoomFactor = deviceFactor
+                    }
+                }
+                guard requestGate.isCurrent(requestID) else { return }
+                requestedZoom = factor
+                publishIfCurrent(requestID) {
+                    self.zoomFactor = factor
+                    self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
+                }
+            } catch {
+                showError("Couldn’t change the zoom.")
+            }
+        }
+    }
 
     func switchCamera() {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
@@ -1014,13 +994,16 @@ final class CameraManager: NSObject, ObservableObject {
     // adding an AVCaptureVideoDataOutput while a 120/240-fps format is active can make an
     // otherwise-valid capture graph fail at runtime. File bitrate stats still work without it.
     private var shouldAttachLiveMetricsOutput: Bool {
-        !auxiliaryMonitoringSuppressedForRecovery &&
+        // Simultaneous movie and sample-buffer outputs require iOS 16.
+        guard #available(iOS 16.0, *) else { return false }
+        return !auxiliaryMonitoringSuppressedForRecovery &&
         captureSettingsStore.liveRecordingStatsEnabled &&
         captureMode == .video
     }
 
     private var shouldAttachAudioMeterOutput: Bool {
-        !auxiliaryMonitoringSuppressedForRecovery &&
+        guard #available(iOS 16.0, *) else { return false }
+        return !auxiliaryMonitoringSuppressedForRecovery &&
         captureSettingsStore.audioMeterEnabled &&
         captureMode == .video
     }
@@ -1114,6 +1097,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     func applyLongevityMode(_ enabled: Bool) {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording else { return }
+        let configurationToken = requestGate.next(.configuration)
+        requestGate.invalidate(.zoom)
+        requestGate.invalidate(.whiteBalance)
         let defaults = UserDefaults.standard
         if enabled {
             defaults.set(selectedResolution.rawValue, forKey: "longevityPreviousResolution")
@@ -1135,9 +1121,13 @@ final class CameraManager: NSObject, ObservableObject {
         }
         suppressAutomaticReconfiguration = false
         defaults.set(enabled, forKey: "longevityMode")
+        let request = makeConfigurationRequest()
         sessionQueue.async { [weak self] in
-            guard let self else { return }
-            _ = self.configureCurrentMode(phase: .preview)
+            guard let self, self.requestGate.isCurrent(configurationToken),
+                  !self.movieOutput.isRecording, !self.recordingOperation.requested,
+                  !self.recordingOperation.startIssued, !self.recordingOperation.segmentActive,
+                  !self.recordingOperation.finalizationPending else { return }
+            _ = self.configureCurrentMode(phase: .preview, requestToken: configurationToken, request: request)
         }
     }
 
@@ -1787,6 +1777,11 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
+        if #available(iOS 16.0, *) {
+            // Per-format maximum dimensions are installed by the atomic configuration below.
+        } else {
+            photoOutput.isHighResolutionCaptureEnabled = true
+        }
         session.addOutput(photoOutput)
         session.commitConfiguration()
 
@@ -1836,15 +1831,34 @@ final class CameraManager: NSObject, ObservableObject {
         // already active. A format change can alter min/max zoom; the final clamp is resolved
         // after installing the target format below.
         let preconfigurationDisplayedZoom = sameFormat
-            ? CameraZoomController.snappedDisplayedZoom(intendedDisplayedZoom, for: desiredDevice)
+            ? CameraZoomController.clampDisplayedZoom(intendedDisplayedZoom, to: CameraZoomController.activeDisplayedZoomRange(for: desiredDevice))
             : intendedDisplayedZoom
         let preconfigurationTargetZoom = sameFormat
             ? CameraZoomController.deviceZoom(forDisplayedZoom: preconfigurationDisplayedZoom, device: desiredDevice)
             : desiredDevice.videoZoomFactor
         let sameZoom = sameFormat && !isSwitchingInput && abs(desiredDevice.videoZoomFactor - preconfigurationTargetZoom) < 0.002
         var appliedDisplayedZoom = preconfigurationDisplayedZoom
-        let samePhotoDimensions = photoDimensions.map {
-            photoOutput.maxPhotoDimensions.width == $0.width && photoOutput.maxPhotoDimensions.height == $0.height
+        // A dimension limit left by Photo mode may be illegal for the next HFR format.
+        // Keep it when supported; otherwise use that format's smallest legal limit in Video.
+        var resolvedPhotoDimensions = photoDimensions
+        if #available(iOS 16.0, *) {
+            let supported = format.supportedMaxPhotoDimensions.filter { $0.width > 0 && $0.height > 0 }
+            let current = photoOutput.maxPhotoDimensions
+            if let requested = photoDimensions {
+                guard supported.contains(where: { $0.width == requested.width && $0.height == requested.height }) else {
+                    showError("This photo size isn’t supported by the selected camera format.")
+                    return nil
+                }
+            } else if supported.contains(where: { $0.width == current.width && $0.height == current.height }) {
+                resolvedPhotoDimensions = current
+            } else {
+                resolvedPhotoDimensions = supported.min {
+                    Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+                }
+            }
+        }
+        let samePhotoDimensions = resolvedPhotoDimensions.map {
+            configuredPhotoDimensions.width == $0.width && configuredPhotoDimensions.height == $0.height
         } ?? true
         let auxiliaryChange = auxiliaryOutputsNeedUpdate()
         let wantsAutomaticHDR = request.codec != "H264"
@@ -1858,10 +1872,7 @@ final class CameraManager: NSObject, ObservableObject {
         // True no-op path: record start/stop and repeated mode configuration do not reopen an
         // AVCaptureSession transaction, rewrite activeFormat, cancel zoom ramps, or reset AF/AE.
         if !needsSessionTransaction && !needsDeviceWrite {
-            if rotationCoordinatorDeviceID != desiredDevice.uniqueID {
-                rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
-                rotationCoordinatorDeviceID = desiredDevice.uniqueID
-            }
+            updateCaptureRotationCoordinator(for: desiredDevice)
             requestedZoom = preconfigurationDisplayedZoom
             return CaptureConfigurationApplyResult(
                 displayedZoom: preconfigurationDisplayedZoom,
@@ -1928,7 +1939,7 @@ final class CameraManager: NSObject, ObservableObject {
 
                 // Resolve zoom after the target format is installed. An inactive lens's previous
                 // format must never clamp away a legal 0.5x request for the new native format.
-                let resolvedDisplayedZoom = CameraZoomController.snappedDisplayedZoom(intendedDisplayedZoom, for: desiredDevice)
+                let resolvedDisplayedZoom = CameraZoomController.clampDisplayedZoom(intendedDisplayedZoom, to: CameraZoomController.activeDisplayedZoomRange(for: desiredDevice))
                 let resolvedDeviceZoom = CameraZoomController.deviceZoom(
                     forDisplayedZoom: resolvedDisplayedZoom,
                     device: desiredDevice
@@ -1945,18 +1956,16 @@ final class CameraManager: NSObject, ObservableObject {
                 deviceLocked = false
             }
 
-            if let photoDimensions, !samePhotoDimensions {
-                photoOutput.maxPhotoDimensions = photoDimensions
+            if let photoDimensions = resolvedPhotoDimensions, !samePhotoDimensions {
+                if #available(iOS 16.0, *) { photoOutput.maxPhotoDimensions = photoDimensions }
+                activeMaximumPhotoDimensions = photoDimensions
             }
 
             if transactionOpen {
                 session.commitConfiguration()
                 committed = true
             }
-            if rotationCoordinatorDeviceID != desiredDevice.uniqueID {
-                rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
-                rotationCoordinatorDeviceID = desiredDevice.uniqueID
-            }
+            updateCaptureRotationCoordinator(for: desiredDevice)
             requestedZoom = appliedDisplayedZoom
 
             let formatOrInputChanged = isSwitchingInput || !sameFormat || !sameFrameDurations
@@ -2031,7 +2040,11 @@ final class CameraManager: NSObject, ObservableObject {
             )
         }
         let wbZoomDevices = whiteBalanceCompatibleZoomDevices(zoomDevices, request: request)
-        if !wbZoomDevices.isEmpty { zoomDevices = wbZoomDevices }
+        zoomDevices = wbZoomDevices
+        let physicalZoomDevices = zoomDevices.filter { !$0.isVirtualDevice }
+        if usesPhysicalPreviewZoomRouting(request), !physicalZoomDevices.isEmpty {
+            zoomDevices = physicalZoomDevices
+        }
         cacheLegalZoomDevices(zoomDevices, request: request)
         let zoomDomain = publishedZoomDomain(legalDevices: zoomDevices, currentDevice: device)
         let displayedZoom = CameraZoomController.displayedZoom(forDeviceZoom: device.videoZoomFactor, device: device)
@@ -2099,7 +2112,8 @@ final class CameraManager: NSObject, ObservableObject {
         } ?? requiresPhysicalWhiteBalanceInput
         guard requiresPhysical else { return devices }
         return devices.filter { device in
-            !device.isVirtualDevice && device.isWhiteBalanceModeSupported(.locked)
+            !device.isVirtualDevice && device.isWhiteBalanceModeSupported(.locked) &&
+                device.isLockingWhiteBalanceWithCustomDeviceGainsSupported
         }
     }
 
@@ -2159,7 +2173,8 @@ final class CameraManager: NSObject, ObservableObject {
             )
         }
         let wbLegal = whiteBalanceCompatibleZoomDevices(legal, request: request)
-        let resolved = wbLegal.isEmpty ? legal : wbLegal
+        let physical = wbLegal.filter { !$0.isVirtualDevice }
+        let resolved = usesPhysicalPreviewZoomRouting(request) && !physical.isEmpty ? physical : wbLegal
         cacheLegalZoomDevices(resolved, request: request)
         return resolved
     }
@@ -2182,9 +2197,9 @@ final class CameraManager: NSObject, ObservableObject {
         _ devices: [AVCaptureDevice],
         request: CaptureConfigurationRequest
     ) {
-        guard !devices.isEmpty else { return }
         legalZoomCacheSignature = legalZoomSignature(for: request)
-        legalZoomCacheDevices = devices
+        let physical = devices.filter { !$0.isVirtualDevice }
+        legalZoomCacheDevices = usesPhysicalPreviewZoomRouting(request) && !physical.isEmpty ? physical : devices
     }
 
     private func publishedZoomDomain(
@@ -2507,7 +2522,7 @@ final class CameraManager: NSObject, ObservableObject {
         let devices = capabilityDevices(for: request.position.avPosition)
         var legalDevices = devices.filter { !photoFormatCandidates(for: $0).isEmpty }
         let wbLegal = whiteBalanceCompatibleZoomDevices(legalDevices, request: request)
-        if !wbLegal.isEmpty { legalDevices = wbLegal }
+        legalDevices = wbLegal
         guard !legalDevices.isEmpty else {
             showError("Photo capture is unavailable on this camera.")
             return false
@@ -2632,7 +2647,13 @@ final class CameraManager: NSObject, ObservableObject {
                 $0.minFrameRate <= 30 && $0.maxFrameRate >= 30
             }
 
-            for dimensions in format.supportedMaxPhotoDimensions where dimensions.width > 0 && dimensions.height > 0 {
+            let photoDimensions: [CMVideoDimensions]
+            if #available(iOS 16.0, *) {
+                photoDimensions = format.supportedMaxPhotoDimensions
+            } else {
+                photoDimensions = [format.highResolutionStillImageDimensions]
+            }
+            for dimensions in photoDimensions where dimensions.width > 0 && dimensions.height > 0 {
                 let id = "photo-\(dimensions.width)x\(dimensions.height)"
                 let candidate = PhotoFormatCandidate(
                     id: id,
@@ -2707,7 +2728,11 @@ final class CameraManager: NSObject, ObservableObject {
             codec: request.codec
         )
         let wbLegal = whiteBalanceCompatibleZoomDevices(supportedDevices, request: request)
-        if !wbLegal.isEmpty { supportedDevices = wbLegal }
+        supportedDevices = wbLegal
+        if request.position == .back, selection.resolution == .p4k, selection.frameRate == .fps60 {
+            let physicalDevices = supportedDevices.filter { !$0.isVirtualDevice }
+            if !physicalDevices.isEmpty { supportedDevices = physicalDevices }
+        }
         guard !supportedDevices.isEmpty else {
             showError("This video quality isn’t available with the selected white balance.")
             return false
@@ -2812,7 +2837,7 @@ final class CameraManager: NSObject, ObservableObject {
             codec: request.codec
         )
         let wbLegal = whiteBalanceCompatibleZoomDevices(supportedDevices, request: request)
-        if !wbLegal.isEmpty { supportedDevices = wbLegal }
+        supportedDevices = wbLegal
         guard !supportedDevices.isEmpty else {
             showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this camera.")
             return false
@@ -2967,11 +2992,35 @@ final class CameraManager: NSObject, ObservableObject {
 
 
 
+    private var configuredPhotoDimensions: CMVideoDimensions {
+        if #available(iOS 16.0, *) { return photoOutput.maxPhotoDimensions }
+        return activeMaximumPhotoDimensions
+    }
+
+    private func updateCaptureRotationCoordinator(for device: AVCaptureDevice) {
+        guard #available(iOS 17.0, *), rotationCoordinatorDeviceID != device.uniqueID else { return }
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinatorDeviceID = device.uniqueID
+    }
+
+    private func updateLegacyCaptureOrientation(_ orientation: UIDeviceOrientation) {
+        switch orientation {
+        case .portrait: legacyCaptureOrientation = .portrait
+        case .portraitUpsideDown: legacyCaptureOrientation = .portraitUpsideDown
+        case .landscapeLeft: legacyCaptureOrientation = .landscapeRight
+        case .landscapeRight: legacyCaptureOrientation = .landscapeLeft
+        default: break // Keep the last upright orientation when the phone is lying flat.
+        }
+    }
+
     private func applyCaptureRotation(to connection: AVCaptureConnection?) {
-        guard let connection,
-              let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture,
-              connection.isVideoRotationAngleSupported(angle) else { return }
-        connection.videoRotationAngle = angle
+        guard let connection else { return }
+        if #available(iOS 17.0, *), let coordinator = rotationCoordinator as? AVCaptureDevice.RotationCoordinator {
+            let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+            if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+        } else if connection.isVideoOrientationSupported {
+            connection.videoOrientation = legacyCaptureOrientation
+        }
     }
 
     private func beginPhotoCapture() {
@@ -2985,7 +3034,7 @@ final class CameraManager: NSObject, ObservableObject {
         let isBurstShot = burstRemaining > 0
         let aspect = isBurstShot ? burstAspect : currentPhotoAspect
         let resolutionState = resolvedPhotoResolutionState(
-            maximumCaptureDimensions: photoOutput.maxPhotoDimensions,
+            maximumCaptureDimensions: configuredPhotoDimensions,
             aspect: aspect
         )
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
@@ -3005,9 +3054,11 @@ final class CameraManager: NSObject, ObservableObject {
         // One predictable capture path. Balanced avoids the extra latency of the old quality-first
         // setting while keeping normal still-photo quality. MP/aspect processing happens later.
         settings.photoQualityPrioritization = .balanced
-        let dimensions = photoOutput.maxPhotoDimensions
-        if dimensions.width > 0, dimensions.height > 0 {
+        let dimensions = configuredPhotoDimensions
+        if #available(iOS 16.0, *), dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
+        } else if #unavailable(iOS 16.0) {
+            settings.isHighResolutionPhotoEnabled = true
         }
 
         let request = PendingPhotoCapture(
@@ -3163,7 +3214,6 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginBackgroundSaveIfNeeded() {
-        guard backgroundSaveTask == .invalid else { return }
         DispatchQueue.main.async {
             guard self.backgroundSaveTask == .invalid else { return }
             self.backgroundSaveTask = UIApplication.shared.beginBackgroundTask(withName: "Finish camera save") { [weak self] in
@@ -3313,8 +3363,10 @@ final class CameraManager: NSObject, ObservableObject {
                         }
                         self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
                     } else {
-                        _ = CameraRecoveryStore.preserve(fileURL)
-                        self.showError("Couldn’t save to Photos. The recording is kept in Recovery. \(error?.localizedDescription ?? "")")
+                        let preserved = CameraRecoveryStore.preserve(fileURL) != nil
+                        self.showError(preserved
+                            ? "Couldn’t save to Photos. The recording is kept in Recovery. \(error?.localizedDescription ?? "")"
+                            : "Couldn’t save to Photos or preserve the recording in Recovery. \(error?.localizedDescription ?? "")")
                     }
                     self.refreshRecoveryCount()
                     self.refreshAvailableStorage()
@@ -3331,8 +3383,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func savePhotoResourceToPhotos(_ data: Data, filename: String) {
-        pendingPhotoSaves += 1
-        beginBackgroundSaveIfNeeded()
+        // didFinishProcessingPhoto reserved this save before off-queue processing began.
 
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCreationRequest.forAsset()
@@ -3541,6 +3592,8 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
 
             // Camera capture and app-side processing are separate now. The request is already a
             // complete snapshot, so crop/resize/encode can run without holding up the camera queue.
+            self.pendingPhotoSaves += 1
+            self.beginBackgroundSaveIfNeeded()
             self.storageQueue.async { [weak self] in
                 guard let self else { return }
                 guard let processed = PhotoAspectProcessor.process(
@@ -3548,7 +3601,11 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                     aspect: request.aspect,
                     targetDimensions: request.outputDimensions
                 ) else {
-                    self.showError("Couldn’t prepare the selected photo size. Please try again.")
+                    self.sessionQueue.async {
+                        self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
+                        self.endBackgroundSaveIfPossible()
+                        self.showError("Couldn’t prepare the selected photo size. Please try again.")
+                    }
                     return
                 }
 

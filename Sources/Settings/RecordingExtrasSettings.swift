@@ -52,7 +52,7 @@ struct LiveStatsOverlay: View {
                     HStack {
                         Button("Reset") { x = 0.5; y = 0.28 }
                         Spacer()
-                        Button("Done", action: finish).fontWeight(.bold)
+                        Button("Done", action: finish).font(.body.weight(.bold))
                     }
                     .padding().background(.black.opacity(0.85), in: Capsule())
                     Spacer()
@@ -128,7 +128,7 @@ struct AdvancedRecordingSettingsView: View {
         }
         .navigationTitle("Advanced Recording")
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
+        .onChange(of: stats) { _ in camera.refreshLiveMetrics() }
     }
 }
 

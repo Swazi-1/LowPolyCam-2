@@ -8,7 +8,7 @@ struct VideoSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        SettingsNavigationContainer {
             ScrollView {
                 VStack(spacing: 18) {
                     modeHeader
@@ -109,13 +109,13 @@ struct VideoSettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { dismiss() }
-                        .fontWeight(.semibold)
+                        .font(.body.weight(.semibold))
                 }
             }
         }
-        .onChange(of: photoAspect) { _, _ in
+        .onChange(of: photoAspect) { _ in
             camera.refreshPhotoResolutionForCurrentAspect()
         }
     }
@@ -457,9 +457,9 @@ private struct ViewfinderHUDSettingsMenu: View {
         }
         .navigationTitle("Viewfinder & HUD")
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: isHUDEnabled) { _, _ in camera.refreshAuxiliaryOutputs() }
-        .onChange(of: hudAudioMeter) { _, _ in camera.refreshAuxiliaryOutputs() }
-        .onChange(of: hudDroppedFrames) { _, _ in camera.refreshAuxiliaryOutputs() }
+        .onChange(of: isHUDEnabled) { _ in camera.refreshAuxiliaryOutputs() }
+        .onChange(of: hudAudioMeter) { _ in camera.refreshAuxiliaryOutputs() }
+        .onChange(of: hudDroppedFrames) { _ in camera.refreshAuxiliaryOutputs() }
     }
 }
 

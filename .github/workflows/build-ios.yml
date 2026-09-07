@@ -44,6 +44,11 @@ jobs:
       - name: Show build environment
         run: xcodebuild -version
 
+      - name: Test zoom, recording, and recovery regressions
+        run: |
+          bash scripts/run-zoom-regressions.sh
+          bash scripts/run-recording-regressions.sh
+
       - name: Build for iPhone
         run: |
           set -o pipefail

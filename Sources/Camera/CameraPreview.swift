@@ -54,7 +54,10 @@ final class PreviewView: UIView {
     private var stabilizationEnabled = true
     private var transitionSnapshot: UIView?
     private var previewTransitioning = false
-    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    // Type-erased storage allows the view itself to remain available on iOS 15/16.
+    private var rotationCoordinator: AnyObject?
+    private var rotationObservation: NSKeyValueObservation?
+    private var orientationObserver: NSObjectProtocol?
     private var rotationDeviceID: String?
 
     override init(frame: CGRect) {
@@ -62,9 +65,22 @@ final class PreviewView: UIView {
         previewLayer.videoGravity = .resizeAspectFill
         configureOverlays()
         configureGestures()
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        orientationObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.updateRotation()
+        }
     }
 
     required init?(coder: NSCoder) { nil }
+
+    deinit {
+        hideFocusWorkItem?.cancel()
+        rotationObservation?.invalidate()
+        if let orientationObserver { NotificationCenter.default.removeObserver(orientationObserver) }
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    }
 
     override func tintColorDidChange() {
         super.tintColorDidChange()
@@ -90,17 +106,53 @@ final class PreviewView: UIView {
     }
 
     func updateRotation() {
+        guard !previewTransitioning else { return }
+        guard let connection = previewLayer.connection else { return }
+        guard #available(iOS 17.0, *) else {
+            guard connection.isVideoOrientationSupported,
+                  let orientation = window?.windowScene?.interfaceOrientation else { return }
+            let videoOrientation: AVCaptureVideoOrientation
+            switch orientation {
+            case .portrait: videoOrientation = .portrait
+            case .portraitUpsideDown: videoOrientation = .portraitUpsideDown
+            case .landscapeLeft: videoOrientation = .landscapeLeft
+            case .landscapeRight: videoOrientation = .landscapeRight
+            default: return
+            }
+            if connection.videoOrientation != videoOrientation {
+                connection.videoOrientation = videoOrientation
+            }
+            return
+        }
+
         guard let input = previewLayer.session?.inputs.compactMap({ $0 as? AVCaptureDeviceInput }).first(where: {
             $0.ports.contains(where: { $0.mediaType == .video })
         }) else { return }
 
         if rotationDeviceID != input.device.uniqueID {
+            rotationObservation?.invalidate()
             rotationDeviceID = input.device.uniqueID
-            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: input.device, previewLayer: previewLayer)
+            let coordinator = AVCaptureDevice.RotationCoordinator(device: input.device, previewLayer: previewLayer)
+            rotationCoordinator = coordinator
+            // Rotation changes must update the preview even while the camera is idle and no
+            // SwiftUI state happens to be publishing. Discard notifications from an old lens.
+            rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self] coordinator, _ in
+                DispatchQueue.main.async { [weak self, weak coordinator] in
+                    guard let self, let coordinator, self.rotationCoordinator === coordinator,
+                          !self.previewTransitioning else { return }
+                    self.applyPreviewRotation(coordinator.videoRotationAngleForHorizonLevelPreview)
+                }
+            }
         }
 
+        if let coordinator = rotationCoordinator as? AVCaptureDevice.RotationCoordinator {
+            applyPreviewRotation(coordinator.videoRotationAngleForHorizonLevelPreview)
+        }
+    }
+
+    @available(iOS 17.0, *)
+    private func applyPreviewRotation(_ angle: CGFloat) {
         guard let connection = previewLayer.connection,
-              let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview,
               connection.isVideoRotationAngleSupported(angle) else { return }
         if abs(connection.videoRotationAngle - angle) > 0.01 {
             connection.videoRotationAngle = angle
@@ -190,19 +242,28 @@ final class PreviewView: UIView {
     }
 
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
-        guard recognizer.state == .ended else { return }
+        guard recognizer.state == .ended, !previewTransitioning else { return }
         let layerPoint = recognizer.location(in: self)
+        guard isInsideCameraImage(layerPoint) else { return }
         showFocusIndicator(at: layerPoint, locked: false)
         let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
         onTapToFocus?(devicePoint)
     }
 
     @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-        guard recognizer.state == .began else { return }
+        guard recognizer.state == .began, !previewTransitioning else { return }
         let layerPoint = recognizer.location(in: self)
+        guard isInsideCameraImage(layerPoint) else { return }
         showFocusIndicator(at: layerPoint, locked: true)
         let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: layerPoint)
         onLongPressToLock?(devicePoint)
+    }
+
+    private func isInsideCameraImage(_ point: CGPoint) -> Bool {
+        // Photo previews use aspect-fit. A tap in a letterbox bar isn't a focus target.
+        guard previewLayer.videoGravity == .resizeAspect else { return true }
+        let imageRect = previewLayer.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return imageRect.contains(point)
     }
 
     private func showFocusIndicator(at point: CGPoint, locked: Bool) {
@@ -225,7 +286,6 @@ final class PreviewView: UIView {
             self.focusIndicator.transform = .identity
         }
 
-        guard !locked else { return }
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.focusExposureLocked else { return }
             UIView.animate(withDuration: 0.22) {
@@ -233,6 +293,8 @@ final class PreviewView: UIView {
             }
         }
         hideFocusWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15, execute: workItem)
+        // Leave enough time for an AF/AE lock request to settle; a rejected or unsupported
+        // lock still fades instead of leaving the focus box permanently on screen.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (locked ? 3.0 : 1.15), execute: workItem)
     }
 }

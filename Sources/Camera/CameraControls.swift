@@ -34,6 +34,7 @@ struct CameraIconButton: View {
 struct RecordButton: View {
     let isRecording: Bool
     var isEnabled = true
+    var countdown = 0
     let action: () -> Void
 
     var body: some View {
@@ -45,11 +46,16 @@ struct RecordButton: View {
                 RoundedRectangle(cornerRadius: isRecording ? 7 : 34)
                     .fill(.red)
                     .frame(width: isRecording ? 30 : 62, height: isRecording ? 30 : 62)
+                if countdown > 0 {
+                    Text("\(countdown)")
+                        .font(.system(.title2, design: .rounded).weight(.bold))
+                        .foregroundStyle(.white)
+                }
             }
         }
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.55)
-        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+        .accessibilityLabel(countdown > 0 ? "Cancel recording countdown, \(countdown) seconds remaining" : (isRecording ? "Stop recording" : "Start recording"))
     }
 }
 
@@ -63,7 +69,9 @@ struct PhotoButton: View {
     let onBurstStart: () -> Void
     let onBurstEnd: () -> Void
     @State private var pressTask: Task<Void, Never>?
+    @State private var isPressActive = false
     @State private var isBurstActive = false
+    @GestureState private var isPressGestureActive = false
 
     var body: some View {
         ZStack {
@@ -91,13 +99,22 @@ struct PhotoButton: View {
         .contentShape(Circle())
         .gesture(
             DragGesture(minimumDistance: 0)
+                .updating($isPressGestureActive) { _, active, _ in active = true }
                 .onChanged { _ in beginPress() }
                 .onEnded { _ in endPress() }
         )
         .opacity(isEnabled ? 1 : 0.55)
         .accessibilityLabel("Take photo")
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { action() }
+        .accessibilityAction {
+            guard isEnabled, !isCapturing else { return }
+            action()
+        }
+        .onChange(of: isEnabled) { enabled in if !enabled { cancelPress() } }
+        .onChange(of: isPressGestureActive) { active in if !active { cancelPress() } }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            cancelPress()
+        }
         .onDisappear { cancelPress() }
     }
 
@@ -107,14 +124,17 @@ struct PhotoButton: View {
     }
 
     private func beginPress() {
-        guard isEnabled, !isCapturing, pressTask == nil else { return }
+        guard isEnabled, !isCapturing, !isPressActive else { return }
+        isPressActive = true
+        // A press during a countdown cancels it on release; it must not start a burst.
+        guard countdown == 0 else { return }
         pressTask = Task { @MainActor in
             do {
                 try await Task.sleep(nanoseconds: 450_000_000)
             } catch {
                 return
             }
-            guard !Task.isCancelled, !isCapturing else { return }
+            guard !Task.isCancelled, isPressActive else { return }
             isBurstActive = true
             pressTask = nil
             onBurstStart()
@@ -122,9 +142,11 @@ struct PhotoButton: View {
     }
 
     private func endPress() {
+        guard isPressActive else { return }
         let didStartBurst = isBurstActive
         pressTask?.cancel()
         pressTask = nil
+        isPressActive = false
         isBurstActive = false
 
         if didStartBurst {
@@ -137,6 +159,7 @@ struct PhotoButton: View {
     private func cancelPress() {
         pressTask?.cancel()
         pressTask = nil
+        isPressActive = false
         guard isBurstActive else { return }
         isBurstActive = false
         onBurstEnd()
@@ -364,8 +387,8 @@ struct CameraLevelHost: View {
             }
         }
         .onAppear { updateMonitoring() }
-        .onChange(of: enabled) { _, _ in updateMonitoring() }
-        .onChange(of: isActive) { _, _ in updateMonitoring() }
+        .onChange(of: enabled) { _ in updateMonitoring() }
+        .onChange(of: isActive) { _ in updateMonitoring() }
         .onDisappear { monitor.stop() }
     }
 

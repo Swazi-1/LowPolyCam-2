@@ -14,24 +14,27 @@ enum CameraZoomController {
         displayedZoom: CGFloat,
         currentDevice: AVCaptureDevice,
         availableDevices: [AVCaptureDevice],
-        mode: CameraManager.CaptureMode,
         recordingOrStarting: Bool,
-        preferCurrentDeviceWhenPossible: Bool = false,
+        interactive: Bool = false,
         forcePhysicalOpticalRouting: Bool = false
     ) -> RequestPlan {
         guard currentDevice.position == .back else {
             return .applyToCurrentDevice(displayedZoom)
         }
 
-        let desired = desiredPhysicalDevice(in: availableDevices, displayedZoom: displayedZoom)
-
-        // During a continuous drag, do not exchange physical inputs if the current sensor can
-        // already represent the requested field of view digitally. This keeps 4K60/HFR zoom
-        // responsive under load and defers the optical handoff until the gesture settles.
-        if preferCurrentDeviceWhenPossible,
-           activeDisplayedZoomRange(for: currentDevice).contains(displayedZoom) {
-            return .applyToCurrentDevice(displayedZoom)
+        // A movie keeps its current capture input. Digital zoom remains available in Slo-Mo
+        // too, even when another physical lens would normally be preferred at this zoom.
+        if recordingOrStarting {
+            return activeDisplayedZoomRange(for: currentDevice).contains(displayedZoom)
+                ? .applyToCurrentDevice(displayedZoom) : .blockedPhysicalSwitch
         }
+
+        let desired = desiredPhysicalDevice(
+            in: availableDevices,
+            displayedZoom: displayedZoom,
+            currentDevice: currentDevice,
+            interactive: interactive
+        )
 
         if currentDevice.isVirtualDevice {
             // Photo/normal Video can let Apple's virtual camera perform constituent switching.
@@ -39,7 +42,6 @@ enum CameraZoomController {
             // the matching optical input while idle so a virtual device cannot digitally crop
             // the Ultra Wide all the way past 1x without actually changing lenses.
             if forcePhysicalOpticalRouting, desired != nil {
-                if recordingOrStarting { return .blockedPhysicalSwitch }
                 return .reconfigureLens(displayedZoom)
             }
             // A virtual camera is not proof that every constituent lens participates in the
@@ -49,43 +51,29 @@ enum CameraZoomController {
             if activeDisplayedZoomRange(for: currentDevice).contains(displayedZoom) {
                 return .applyToCurrentDevice(displayedZoom)
             }
-            guard desired?.uniqueID != currentDevice.uniqueID else {
+            guard let desired, desired.uniqueID != currentDevice.uniqueID else {
                 return .applyToCurrentDevice(displayedZoom)
             }
-            if recordingOrStarting {
-                return .blockedPhysicalSwitch
-            }
             return .reconfigureLens(displayedZoom)
         }
-        let wantsDifferentLens = desired?.uniqueID != currentDevice.uniqueID
+        let wantsDifferentLens = desired.map { $0.uniqueID != currentDevice.uniqueID } ?? false
         guard wantsDifferentLens else { return .applyToCurrentDevice(displayedZoom) }
-
-        if recordingOrStarting && mode != .video {
-            return .blockedPhysicalSwitch
-        }
-        if !recordingOrStarting {
-            return .reconfigureLens(displayedZoom)
-        }
-        // Normal Video stays on the sensor it started recording with and uses digital crop when
-        // the displayed zoom crosses another optical lens boundary.
-        return .applyToCurrentDevice(displayedZoom)
+        return .reconfigureLens(displayedZoom)
     }
 
     static func desiredPhysicalDevice(
         in devices: [AVCaptureDevice],
-        displayedZoom: CGFloat
+        displayedZoom: CGFloat,
+        currentDevice: AVCaptureDevice? = nil,
+        interactive: Bool = false
     ) -> AVCaptureDevice? {
         let physical = devices.filter { !$0.isVirtualDevice }
-        if displayedZoom < 1 {
-            return physical.first(where: { $0.deviceType == .builtInUltraWideCamera })
-                ?? physical.first(where: { $0.deviceType == .builtInWideAngleCamera })
-                ?? physical.first
-        }
-        if displayedZoom >= 1.75,
-           let telephoto = physical.first(where: { $0.deviceType == .builtInTelephotoCamera }) {
-            return telephoto
-        }
-        return physical.first(where: { $0.deviceType == .builtInWideAngleCamera }) ?? physical.first
+        let bases = physical.map { opticalBase(for: $0) }
+        let currentBase = currentDevice.flatMap { $0.isVirtualDevice ? nil : opticalBase(for: $0) }
+        guard let base = ZoomRoutingPolicy.opticalBase(
+            for: displayedZoom, availableBases: bases, currentBase: currentBase, interactive: interactive
+        ), let index = bases.firstIndex(of: base) else { return nil }
+        return physical[index]
     }
 
     static func minimumDisplayedZoom(for device: AVCaptureDevice) -> CGFloat {
@@ -130,16 +118,11 @@ enum CameraZoomController {
     }
 
     static func clampDisplayedZoom(_ requested: CGFloat, to domain: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(requested, domain.lowerBound), domain.upperBound)
+        ZoomRoutingPolicy.clamp(requested, to: domain)
     }
 
     static func snappedDisplayedZoom(_ requested: CGFloat, for device: AVCaptureDevice) -> CGFloat {
-        let minimum = minimumDisplayedZoom(for: device)
-        let maximum = maximumDisplayedZoom(for: device)
-        let clamped = min(max(requested, minimum), maximum)
-        if minimum <= 0.5, abs(clamped - 0.5) < 0.10 { return 0.5 }
-        if abs(clamped - 1) < 0.16 { return 1 }
-        return clamped
+        ZoomRoutingPolicy.settledZoom(requested, in: activeDisplayedZoomRange(for: device))
     }
 
     static func displayedZoom(forDeviceZoom deviceZoom: CGFloat, device: AVCaptureDevice) -> CGFloat {
@@ -167,6 +150,12 @@ enum CameraZoomController {
             return 1
         }
         return CGFloat(switchFactor.doubleValue)
+    }
+
+    private static func opticalBase(for device: AVCaptureDevice) -> CGFloat {
+        if device.deviceType == .builtInUltraWideCamera { return 0.5 }
+        if device.deviceType == .builtInTelephotoCamera { return telephotoOpticalFactor(for: device) }
+        return 1
     }
 
     private static func telephotoOpticalFactor(for device: AVCaptureDevice) -> CGFloat {

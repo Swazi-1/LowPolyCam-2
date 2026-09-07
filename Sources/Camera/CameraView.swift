@@ -16,6 +16,7 @@ struct CameraView: View {
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
     @State private var dragStartZoom: CGFloat?
+    @GestureState private var isZoomGestureActive = false
     @State private var countdown = 0
     @State private var countdownTotal = 0
     @State private var shutterTask: Task<Void, Never>?
@@ -140,7 +141,7 @@ struct CameraView: View {
                 LiveStatsOverlay(camera: camera, editing: editingStats) { editingStats = false }
             }
         }
-        .onChange(of: camera.isRecording) { _, recording in
+        .onChange(of: camera.isRecording) { recording in
             if recording && longevity && camera.captureMode == .video {
                 if restoreBrightness == nil { restoreBrightness = UIScreen.main.brightness }
                 UIScreen.main.brightness = min(UIScreen.main.brightness, 0.25)
@@ -166,18 +167,19 @@ struct CameraView: View {
                 if !isShowingSettings { camera.refreshAvailableStorage() }
             }
         }
-        .onChange(of: keepScreenAwakeEnabled) { _, _ in
+        .onChange(of: keepScreenAwakeEnabled) { _ in
             updateIdleTimer(for: scenePhase)
         }
-        .onChange(of: mirrorSelfies) { _, _ in
+        .onChange(of: mirrorSelfies) { _ in
             camera.refreshMovieOutputSettings()
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             updateIdleTimer(for: phase)
             if phase == .active {
                 camera.appDidBecomeActive()
                 camera.refreshAvailableStorage()
             } else {
+                finishInteractiveZoom()
                 cancelCountdown()
                 if let brightness = restoreBrightness {
                     UIScreen.main.brightness = brightness
@@ -187,6 +189,7 @@ struct CameraView: View {
             }
         }
         .onDisappear {
+            finishInteractiveZoom()
             cancelCountdown()
             camera.stop()
             if let brightness = restoreBrightness { UIScreen.main.brightness = brightness; restoreBrightness = nil }
@@ -199,18 +202,25 @@ struct CameraView: View {
                 cancelCountdown()
                 editingStats = true
             }
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
+                .cameraSettingsSheetPresentation()
         }
-        .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
-        .onChange(of: camera.availableStorageBytes) { _, bytes in
+        .onChange(of: camera.captureMode) { _ in
+            finishInteractiveZoom()
+            cancelCountdown()
+        }
+        .onChange(of: isZoomGestureActive) { active in
+            // DragGesture.onEnded is skipped when the system cancels a touch (for example
+            // opening Control Center). Don't reuse that drag's origin on the next gesture.
+            if !active { finishInteractiveZoom() }
+        }
+        .onChange(of: camera.availableStorageBytes) { bytes in
             if bytes > 1_000_000_000 { warnedAboutStorage = false }
             if lowStorageWarning, bytes > 0, bytes < 1_000_000_000, !warnedAboutStorage {
                 warnedAboutStorage = true
                 camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
             }
         }
-        .onChange(of: isShowingSettings) { _, showing in
+        .onChange(of: isShowingSettings) { showing in
             if showing {
                 cancelCountdown()
             } else {
@@ -265,7 +275,7 @@ struct CameraView: View {
                 .padding(.horizontal, -22)
                 .background(GeometryReader { proxy in
                     Color.clear.onAppear { zoomWidth = proxy.size.width }
-                        .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
+                        .onChange(of: proxy.size.width) { width in zoomWidth = width }
                 })
                 .gesture(zoomGesture)
                 // Keep an already-active drag alive across an optical lens handoff. New zoom
@@ -309,7 +319,7 @@ struct CameraView: View {
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
-                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isPreviewTransitioning && !camera.isRecordingStarting && !camera.isFinalizingRecording) {
+                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isPreviewTransitioning && !camera.isRecordingStarting && !camera.isFinalizingRecording, countdown: countdown) {
                         shutterPressed()
                     }
                 }
@@ -324,6 +334,7 @@ struct CameraView: View {
 
     private var zoomGesture: some Gesture {
         DragGesture(minimumDistance: 0)
+            .updating($isZoomGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 if dragStartZoom == nil {
                     dragStartZoom = camera.zoomFactor
@@ -344,6 +355,12 @@ struct CameraView: View {
                 camera.endInteractiveZoom(tapZoomReset && isTap ? 1 : draggedZoom)
                 self.dragStartZoom = nil
             }
+    }
+
+    private func finishInteractiveZoom() {
+        guard dragStartZoom != nil else { return }
+        dragStartZoom = nil
+        camera.endInteractiveZoom(camera.zoomFactor)
     }
 
     private func captureHaptic() {

@@ -44,22 +44,19 @@ struct CameraHUD: View {
             }
 
             if !items.isEmpty {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(items) { item in
-                            Label(item.text, systemImage: item.symbol)
+                if #available(iOS 16.0, *) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            ForEach(items) { item in
+                                Label(item.text, systemImage: item.symbol)
+                            }
                         }
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
+                        .fixedSize(horizontal: true, vertical: false)
 
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                        ForEach(items) { item in
-                            Label(item.text, systemImage: item.symbol)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                        }
+                        itemGrid
                     }
-                    .frame(maxWidth: maxWidth - 20)
+                } else {
+                    itemGrid
                 }
             }
         }
@@ -89,6 +86,17 @@ struct CameraHUD: View {
         .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
             thermalState = ProcessInfo.processInfo.thermalState
         }
+    }
+
+    private var itemGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+            ForEach(items) { item in
+                Label(item.text, systemImage: item.symbol)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+        }
+        .frame(maxWidth: maxWidth - 20)
     }
 
     private var recordingTime: String {

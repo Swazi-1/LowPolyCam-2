@@ -12,6 +12,7 @@ final class PermissionManager: ObservableObject {
 
     @Published private(set) var state: State = .checking
     private var hasRequestedThisLaunch = false
+    private var isRequestingPermissions = false
 
     func requestRequiredPermissionsIfNeeded() async {
         guard !hasRequestedThisLaunch else { return }
@@ -23,6 +24,11 @@ final class PermissionManager: ObservableObject {
         }
 
         state = .requesting
+        isRequestingPermissions = true
+        defer {
+            isRequestingPermissions = false
+            refreshAuthorizationState()
+        }
 
         if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
             _ = await AVCaptureDevice.requestAccess(for: .video)
@@ -35,13 +41,15 @@ final class PermissionManager: ObservableObject {
         if PHPhotoLibrary.authorizationStatus(for: .addOnly) == .notDetermined {
             _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         }
-
-        refreshAuthorizationState()
     }
 
     func refreshAuthorizationState() {
+        // Permission alerts foreground the app between requests. Keep the camera gate stable
+        // until the complete sequence finishes instead of creating/destroying CameraView.
+        guard hasRequestedThisLaunch, !isRequestingPermissions else { return }
         let missing = missingPermissionNames
-        state = missing.isEmpty ? .ready : .denied(missing)
+        let nextState: State = missing.isEmpty ? .ready : .denied(missing)
+        if state != nextState { state = nextState }
     }
 
     private var allPermissionsGranted: Bool {
