@@ -39,7 +39,7 @@ keys=(
   liveStatsShowBitrate liveStatsShowDrops iconAppearance iconCustomRed iconCustomGreen iconCustomBlue
 )
 for key in "${keys[@]}"; do
-  rg -q "@AppStorage\\(\"${key}\"\\)" Sources || {
+  grep -R -E -q "@AppStorage\\(\"${key}\"\\)" Sources || {
     echo "Persisted setting key disappeared: $key" >&2
     exit 1
   }
