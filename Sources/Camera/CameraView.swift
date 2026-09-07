@@ -42,7 +42,7 @@ struct CameraView: View {
                 session: camera.session,
                 isFocusExposureLocked: camera.isFocusExposureLocked,
                 stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
-                isPreviewTransitioning: camera.isPreviewTransitioning,
+                isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
                 fitsPhoto: camera.captureMode == .photo,
                 onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
                 onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
@@ -221,11 +221,11 @@ struct CameraView: View {
 
             ZStack {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
+                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !camera.isLensTransitioning && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
                         camera.toggleTorch()
                     }
                     Spacer()
-                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto, color: accent.color) {
+                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning, color: accent.color) {
                         isShowingSettings = true
                     }
                 }
@@ -265,13 +265,13 @@ struct CameraView: View {
 
                 CaptureModeSelector(
                     selectedMode: camera.captureMode,
-                    isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0,
+                    isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0,
                     onSelect: { camera.selectCaptureMode($0) }
                 )
                 .padding(.bottom, 8)
 
             HStack {
-                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
+                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
                     withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
                 }
                 Spacer()
@@ -300,12 +300,12 @@ struct CameraView: View {
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
-                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording) {
+                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning) {
                         shutterPressed()
                     }
                 }
             Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && countdown == 0, color: accent.color) {
+            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
                 camera.switchCamera()
             }
             }
