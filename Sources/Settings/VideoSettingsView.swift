@@ -217,31 +217,39 @@ struct VideoSettingsView: View {
                     .background(theme.opacity(0.13), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .popover(isPresented: $showingPhotoMegapixelMenu) {
+                .popover(isPresented: $showingPhotoMegapixelMenu, arrowEdge: .trailing) {
                     VStack(spacing: 0) {
                         ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
                             Button {
                                 camera.selectPhotoMegapixels(megapixels)
                                 showingPhotoMegapixelMenu = false
                             } label: {
-                                HStack(spacing: 10) {
+                                HStack(spacing: 12) {
                                     Image(systemName: "checkmark")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .frame(width: 18)
                                         .opacity(megapixels == camera.selectedPhotoMegapixels ? 1 : 0)
+
                                     Text("\(megapixels) MP")
-                                        .font(.system(size: 15, weight: .medium))
-                                    Spacer(minLength: 12)
+                                        .font(.system(size: 16, weight: .regular))
+
+                                    Spacer(minLength: 18)
                                 }
                                 .foregroundStyle(.primary)
-                                .frame(minWidth: 132, minHeight: 32)
-                                .padding(.horizontal, 12)
+                                .frame(width: 176, height: 36, alignment: .leading)
+                                .padding(.horizontal, 14)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 7)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+                    .fixedSize(horizontal: true, vertical: true)
                     .presentationCompactAdaptation(.popover)
+                    .presentationBackground(.clear)
                 }
             }
         }
