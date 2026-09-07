@@ -943,9 +943,17 @@ final class CameraManager: NSObject, ObservableObject {
                   self.activeLensTransitionRequestID == request.id,
                   self.isLatestZoomRequest(request.id) else { return }
 
-            guard self.applyPreparedPhysicalLensTransition(prepared),
-                  self.activeLensTransitionRequestID == request.id,
-                  self.isLatestZoomRequest(request.id) else {
+            let applied = self.applyPreparedPhysicalLensTransition(prepared)
+            if !applied {
+                // A zoom gesture can produce a newer request while 4K60 is blocked inside
+                // commitConfiguration(). That makes this request stale without meaning the camera
+                // transaction failed. Keep the existing cover alive and let the newer queued zoom
+                // request take ownership instead of showing a false transition error.
+                if self.activeLensTransitionRequestID != request.id ||
+                    !self.isLatestZoomRequest(request.id) {
+                    return
+                }
+
                 if let device = self.videoInput?.device {
                     let actualZoom = self.displayedZoomFactor(for: device.videoZoomFactor, device: device)
                     self.requestedZoom = actualZoom
@@ -958,6 +966,14 @@ final class CameraManager: NSObject, ObservableObject {
                 self.showError("Couldn’t finish the lens transition.")
                 return
             }
+
+            guard self.activeLensTransitionRequestID == request.id else { return }
+
+            // The hardware switch itself succeeded. If another zoom request arrived while the slow
+            // 4K60 commit was in progress, do not reveal the old target or call it a failure. The
+            // newer request is already queued on sessionQueue and will apply its final zoom/lens
+            // behind this same cover before it becomes responsible for the reveal.
+            guard self.isLatestZoomRequest(request.id) else { return }
 
             // Keep the cover through the first part of the new stream settling. PreviewView also
             // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
