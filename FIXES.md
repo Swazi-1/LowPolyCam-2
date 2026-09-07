@@ -56,7 +56,7 @@ This source package can be syntax/regression validated on non-macOS hosts, but A
 
 1. Cold Photo, rear 4K60, and every supported Slo-Mo rate: hold a 0.5x -> 1x -> 2x -> 0.5x drag, then repeat it five times. The cold physical handoff should be covered without a clear freeze/black flash and the finger must remain responsive.
 2. Auto -> first manual WB -> same preset -> another preset -> Auto, followed immediately by lens zoom. Check that WB settles once and no stale transition remains.
-3. Video front/back at supported 720p/1080p/4K and 24/30/60 choices. Compare first and repeated timings with the already-fast Slo-Mo path.
+3. Video front/back at supported 720p/1080p/4K and every frame-rate choice exposed by the current camera. Compare first and repeated timings with the already-fast Slo-Mo path.
 4. Reverse a drag during the blur; flip/mode/record at the handoff boundary; interrupt with Control Center, lock/background, then return. Verify no stuck cover, no stale zoom backlog, and preserved useful zoom state.
 5. Record/stop on every supported tested path and inspect saved dimensions, cadence, codec, audio, duration, and playback. The preview blur must never appear in media.
 6. Test Reduce Motion, optional monitoring off/on, and a warm device. Unsupported Ultra Wide HFR combinations must stay unavailable rather than being fabricated.
@@ -73,3 +73,21 @@ This source package can be syntax/regression validated on non-macOS hosts, but A
 - Physical input replacement no longer invalidates the movie settings signature solely because topology changed; the actual new connection settings are inspected and repaired when needed.
 - Added the required Motion usage description for the Core Motion level meter.
 - Level Meter now uses continuous cardinal-folded roll math: horizontal/level at 0/90/180/270 degrees without the old ~45-degree snap, hides when motion roll is genuinely unavailable instead of showing a fake straight line, and tolerates brief invalid samples without resetting.
+
+### Level Meter launch-state sync
+- Fixed a launch-only state mismatch where `levelMeterEnabled` could restore as ON while the runtime Core Motion monitor stayed unavailable until the toggle was cycled.
+- CameraLevelHost now derives monitoring from one `enabled && sceneActive` lifecycle identity, avoiding first-appearance/AppStorage/scene-phase ordering races.
+- Added a bounded startup retry for a silent first Core Motion activation. Retries stop as soon as any real `CMDeviceMotion` sample arrives and are cancelled immediately on disable/background/disappear.
+- Existing level math, invalid-orientation handling, 30 Hz update rate, and saved toggle behavior are unchanged.
+
+
+### 2026-09-07 — Full Settings UI redesign
+- Rebuilt the main Settings screen around the approved compact card layout: active camera summary, Light/Dark/System selector, two-column mode-specific quality controls, grouped Quick Controls, and two-column navigation tiles.
+- Video/Slo-Mo quality buttons remain capability-driven. Resolution/FPS still call the established CameraManager selection methods exactly once; Codec/Compression keep their existing validated reconfiguration/rollback paths.
+- Photo keeps the maximum-quality resolution policy and existing Photo resolution selector; Aspect and HEIC/JPEG are now direct card controls.
+- Grid Opacity and Haptic Strength are dependent rows that collapse when their parent setting is off. HUD child choices collapse when the HUD is hidden without deleting their stored values.
+- Restyled Capture, Viewfinder & HUD, Advanced Recording, Live Stats, Video Presets, Appearance, and Recovery to the same card/section language using native SwiftUI controls and SF Symbols.
+- Added a Settings-only Light/Dark/System preference while leaving the camera viewfinder's deliberate dark presentation unchanged.
+- Preserved all existing persisted setting keys so an update does not reset user preferences.
+- Preserved special side effects: Stabilization uses CameraManager, Longevity uses applyLongevityMode, Live Stats/HUD monitoring refreshes remain explicit, Photo aspect refreshes the resolution catalog, Mirror Selfies uses the existing movie-output refresh observer, and Haptic Strength can still preview on reselect.
+- Added scripts/run-settings-regressions.sh and wired it into GitHub Actions to guard the critical setting-to-engine routes and persisted keys.

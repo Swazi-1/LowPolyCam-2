@@ -10,7 +10,7 @@ the `LowPolyCam-unsigned-ipa` artifact when the run finishes.
 The generated IPA is unsigned. It must be signed with your own Apple developer
 identity or a sideloading tool before it can be installed on an iPhone.
 
-The workflow runs the portable zoom/recording regression checks before building.
+The workflow runs the portable zoom/recording/settings regression checks before building.
 An Xcode build and an iPhone camera test are separate checks; building successfully
 does not verify physical-lens smoothness or iOS beta camera behavior.
 
@@ -29,6 +29,7 @@ Run the regression checks on a Mac with Xcode's command-line tools:
 ```sh
 bash scripts/run-zoom-regressions.sh
 bash scripts/run-recording-regressions.sh
+bash scripts/run-settings-regressions.sh
 ```
 
 For CI-style compilation after `xcodegen generate`, build the `LowPolyCam` scheme
