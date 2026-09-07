@@ -24,8 +24,8 @@ require Sources/Settings/VideoSettingsView.swift 'camera.selectFrameRate(value)'
 require Sources/Settings/VideoSettingsView.swift 'camera.selectSlowMotionResolution(value)'
 require Sources/Settings/VideoSettingsView.swift 'camera.selectSlowMotionFrameRate(value)'
 require Sources/Settings/VideoSettingsView.swift 'camera.selectPhotoResolution(option)'
-require Sources/Settings/VideoSettingsView.swift 'camera.videoCompression = $0'
-require Sources/Settings/VideoSettingsView.swift 'camera.selectedVideoCodec = $0'
+require Sources/Settings/VideoSettingsView.swift 'camera.selectVideoCompression($0)'
+require Sources/Settings/VideoSettingsView.swift 'camera.selectVideoCodec($0)'
 require Sources/Settings/VideoSettingsView.swift 'camera.photoFileFormat = $0'
 require Sources/Settings/VideoSettingsView.swift 'camera.refreshPhotoResolutionForCurrentAspect()'
 require Sources/Settings/QuickCameraSettings.swift 'camera.setVideoStabilizationEnabled(enabled)'
@@ -102,5 +102,13 @@ require Sources/Settings/AppearanceSettingsView.swift 'SettingsSectionHeader(tit
 require Sources/Settings/VideoSettingsView.swift 'subtitle: "Accent colors & preview"'
 require Sources/Settings/CameraTheme.swift 'readableTextColor'
 require Sources/Settings/SettingsComponents.swift '.lineLimit(1)'
+require Sources/Settings/SettingsComponents.swift 'disabledOptions: Set<Value>'
+require Sources/Settings/SettingsComponents.swift 'systemImage: "lock.fill"'
+require Sources/Camera/CameraManager.swift 'func isVideoCodecUnavailable(_ codec: String) -> Bool'
+require Sources/Camera/CameraManager.swift 'unavailableVideoCodecs: Set<String>'
+if grep -Fq 'movieOutput.setOutputSettings(nil, for: connection)' Sources/Camera/CameraManager.swift; then
+  echo "Unsafe MovieFileOutput nil reset returned" >&2
+  exit 1
+fi
 
 echo "Settings regression checks passed"

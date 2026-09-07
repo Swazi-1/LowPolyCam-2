@@ -207,7 +207,7 @@ struct VideoSettingsView: View {
           symbol: "externaldrive.fill",
           selection: Binding(
             get: { camera.videoCompression },
-            set: { if $0 != camera.videoCompression { camera.videoCompression = $0 } }
+            set: { camera.selectVideoCompression($0) }
           ),
           options: VideoCompression.allCases.map { ($0, $0.rawValue) }
         )
@@ -218,9 +218,10 @@ struct VideoSettingsView: View {
           symbol: "doc.fill",
           selection: Binding(
             get: { camera.selectedVideoCodec },
-            set: { if $0 != camera.selectedVideoCodec { camera.selectedVideoCodec = $0 } }
+            set: { camera.selectVideoCodec($0) }
           ),
-          options: [("H264", "H.264"), ("HEVC", "HEVC")]
+          options: [("H264", "H.264"), ("HEVC", "HEVC")],
+          disabledOptions: Set(["H264", "HEVC"].filter { camera.isVideoCodecUnavailable($0) })
         )
       }
 
@@ -271,7 +272,7 @@ struct VideoSettingsView: View {
             symbol: "externaldrive.fill",
             selection: Binding(
               get: { camera.videoCompression },
-              set: { if $0 != camera.videoCompression { camera.videoCompression = $0 } }
+              set: { camera.selectVideoCompression($0) }
             ),
             options: VideoCompression.allCases.map { ($0, $0.rawValue) }
           )
@@ -282,9 +283,10 @@ struct VideoSettingsView: View {
             symbol: "doc.fill",
             selection: Binding(
               get: { camera.selectedVideoCodec },
-              set: { if $0 != camera.selectedVideoCodec { camera.selectedVideoCodec = $0 } }
+              set: { camera.selectVideoCodec($0) }
             ),
-            options: [("H264", "H.264"), ("HEVC", "HEVC")]
+            options: [("H264", "H.264"), ("HEVC", "HEVC")],
+            disabledOptions: Set(["H264", "HEVC"].filter { camera.isVideoCodecUnavailable($0) })
           )
         }
 

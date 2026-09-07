@@ -46,8 +46,9 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var statusMessageID: UInt64 = 0
     @Published private(set) var lastFrameGaps: Int?
     @Published private(set) var codecAvailabilityMessage: String?
+    @Published private(set) var unavailableVideoCodecs: Set<String> = []
     @Published private(set) var recoverableRecordingCount = 0
-    @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
+    @Published private(set) var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
             if suppressAutomaticReconfiguration {
@@ -99,7 +100,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
         didSet { UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat") }
     }
-    @Published var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
+    @Published private(set) var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
         didSet {
             guard videoCompression != oldValue else { return }
             if suppressAutomaticReconfiguration {
@@ -1775,6 +1776,37 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
 
+
+    func isVideoCodecUnavailable(_ codec: String) -> Bool {
+        guard codec == "H264" || codec == "HEVC" else { return true }
+        // 4K60 is HEVC-only in LowPolyCam. Keep this policy deterministic even while a newer
+        // quality request is still being committed on the session queue, so a fast tap can never
+        // sneak H.264 into an invalid 4K60 reconfiguration.
+        if codec == "H264",
+           captureMode == .video,
+           selectedResolution == .p4k,
+           selectedFrameRate == .fps60 {
+            return true
+        }
+        return unavailableVideoCodecs.contains(codec)
+    }
+
+    func selectVideoCodec(_ codec: String) {
+        guard codec != selectedVideoCodec else { return }
+        guard codec == "H264" || codec == "HEVC" else { return }
+        guard !isVideoCodecUnavailable(codec) else {
+            postStatus(codec == "H264"
+                ? "H.264 isn’t available at this resolution and frame rate. Use HEVC or lower the quality."
+                : "HEVC isn’t available for this camera configuration.")
+            return
+        }
+        selectedVideoCodec = codec
+    }
+
+    func selectVideoCompression(_ compression: VideoCompression) {
+        guard compression != videoCompression else { return }
+        videoCompression = compression
+    }
 
     func selectResolution(_ resolution: VideoResolution) {
         guard resolution != selectedResolution else { return }
@@ -3576,11 +3608,32 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
+        let availableCodecs = movieOutput.availableVideoCodecTypes
+        var unavailableCodecs = Set<String>()
+        if !availableCodecs.contains(.h264) { unavailableCodecs.insert("H264") }
+        if !availableCodecs.contains(.hevc) { unavailableCodecs.insert("HEVC") }
+        // AVCaptureMovieFileOutput can expose transient codec state while a format handoff is
+        // settling. LowPolyCam intentionally treats rear/front 4K60 as HEVC-only, matching the
+        // actual recorder path and preventing an invalid H.264 write from reaching AVFoundation.
+        if request.mode == .video, request.resolution == .p4k, request.frameRate == .fps60 {
+            unavailableCodecs.insert("H264")
+        }
+        publishIfCurrent(requestToken) { self.unavailableVideoCodecs = unavailableCodecs }
+
         let preferred: AVVideoCodecType = request.codec == "H264" ? .h264 : .hevc
-        let codecAvailable = movieOutput.availableVideoCodecTypes.contains(preferred) && supportedKeys.contains(AVVideoCodecKey)
-        let message: String? = codecAvailable ? nil : (preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
-            ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
-            : "The selected codec is unavailable for this camera configuration.")
+        let codecAvailable = !unavailableCodecs.contains(request.codec) &&
+            availableCodecs.contains(preferred) &&
+            supportedKeys.contains(AVVideoCodecKey)
+        let message: String?
+        if codecAvailable {
+            message = unavailableCodecs.contains("H264") && request.codec == "HEVC"
+                ? "H.264 is locked for this camera quality. HEVC is required."
+                : nil
+        } else {
+            message = preferred == .h264 && availableCodecs.contains(.hevc)
+                ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
+                : "The selected codec is unavailable for this camera configuration."
+        }
         publishIfCurrent(requestToken) { self.codecAvailabilityMessage = message }
         guard codecAvailable else { return false }
 
@@ -3590,6 +3643,8 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
+        // Keep the dictionary sparse. Apple documents that MovieFileOutput fills in defaults for
+        // omitted values, while unsupported top-level keys cause an Objective-C exception.
         var requestedSettings: [String: Any] = [AVVideoCodecKey: preferred]
         if request.compression != .high {
             requestedSettings[AVVideoCompressionPropertiesKey] = [
@@ -3616,7 +3671,9 @@ final class CameraManager: NSObject, ObservableObject {
             : "\(preferred.rawValue)|\(request.compression.rawValue)|\(Int(expectedBitrate))"
         var applied = movieOutput.outputSettings(for: connection)
         if lastAppliedMovieSettingsSignature != requestedSignature || !settingsMatch(applied) {
-            movieOutput.setOutputSettings(nil, for: connection)
+            // Never clear to nil first. A nil reset is unnecessary and briefly replaces the
+            // validated encoder configuration with session-preset defaults. Apply only the sparse,
+            // prevalidated dictionary for the current connection.
             movieOutput.setOutputSettings(requestedSettings, for: connection)
             applied = movieOutput.outputSettings(for: connection)
         }

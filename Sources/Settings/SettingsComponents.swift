@@ -217,6 +217,7 @@ struct SettingsSelectionControl<Value: Hashable>: View {
   let title: String
   @Binding var selection: Value
   let options: [(Value, String)]
+  let disabledOptions: Set<Value>
   var onSelect: ((Value) -> Void)? = nil
   var firesActionOnReselect = false
 
@@ -224,12 +225,14 @@ struct SettingsSelectionControl<Value: Hashable>: View {
     title: String,
     selection: Binding<Value>,
     options: [(Value, String)],
+    disabledOptions: Set<Value> = [],
     onSelect: ((Value) -> Void)? = nil,
     firesActionOnReselect: Bool = false
   ) {
     self.title = title
     self._selection = selection
     self.options = options
+    self.disabledOptions = disabledOptions
     self.onSelect = onSelect
     self.firesActionOnReselect = firesActionOnReselect
   }
@@ -279,15 +282,19 @@ struct SettingsSelectionControl<Value: Hashable>: View {
     } else {
       Menu {
         ForEach(options, id: \.0) { value, label in
+          let optionDisabled = disabledOptions.contains(value)
           Button {
             commit(value)
           } label: {
-            if value == selection {
+            if optionDisabled {
+              Label(label, systemImage: "lock.fill")
+            } else if value == selection {
               Label(label, systemImage: "checkmark")
             } else {
               Text(label)
             }
           }
+          .disabled(optionDisabled)
         }
       } label: {
         HStack(spacing: 8) {
@@ -310,33 +317,43 @@ struct SettingsSelectionControl<Value: Hashable>: View {
   @ViewBuilder
   private var optionButtons: some View {
     ForEach(options, id: \.0) { value, label in
+      let optionDisabled = disabledOptions.contains(value)
       Button {
         commit(value)
       } label: {
-        Text(label)
+        HStack(spacing: 4) {
+          Text(label)
+            .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(0.62)
+          if optionDisabled {
+            Image(systemName: "lock.fill")
+              .font(.system(size: 9, weight: .semibold))
+          }
+        }
           .font(.caption.weight(.semibold))
-          .lineLimit(1)
-          .allowsTightening(true)
-          .minimumScaleFactor(0.62)
           .multilineTextAlignment(.center)
           .frame(maxWidth: .infinity, minHeight: 42)
           .padding(.horizontal, 3)
           .foregroundStyle(
-            !isEnabled
+            (!isEnabled || optionDisabled)
               ? Color.secondary : (value == selection ? accent.foregroundColor : Color.primary)
           )
           .background(
-            value == selection ? theme : Color.clear,
+            value == selection && !optionDisabled ? theme : Color.clear,
             in: RoundedRectangle(cornerRadius: 10, style: .continuous)
           )
           .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
+      .disabled(optionDisabled)
       .accessibilityAddTraits(value == selection ? .isSelected : [])
+      .accessibilityHint(optionDisabled ? "Unavailable for the selected camera quality" : "")
     }
   }
 
   private func commit(_ value: Value) {
+    guard !disabledOptions.contains(value) else { return }
     if value == selection {
       if firesActionOnReselect { onSelect?(value) }
       return
@@ -370,7 +387,26 @@ struct SettingsOptionCard<Value: Hashable>: View {
   let symbol: String
   @Binding var selection: Value
   let options: [(Value, String)]
+  var disabledOptions: Set<Value> = []
   var onSelect: ((Value) -> Void)? = nil
+
+  init(
+    title: String,
+    subtitle: String,
+    symbol: String,
+    selection: Binding<Value>,
+    options: [(Value, String)],
+    disabledOptions: Set<Value> = [],
+    onSelect: ((Value) -> Void)? = nil
+  ) {
+    self.title = title
+    self.subtitle = subtitle
+    self.symbol = symbol
+    self._selection = selection
+    self.options = options
+    self.disabledOptions = disabledOptions
+    self.onSelect = onSelect
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 13) {
@@ -391,6 +427,7 @@ struct SettingsOptionCard<Value: Hashable>: View {
         title: "",
         selection: $selection,
         options: options,
+        disabledOptions: disabledOptions,
         onSelect: onSelect
       )
     }
