@@ -1395,7 +1395,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera() {
-        DiagnosticLogger.shared.trace("Camera switch requested", category: "CameraAction", metadata: ["from": cameraPosition.rawValue])
+        DiagnosticLogger.shared.trace("Camera switch requested", category: "CameraAction", metadata: ["from": String(describing: cameraPosition)])
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
         let previous = cameraPosition
         let previousConfigurationRequest = makeConfigurationRequest()
@@ -1662,7 +1662,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func applyLongevityMode(_ enabled: Bool) {
-        DiagnosticLogger.shared.trace("Longevity Mode changed", category: "Settings", metadata: ["enabled": String(enabled), "camera": cameraPosition.rawValue])
+        DiagnosticLogger.shared.trace("Longevity Mode changed", category: "Settings", metadata: ["enabled": String(enabled), "camera": String(describing: cameraPosition)])
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording else {
             postStatus("Stop recording before changing Longevity Mode.")
             return
@@ -3396,7 +3396,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request: CaptureConfigurationRequest
     ) -> Bool {
-        DiagnosticLogger.shared.trace("configureCurrentModeRaw entered", category: "Configuration", metadata: ["phase": String(describing: phase), "mode": request.mode.rawValue, "camera": request.position.rawValue])
+        DiagnosticLogger.shared.trace("configureCurrentModeRaw entered", category: "Configuration", metadata: ["phase": String(describing: phase), "mode": request.mode.rawValue, "camera": String(describing: request.position)])
         let requiresPhysicalWB = WhiteBalanceController.requiresPhysicalRearInput(
             preset: request.whiteBalancePreset,
             position: request.position
