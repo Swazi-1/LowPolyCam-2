@@ -1,4 +1,5 @@
 import AVFoundation
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -53,6 +54,9 @@ final class PreviewView: UIView {
     private var focusExposureLocked = false
     private var stabilizationEnabled = true
     private var transitionSnapshot: UIView?
+    private var transitionBlurView: UIVisualEffectView?
+    private var transitionDimView: UIView?
+    private var transitionRevealWorkItem: DispatchWorkItem?
     private var previewTransitioning = false
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var rotationDeviceID: String?
@@ -81,6 +85,8 @@ final class PreviewView: UIView {
             updateRotation()
         }
         transitionSnapshot?.frame = bounds
+        transitionBlurView?.frame = bounds
+        transitionDimView?.frame = bounds
 
         lockLabel.sizeToFit()
         lockLabel.frame = CGRect(
@@ -130,26 +136,112 @@ final class PreviewView: UIView {
     func setPreviewTransitioning(_ transitioning: Bool) {
         guard transitioning != previewTransitioning else { return }
         previewTransitioning = transitioning
+        transitionRevealWorkItem?.cancel()
+        transitionRevealWorkItem = nil
 
         if transitioning {
-            transitionSnapshot?.removeFromSuperview()
-            transitionSnapshot = nil
-            guard bounds.width > 0, bounds.height > 0,
-                  let snapshot = snapshotView(afterScreenUpdates: false) else { return }
-            snapshot.frame = bounds
-            snapshot.isUserInteractionEnabled = false
-            addSubview(snapshot)
-            transitionSnapshot = snapshot
-        } else if let snapshot = transitionSnapshot {
-            UIView.animate(withDuration: 0.14, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                snapshot.alpha = 0
-            } completion: { [weak self, weak snapshot] _ in
-                snapshot?.removeFromSuperview()
-                if self?.transitionSnapshot === snapshot {
-                    self?.transitionSnapshot = nil
+            removeTransitionCover()
+
+            // Keep a copy of the last visible hierarchy when UIKit can provide one, then blur the
+            // whole cover. If the preview layer can't be snapshotted on a device, the live/frozen
+            // preview still sits behind the blur so the transition remains visible and intentional.
+            if bounds.width > 0, bounds.height > 0,
+               let snapshot = snapshotView(afterScreenUpdates: false) {
+                snapshot.frame = bounds
+                snapshot.isUserInteractionEnabled = false
+                snapshot.transform = .identity
+                addSubview(snapshot)
+                transitionSnapshot = snapshot
+            }
+
+            let blur = UIVisualEffectView(effect: nil)
+            blur.frame = bounds
+            blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            blur.isUserInteractionEnabled = false
+            addSubview(blur)
+            transitionBlurView = blur
+
+            let dim = UIView(frame: bounds)
+            dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            dim.backgroundColor = .black
+            dim.alpha = 0
+            dim.isUserInteractionEnabled = false
+            addSubview(dim)
+            transitionDimView = dim
+
+            UIView.animate(
+                withDuration: 0.075,
+                delay: 0,
+                options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction]
+            ) { [weak self] in
+                guard let self else { return }
+                blur.effect = UIBlurEffect(style: .regular)
+                dim.alpha = 0.06
+                self.transitionSnapshot?.transform = CGAffineTransform(scaleX: 1.012, y: 1.012)
+            }
+        } else {
+            revealTransitionWhenPreviewIsRendering()
+        }
+    }
+
+    private func revealTransitionWhenPreviewIsRendering() {
+        let deadline = CACurrentMediaTime() + 0.55
+
+        func scheduleCheck() {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.previewTransitioning else { return }
+                let connectionReady = self.previewLayer.connection?.isEnabled == true
+                if (self.previewLayer.isPreviewing && connectionReady) || CACurrentMediaTime() >= deadline {
+                    // Two display frames keep the cover over the first frame presented after an
+                    // input/format commit. This replaces the old fixed 100 ms guess.
+                    let reveal = DispatchWorkItem { [weak self] in
+                        guard let self, !self.previewTransitioning else { return }
+                        self.revealTransitionCover()
+                    }
+                    self.transitionRevealWorkItem = reveal
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.034, execute: reveal)
+                } else {
+                    scheduleCheck()
                 }
             }
+            transitionRevealWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: work)
         }
+
+        scheduleCheck()
+    }
+
+    private func revealTransitionCover() {
+        let snapshot = transitionSnapshot
+        let blur = transitionBlurView
+        let dim = transitionDimView
+        guard snapshot != nil || blur != nil || dim != nil else { return }
+
+        UIView.animate(
+            withDuration: 0.13,
+            delay: 0,
+            options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+        ) {
+            blur?.effect = nil
+            blur?.alpha = 0
+            dim?.alpha = 0
+            snapshot?.alpha = 0
+            snapshot?.transform = .identity
+        } completion: { [weak self] _ in
+            guard let self, !self.previewTransitioning else { return }
+            self.removeTransitionCover()
+        }
+    }
+
+    private func removeTransitionCover() {
+        transitionRevealWorkItem?.cancel()
+        transitionRevealWorkItem = nil
+        transitionSnapshot?.removeFromSuperview()
+        transitionSnapshot = nil
+        transitionBlurView?.removeFromSuperview()
+        transitionBlurView = nil
+        transitionDimView?.removeFromSuperview()
+        transitionDimView = nil
     }
 
     func setFocusExposureLocked(_ isLocked: Bool) {
