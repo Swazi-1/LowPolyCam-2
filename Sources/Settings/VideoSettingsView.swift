@@ -11,6 +11,11 @@ struct VideoSettingsView: View {
   @Environment(\.dismiss) private var dismiss
   private var accent = CameraAccent()
 
+  init(camera: CameraManager, positionStats: @escaping () -> Void = {}) {
+    self.camera = camera
+    self.positionStats = positionStats
+  }
+
   private var qualityColumns: [GridItem] {
     if dynamicTypeSize.isAccessibilitySize {
       return [GridItem(.flexible())]

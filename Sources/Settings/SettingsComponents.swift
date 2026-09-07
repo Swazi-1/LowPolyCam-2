@@ -210,6 +210,20 @@ struct SettingsSelectionControl<Value: Hashable>: View {
   var onSelect: ((Value) -> Void)? = nil
   var firesActionOnReselect = false
 
+  init(
+    title: String,
+    selection: Binding<Value>,
+    options: [(Value, String)],
+    onSelect: ((Value) -> Void)? = nil,
+    firesActionOnReselect: Bool = false
+  ) {
+    self.title = title
+    self._selection = selection
+    self.options = options
+    self.onSelect = onSelect
+    self.firesActionOnReselect = firesActionOnReselect
+  }
+
   private var currentLabel: String {
     options.first(where: { $0.0 == selection })?.1 ?? "—"
   }

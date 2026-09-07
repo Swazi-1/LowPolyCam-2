@@ -9,6 +9,15 @@ require() {
   grep -Fq "$text" "$file" || { echo "Missing settings wiring: $text ($file)" >&2; exit 1; }
 }
 
+
+# Swift memberwise initializers become private when a View has private stored DynamicProperty helpers.
+# Keep explicit internal constructors for views/components instantiated outside their own type.
+require Sources/Settings/VideoSettingsView.swift 'init(camera: CameraManager, positionStats: @escaping () -> Void = {})'
+require Sources/Settings/SettingsComponents.swift 'selection: Binding<Value>'
+require Sources/Settings/VideoPresetsView.swift 'init(camera: CameraManager)'
+require Sources/Settings/AppearanceSettingsView.swift 'init() {}'
+require Sources/Camera/CameraView.swift 'init() {}'
+
 # Capture-manager mutations must continue through the established safe paths.
 require Sources/Settings/VideoSettingsView.swift 'camera.selectResolution(value)'
 require Sources/Settings/VideoSettingsView.swift 'camera.selectFrameRate(value)'

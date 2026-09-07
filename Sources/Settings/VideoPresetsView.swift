@@ -7,6 +7,10 @@ struct VideoPresetsView: View {
   @State private var preview: VideoQuickPreset = .balanced
   private var accent = CameraAccent()
 
+  init(camera: CameraManager) {
+    self.camera = camera
+  }
+
   var body: some View {
     SettingsPage {
       SettingsSectionHeader(title: "Selected Preset")

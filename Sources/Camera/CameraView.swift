@@ -39,6 +39,8 @@ struct CameraView: View {
     @State private var restoreBrightness: CGFloat?
     private var accent = CameraAccent()
 
+    init() {}
+
     var body: some View {
         ZStack {
             CameraPreview(

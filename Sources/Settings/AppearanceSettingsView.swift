@@ -12,6 +12,8 @@ struct AppearanceSettingsView: View {
   private var accent = CameraAccent()
   private let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
+  init() {}
+
   var body: some View {
     SettingsPage {
       SettingsSectionHeader(title: "Interface Style")
