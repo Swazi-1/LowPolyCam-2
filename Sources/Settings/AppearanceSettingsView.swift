@@ -2,13 +2,13 @@ import SwiftUI
 import UIKit
 
 struct AppearanceSettingsView: View {
-  @AppStorage("settingsInterfaceStyle") private var interfaceStyle = SettingsInterfaceStyle.system
-    .rawValue
   @AppStorage("iconAppearance") private var appearance = "Ice"
   @AppStorage("iconCustomRed") private var red = 0.55
   @AppStorage("iconCustomGreen") private var green = 0.85
   @AppStorage("iconCustomBlue") private var blue = 1.0
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
+  @Environment(\.colorScheme) private var colorScheme
   private var accent = CameraAccent()
   private let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
@@ -16,35 +16,8 @@ struct AppearanceSettingsView: View {
 
   var body: some View {
     SettingsPage {
-      SettingsSectionHeader(title: "Interface Style")
-      SettingsCard {
-        HStack(spacing: 5) {
-          ForEach(SettingsInterfaceStyle.allCases) { style in
-            Button {
-              guard interfaceStyle != style.rawValue else { return }
-              interfaceStyle = style.rawValue
-            } label: {
-              VStack(spacing: 7) {
-                Image(systemName: style.symbol)
-                  .font(.system(size: 18, weight: .semibold))
-                Text(style.rawValue)
-                  .font(.caption.weight(.semibold))
-              }
-              .foregroundStyle(
-                interfaceStyle == style.rawValue ? accent.foregroundColor : Color.primary
-              )
-              .frame(maxWidth: .infinity, minHeight: 66)
-              .background(
-                interfaceStyle == style.rawValue ? theme : Color.primary.opacity(0.035),
-                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-              )
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(interfaceStyle == style.rawValue ? .isSelected : [])
-          }
-        }
-      }
+      SettingsSectionHeader(title: "Accent Preview")
+      accentPreview
 
       SettingsSectionHeader(title: "Accent Color")
       LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
@@ -61,7 +34,7 @@ struct AppearanceSettingsView: View {
                 Spacer(minLength: 0)
                 if appearance == name {
                   Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(color(for: name))
+                    .foregroundStyle(readableColor(for: name))
                 }
               }
               Text(name)
@@ -71,13 +44,15 @@ struct AppearanceSettingsView: View {
             .padding(14)
             .frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
             .background(
-              Color(uiColor: .secondarySystemGroupedBackground).opacity(0.96),
+              appearance == name
+                ? color(for: name).opacity(colorScheme == .dark ? 0.16 : 0.10)
+                : Color(uiColor: .secondarySystemGroupedBackground).opacity(0.96),
               in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
             .overlay {
               RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(
-                  appearance == name ? color(for: name).opacity(0.72) : Color.primary.opacity(0.05),
+                  appearance == name ? readableColor(for: name).opacity(0.78) : Color.primary.opacity(0.05),
                   lineWidth: appearance == name ? 1.5 : 1
                 )
                 .allowsHitTesting(false)
@@ -85,6 +60,7 @@ struct AppearanceSettingsView: View {
             .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
+          .accessibilityAddTraits(appearance == name ? .isSelected : [])
         }
       }
 
@@ -108,10 +84,55 @@ struct AppearanceSettingsView: View {
       }
     }
     .animation(.easeInOut(duration: 0.18), value: appearance)
-    .tint(accent.color)
-    .accentColor(accent.color)
+    .tint(readableTheme)
+    .accentColor(readableTheme)
     .navigationTitle("Appearance")
     .navigationBarTitleDisplayMode(.inline)
+  }
+
+  private var accentPreview: some View {
+    VStack(spacing: 15) {
+      Image(systemName: "camera.aperture")
+        .font(.system(size: 44, weight: .light))
+        .foregroundStyle(theme)
+        .shadow(color: theme.opacity(0.40), radius: 16)
+
+      Text(appearance.uppercased())
+        .font(.system(.headline, design: .rounded).weight(.semibold))
+        .tracking(3.5)
+
+      HStack(spacing: 16) {
+        ForEach(["bolt.fill", "viewfinder", "gearshape.fill"], id: \.self) { symbol in
+          Image(systemName: symbol)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(readableTheme)
+            .frame(width: 46, height: 46)
+            .background(theme.opacity(colorScheme == .dark ? 0.20 : 0.15), in: Circle())
+        }
+      }
+
+      Text("Your camera, your color")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 20)
+    .background(
+      LinearGradient(
+        colors: [
+          theme.opacity(colorScheme == .dark ? 0.22 : 0.18),
+          Color(uiColor: .secondarySystemGroupedBackground).opacity(0.98),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      ),
+      in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 22, style: .continuous)
+        .stroke(readableTheme.opacity(0.22), lineWidth: 1)
+        .allowsHitTesting(false)
+    }
   }
 
   private var customColorBinding: Binding<Color> {
@@ -138,6 +159,16 @@ struct AppearanceSettingsView: View {
       customRed: red,
       customGreen: green,
       customBlue: blue
+    )
+  }
+
+  private func readableColor(for name: String) -> Color {
+    CameraThemePalette.readableTextColor(
+      for: name,
+      customRed: red,
+      customGreen: green,
+      customBlue: blue,
+      colorScheme: colorScheme
     )
   }
 }

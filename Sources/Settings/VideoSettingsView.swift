@@ -2,6 +2,7 @@ import SwiftUI
 
 struct VideoSettingsView: View {
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @ObservedObject var camera: CameraManager
   var positionStats: () -> Void = {}
@@ -73,7 +74,7 @@ struct VideoSettingsView: View {
       Spacer()
       Text("LowPolyCam")
         .font(.subheadline.weight(.medium))
-        .foregroundStyle(theme.opacity(0.7))
+        .foregroundStyle(readableTheme.opacity(0.86))
     }
     .padding(.horizontal, 4)
     .padding(.top, 2)
@@ -89,12 +90,12 @@ struct VideoSettingsView: View {
 
       VStack(alignment: .leading, spacing: 3) {
         Text(
-          "\(camera.captureMode.rawValue) • \(camera.cameraPosition == .back ? "Rear" : "Front")"
+          "\(modeDisplayName) • \(camera.cameraPosition == .back ? "Rear" : "Front")"
         )
         .font(.headline)
         Text(qualitySummary)
           .font(.subheadline)
-          .foregroundStyle(theme.opacity(0.62))
+          .foregroundStyle(readableTheme.opacity(0.82))
           .lineLimit(2)
           .minimumScaleFactor(0.82)
       }
@@ -189,7 +190,7 @@ struct VideoSettingsView: View {
           subtitle: "Video size",
           symbol: "rectangle.inset.filled",
           selection: videoResolutionBinding,
-          options: camera.supportedResolutions.map { ($0, $0.rawValue) }
+          options: orderedVideoResolutions.map { ($0, $0.rawValue) }
         )
 
         SettingsOptionCard(
@@ -253,7 +254,7 @@ struct VideoSettingsView: View {
             subtitle: "Slo-Mo size",
             symbol: "rectangle.inset.filled",
             selection: slowMotionResolutionBinding,
-            options: camera.supportedSlowMotionResolutions.map { ($0, $0.rawValue) }
+            options: orderedSlowMotionResolutions.map { ($0, $0.rawValue) }
           )
 
           SettingsOptionCard(
@@ -376,7 +377,7 @@ struct VideoSettingsView: View {
       }
 
     case .sloMo:
-      HStack(alignment: .top, spacing: 12) {
+      LazyVGrid(columns: qualityColumns, spacing: 12) {
         NavigationLink {
           CapturePreferencesView(camera: camera)
         } label: {
@@ -403,7 +404,7 @@ struct VideoSettingsView: View {
       .buttonStyle(.plain)
 
     case .photo:
-      HStack(alignment: .top, spacing: 12) {
+      LazyVGrid(columns: qualityColumns, spacing: 12) {
         NavigationLink {
           CapturePreferencesView(camera: camera)
         } label: {
@@ -426,7 +427,7 @@ struct VideoSettingsView: View {
       AppearanceSettingsView()
     } label: {
       SettingsNavigationTile(
-        title: "Appearance", subtitle: "Colors, interface and theme", symbol: "sun.max",
+        title: "Appearance", subtitle: "Accent colors & preview", symbol: "sun.max",
         fullWidth: true)
     }
     .buttonStyle(.plain)
@@ -451,6 +452,24 @@ struct VideoSettingsView: View {
           .buttonStyle(.borderedProminent)
       }
     }
+  }
+
+  private var modeDisplayName: String {
+    switch camera.captureMode {
+    case .video: return "Video"
+    case .photo: return "Photo"
+    case .sloMo: return "Slo-Mo"
+    }
+  }
+
+  private var orderedVideoResolutions: [VideoResolution] {
+    let order: [VideoResolution] = [.p720, .p1080, .p4k]
+    return order.filter(camera.supportedResolutions.contains)
+  }
+
+  private var orderedSlowMotionResolutions: [VideoResolution] {
+    let order: [VideoResolution] = [.p720, .p1080, .p4k]
+    return order.filter(camera.supportedSlowMotionResolutions.contains)
   }
 
   private var qualitySummary: String {
@@ -571,7 +590,7 @@ private struct PhotoResolutionCard: View {
               Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 9, weight: .bold))
             }
-            .foregroundStyle(theme)
+            .foregroundStyle(readableTheme)
             .padding(.horizontal, 12)
             .frame(minHeight: 42)
             .background(theme.opacity(0.11), in: Capsule())

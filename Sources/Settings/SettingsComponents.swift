@@ -3,14 +3,22 @@ import SwiftUI
 struct SettingsNavigationContainer<Content: View>: View {
   @AppStorage("settingsInterfaceStyle") private var interfaceStyle = SettingsInterfaceStyle.system
     .rawValue
+  @Environment(\.colorScheme) private var systemColorScheme
+  private var accent = CameraAccent()
   let content: Content
 
   init(@ViewBuilder content: () -> Content) {
     self.content = content()
   }
 
+  private var effectiveColorScheme: ColorScheme {
+    SettingsInterfaceStyle.scheme(for: interfaceStyle) ?? systemColorScheme
+  }
+
   var body: some View {
     NavigationStack { content }
+      .environment(\.cameraReadableTint, accent.readableTextColor(for: effectiveColorScheme))
+      .tint(accent.readableTextColor(for: effectiveColorScheme))
       .preferredColorScheme(SettingsInterfaceStyle.scheme(for: interfaceStyle))
   }
 }
@@ -24,6 +32,7 @@ extension View {
 
 struct SettingsPage<Content: View>: View {
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   let content: Content
 
   init(@ViewBuilder content: () -> Content) {
@@ -49,7 +58,7 @@ struct SettingsPage<Content: View>: View {
       )
       .ignoresSafeArea()
     )
-    .tint(theme)
+    .tint(readableTheme)
   }
 }
 
@@ -202,6 +211,7 @@ struct SettingsSliderChildRow: View {
 
 struct SettingsSelectionControl<Value: Hashable>: View {
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   private var accent = CameraAccent()
   @Environment(\.isEnabled) private var isEnabled
   let title: String
@@ -288,7 +298,7 @@ struct SettingsSelectionControl<Value: Hashable>: View {
           Image(systemName: "chevron.up.chevron.down")
             .font(.system(size: 10, weight: .bold))
         }
-        .foregroundStyle(theme)
+        .foregroundStyle(readableTheme)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, minHeight: 44)
         .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
@@ -305,11 +315,12 @@ struct SettingsSelectionControl<Value: Hashable>: View {
       } label: {
         Text(label)
           .font(.caption.weight(.semibold))
-          .lineLimit(2)
-          .minimumScaleFactor(0.72)
+          .lineLimit(1)
+          .allowsTightening(true)
+          .minimumScaleFactor(0.62)
           .multilineTextAlignment(.center)
           .frame(maxWidth: .infinity, minHeight: 42)
-          .padding(.horizontal, 5)
+          .padding(.horizontal, 3)
           .foregroundStyle(
             !isEnabled
               ? Color.secondary : (value == selection ? accent.foregroundColor : Color.primary)
@@ -429,6 +440,7 @@ struct SettingsChoiceRow<Value: Hashable>: View {
 }
 
 struct SettingsMenuRow<Value: Hashable>: View {
+  @Environment(\.cameraReadableTint) private var readableTheme
   let title: String
   let subtitle: String
   let symbol: String
@@ -463,6 +475,7 @@ struct SettingsMenuRow<Value: Hashable>: View {
           Image(systemName: "chevron.up.chevron.down")
             .font(.system(size: 9, weight: .bold))
         }
+        .foregroundStyle(readableTheme)
         .padding(.horizontal, 11)
         .frame(minHeight: 40)
         .background(Color.primary.opacity(0.055), in: Capsule())
@@ -473,36 +486,47 @@ struct SettingsMenuRow<Value: Hashable>: View {
 }
 
 struct SettingsNavigationTile: View {
-  @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   let title: String
   let subtitle: String
   let symbol: String
   var fullWidth = false
 
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: 10) {
       SettingsSymbolBox(symbol: symbol)
       VStack(alignment: .leading, spacing: 3) {
         Text(title)
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(.primary)
           .lineLimit(2)
+          .allowsTightening(true)
+          .minimumScaleFactor(0.90)
         Text(subtitle)
           .font(.caption2)
           .foregroundStyle(.secondary)
           .lineLimit(2)
+          .allowsTightening(true)
+          .minimumScaleFactor(0.90)
       }
-      Spacer(minLength: 5)
-      Image(systemName: "chevron.right")
-        .font(.caption.weight(.bold))
-        .foregroundStyle(theme.opacity(0.7))
+      .layoutPriority(1)
+      Spacer(minLength: 0)
     }
-    .padding(13)
+    .padding(.leading, 12)
+    .padding(.vertical, 12)
+    .padding(.trailing, 30)
     .frame(maxWidth: .infinity, minHeight: fullWidth ? 74 : 92, alignment: .leading)
     .background(
       Color(uiColor: .secondarySystemGroupedBackground).opacity(0.96),
       in: RoundedRectangle(cornerRadius: 19, style: .continuous)
     )
+    .overlay(alignment: .trailing) {
+      Image(systemName: "chevron.right")
+        .font(.caption.weight(.bold))
+        .foregroundStyle(readableTheme.opacity(0.82))
+        .padding(.trailing, 12)
+        .allowsHitTesting(false)
+    }
     .overlay {
       RoundedRectangle(cornerRadius: 19, style: .continuous)
         .stroke(.primary.opacity(0.05), lineWidth: 1)
@@ -523,7 +547,7 @@ struct SettingsNavigationRow: View {
 }
 
 struct SettingsActionRow: View {
-  @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   let title: String
   let subtitle: String
   let symbol: String
@@ -541,7 +565,7 @@ struct SettingsActionRow: View {
         Spacer()
         Image(systemName: "chevron.right")
           .font(.caption.weight(.bold))
-          .foregroundStyle(theme.opacity(0.65))
+          .foregroundStyle(readableTheme.opacity(0.82))
       }
       .frame(maxWidth: .infinity, minHeight: 54)
       .contentShape(Rectangle())

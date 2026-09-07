@@ -213,12 +213,17 @@ final class CameraManager: NSObject, ObservableObject {
         let animate: Bool
     }
     private let zoomRequests = LatestValueMailbox<ZoomRequest>()
+    private enum PreviewRevealDecision {
+        case reveal
+        case replaceZoom(ZoomRequest)
+    }
+
     private final class PreviewHandoffOperation {
         let id: UInt64
         let request: PreviewTransitionRequest
         let isStillValid: () -> Bool
         let applyHardware: () -> Bool
-        let afterHardwareCommitted: (() -> Void)?
+        let beforePreviewReveal: ((String) -> PreviewRevealDecision)?
         let completion: (Bool) -> Void
         var started = false
         var finished = false
@@ -228,19 +233,27 @@ final class CameraManager: NSObject, ObservableObject {
             request: PreviewTransitionRequest,
             isStillValid: @escaping () -> Bool,
             applyHardware: @escaping () -> Bool,
-            afterHardwareCommitted: (() -> Void)?,
+            beforePreviewReveal: ((String) -> PreviewRevealDecision)?,
             completion: @escaping (Bool) -> Void
         ) {
             self.id = id
             self.request = request
             self.isStillValid = isStillValid
             self.applyHardware = applyHardware
-            self.afterHardwareCommitted = afterHardwareCommitted
+            self.beforePreviewReveal = beforePreviewReveal
             self.completion = completion
         }
     }
+
+    private struct DeferredMovieOutputPreparation {
+        let requestToken: CaptureRequestGate.Token
+        let request: CaptureConfigurationRequest
+        let deviceID: String
+    }
+
     private var previewTransitionSequence: UInt64 = 0
     private var activePreviewHandoff: PreviewHandoffOperation?
+    private var deferredMovieOutputPreparation: DeferredMovieOutputPreparation?
     private var pendingRecordIntentAfterHandoff = false
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
@@ -828,7 +841,7 @@ final class CameraManager: NSObject, ObservableObject {
         blocksControls: Bool,
         isStillValid: @escaping () -> Bool,
         applyHardware: @escaping () -> Bool,
-        afterHardwareCommitted: (() -> Void)? = nil,
+        beforePreviewReveal: ((String) -> PreviewRevealDecision)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
@@ -849,7 +862,7 @@ final class CameraManager: NSObject, ObservableObject {
             request: request,
             isStillValid: isStillValid,
             applyHardware: applyHardware,
-            afterHardwareCommitted: afterHardwareCommitted,
+            beforePreviewReveal: beforePreviewReveal,
             completion: completion
         )
         activePreviewHandoff = operation
@@ -910,16 +923,48 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        // Let the preview begin its readiness/reveal path as soon as the physical session commit
-        // has completed. Expensive recorder-connection cleanup may still run on sessionQueue below,
-        // but it no longer holds the visible optical cover closed.
-        DispatchQueue.main.async { [previewTransitionController] in
-            previewTransitionController.hardwareCommitted(id: id, deviceID: deviceID)
+        switch operation.beforePreviewReveal?(deviceID) ?? .reveal {
+        case .reveal:
+            // The active sensor is committed and any latest same-route held-drag zoom has already
+            // been reconciled. Only now may the preview sharpen, so 4K60 never exposes the boundary
+            // 1× value and then visibly catches up to the user's actual finger position.
+            DispatchQueue.main.async { [previewTransitionController] in
+                previewTransitionController.hardwareCommitted(id: id, deviceID: deviceID)
+            }
+            finishPreviewHandoff(operation, success: true, cancelVisual: false)
+
+        case .replaceZoom(let replacement):
+            // The user's newest held-drag value already wants the other physical lens again. Keep
+            // the existing optical cover alive and hand the same mailbox consumer directly to the
+            // replacement request. PreviewTransitionController will replace the visual identity
+            // without flashing the intermediate sensor clear.
+            finishPreviewHandoffForReplacement(operation)
+            applyZoomRequest(replacement) { [weak self] in
+                guard let self else { return }
+                DispatchQueue.main.async { [previewTransitionController] in
+                    // If the replacement was invalidated before it could create a new transition,
+                    // this safely clears the old cover. If it did replace it, the old ID is stale.
+                    previewTransitionController.cancel(id: id)
+                }
+                operation.completion(true)
+                self.flushPendingRecordIntentAfterHandoff()
+            }
         }
-        operation.afterHardwareCommitted?()
-        // Keep hardware/mailbox ownership until post-commit recorder preparation is complete so a
-        // reverse zoom or queued Record tap cannot race a connection that is still being refreshed.
-        finishPreviewHandoff(operation, success: true, cancelVisual: false)
+    }
+
+    private func finishPreviewHandoffForReplacement(_ operation: PreviewHandoffOperation) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard !operation.finished else { return }
+        operation.finished = true
+        if activePreviewHandoff === operation { activePreviewHandoff = nil }
+        if operation.request.blocksControls { publish { self.isPreviewTransitioning = false } }
+    }
+
+    private func flushPendingRecordIntentAfterHandoff() {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard activePreviewHandoff == nil, pendingRecordIntentAfterHandoff else { return }
+        pendingRecordIntentAfterHandoff = false
+        sessionQueue.async { [weak self] in self?.startOrStopRecording() }
     }
 
     private func previewHandoffWatchdogFired(id: UInt64) {
@@ -949,10 +994,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         operation.completion(success)
 
-        if pendingRecordIntentAfterHandoff {
-            pendingRecordIntentAfterHandoff = false
-            sessionQueue.async { [weak self] in self?.startOrStopRecording() }
-        }
+        flushPendingRecordIntentAfterHandoff()
     }
 
     private func cancelActivePreviewHandoff() {
@@ -966,19 +1008,151 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func drainZoomRequest() {
         guard let request = zoomRequests.take() else {
-            if zoomRequests.finish() {
+            let hasMore = zoomRequests.finish()
+            if hasMore {
                 sessionQueue.async { [weak self] in self?.drainZoomRequest() }
+            } else {
+                // Yield once before idle encoder preparation. A producer arriving at the handoff
+                // boundary can reacquire the mailbox first, keeping held zoom more responsive.
+                sessionQueue.async { [weak self] in self?.performDeferredMovieOutputPreparationIfZoomIdle() }
             }
             return
         }
         applyZoomRequest(request) { [weak self] in
             guard let self else { return }
             self.sessionQueue.async {
-                if self.zoomRequests.finish() {
+                let hasMore = self.zoomRequests.finish()
+                if hasMore {
                     // Yield between updates so record/configuration requests cannot be starved.
                     self.sessionQueue.async { [weak self] in self?.drainZoomRequest() }
+                } else {
+                    self.sessionQueue.async { [weak self] in self?.performDeferredMovieOutputPreparationIfZoomIdle() }
                 }
             }
+        }
+    }
+
+    private func queueDeferredMovieOutputPreparation(
+        requestToken: CaptureRequestGate.Token,
+        request: CaptureConfigurationRequest,
+        deviceID: String
+    ) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        deferredMovieOutputPreparation = DeferredMovieOutputPreparation(
+            requestToken: requestToken,
+            request: request,
+            deviceID: deviceID
+        )
+    }
+
+    private func performDeferredMovieOutputPreparationIfZoomIdle() {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard zoomRequests.isIdle, let preparation = deferredMovieOutputPreparation else { return }
+        deferredMovieOutputPreparation = nil
+
+        guard requestGate.isCurrent(preparation.requestToken),
+              captureLifecycleActive,
+              !pendingSessionRecovery,
+              !movieOutput.isRecording,
+              !recordingOperation.requested,
+              !recordingOperation.startIssued,
+              videoInput?.device.uniqueID == preparation.deviceID else { return }
+
+#if DEBUG
+        let signpostID = OSSignpostID(log: transitionLog)
+        os_signpost(.begin, log: transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID)
+        defer { os_signpost(.end, log: transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID) }
+#endif
+        // Best-effort idle preparation only. startRecording revalidates the exact current
+        // connection/settings before capture, so zoom responsiveness never weakens recording safety.
+        _ = configureMovieOutputSettings(
+            requestToken: preparation.requestToken,
+            request: preparation.request
+        )
+    }
+
+    private func reconcileLatestZoomBeforePreviewReveal(
+        requestID: CaptureRequestGate.Token
+    ) -> PreviewRevealDecision {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard requestGate.isCurrent(requestID),
+              let pending = zoomRequests.take(where: { $0.token == requestID }),
+              let currentDevice = videoInput?.device else { return .reveal }
+
+        let requestSnapshot = pending.configuration
+        let legalDevices = legalZoomDevicesForCurrentMode(request: requestSnapshot)
+        let recordingOrStarting = movieOutput.isRecording ||
+            recordingOperation.requested || recordingOperation.startIssued ||
+            recordingOperation.segmentActive || recordingOperation.finalizationPending
+        let domainDevices = recordingOrStarting || legalDevices.isEmpty ? [currentDevice] : legalDevices
+        let domain = CameraZoomController.displayedZoomDomain(
+            for: domainDevices,
+            currentDevice: currentDevice
+        )
+        let requested = pending.settleOpticalRoute
+            ? ZoomRoutingPolicy.settledZoom(requestSnapshot.displayedZoom, in: domain)
+            : CameraZoomController.clampDisplayedZoom(requestSnapshot.displayedZoom, to: domain)
+        let plan = CameraZoomController.planRequest(
+            displayedZoom: requested,
+            currentDevice: currentDevice,
+            availableDevices: legalDevices,
+            recordingOrStarting: recordingOrStarting,
+            interactive: !pending.settleOpticalRoute,
+            forcePhysicalOpticalRouting: usesPhysicalPreviewZoomRouting(requestSnapshot)
+        )
+
+        switch plan {
+        case .applyToCurrentDevice(let targetZoom):
+            _ = applyZoomToCurrentDevice(
+                targetZoom,
+                zoomRequest: pending,
+                requestID: requestID,
+                reportFailure: false
+            )
+            return .reveal
+        case .reconfigureLens:
+            return .replaceZoom(pending)
+        case .blockedPhysicalSwitch:
+            return .reveal
+        }
+    }
+
+    @discardableResult
+    private func applyZoomToCurrentDevice(
+        _ targetZoom: CGFloat,
+        zoomRequest: ZoomRequest,
+        requestID: CaptureRequestGate.Token,
+        reportFailure: Bool = true
+    ) -> Bool {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard requestGate.isCurrent(requestID), let device = videoInput?.device else { return false }
+        let factor = CameraZoomController.clampDisplayedZoom(
+            targetZoom,
+            to: CameraZoomController.activeDisplayedZoomRange(for: device)
+        )
+        let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
+        do {
+            if abs(device.videoZoomFactor - deviceFactor) >= 0.001 || device.isRampingVideoZoom {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                if zoomRequest.animate {
+                    device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
+                } else {
+                    if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+                    device.videoZoomFactor = deviceFactor
+                }
+            }
+            if requestGate.isCurrent(requestID) {
+                requestedZoom = factor
+                publishIfCurrent(requestID) {
+                    self.zoomFactor = factor
+                    self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
+                }
+            }
+            return true
+        } catch {
+            if reportFailure { showError("Couldn’t change the zoom.") }
+            return false
         }
     }
 
@@ -1058,21 +1232,20 @@ final class CameraManager: NSObject, ObservableObject {
                     }
                     return configured
                 },
-                afterHardwareCommitted: deferMovieOutputConfiguration ? { [weak self] in
-                    guard let self,
-                          self.requestGate.isCurrent(requestID),
-                          self.captureLifecycleActive,
-                          !self.pendingSessionRecovery,
-                          !self.movieOutput.isRecording else { return }
-#if DEBUG
-                    let signpostID = OSSignpostID(log: self.transitionLog)
-                    os_signpost(.begin, log: self.transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID)
-                    defer { os_signpost(.end, log: self.transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID) }
-#endif
-                    // Best-effort idle preparation. startRecording revalidates this connection again,
-                    // so a preview handoff is never rolled back just because encoder preparation fails.
-                    _ = self.configureMovieOutputSettings(requestToken: requestID, request: configurationRequest)
-                } : nil,
+                beforePreviewReveal: { [weak self] deviceID in
+                    guard let self else { return .reveal }
+                    let decision = self.reconcileLatestZoomBeforePreviewReveal(requestID: requestID)
+                    if case .reveal = decision,
+                       deferMovieOutputConfiguration,
+                       self.requestGate.isCurrent(requestID) {
+                        self.queueDeferredMovieOutputPreparation(
+                            requestToken: requestID,
+                            request: configurationRequest,
+                            deviceID: deviceID
+                        )
+                    }
+                    return decision
+                },
                 completion: { [weak self] success in
                     if !success, let self, self.requestGate.isCurrent(requestID) {
                         self.requestedZoom = previousRequested
@@ -1082,35 +1255,11 @@ final class CameraManager: NSObject, ObservableObject {
             )
 
         case .applyToCurrentDevice(let targetZoom):
-            guard requestGate.isCurrent(requestID), let device = videoInput?.device else {
-                completion()
-                return
-            }
-            let factor = CameraZoomController.clampDisplayedZoom(
-                targetZoom, to: CameraZoomController.activeDisplayedZoomRange(for: device)
+            _ = applyZoomToCurrentDevice(
+                targetZoom,
+                zoomRequest: zoomRequest,
+                requestID: requestID
             )
-            let deviceFactor = CameraZoomController.deviceZoom(forDisplayedZoom: factor, device: device)
-            do {
-                if abs(device.videoZoomFactor - deviceFactor) >= 0.001 || device.isRampingVideoZoom {
-                    try device.lockForConfiguration()
-                    defer { device.unlockForConfiguration() }
-                    if zoomRequest.animate {
-                        device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
-                    } else {
-                        if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
-                        device.videoZoomFactor = deviceFactor
-                    }
-                }
-                if requestGate.isCurrent(requestID) {
-                    requestedZoom = factor
-                    publishIfCurrent(requestID) {
-                        self.zoomFactor = factor
-                        self.zoomLabel = CameraZoomController.formattedLabel(for: factor)
-                    }
-                }
-            } catch {
-                showError("Couldn’t change the zoom.")
-            }
             completion()
         }
     }

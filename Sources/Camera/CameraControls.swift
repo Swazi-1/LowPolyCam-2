@@ -388,18 +388,18 @@ struct CameraLevelHost: View {
                 .allowsHitTesting(false)
             }
         }
-        .onAppear { updateMonitoring() }
-        .onChange(of: enabled) { _ in updateMonitoring() }
-        .onChange(of: isActive) { _ in updateMonitoring() }
-        .onDisappear { monitor.stop() }
-    }
-
-    private func updateMonitoring() {
-        if enabled && isActive {
-            monitor.start()
-        } else {
-            monitor.stop()
+        // Drive monitoring from one lifecycle identity instead of relying on the order in
+        // which onAppear, AppStorage restoration and scenePhase changes happen at launch.
+        // A true initial value now starts Core Motion after the view is actually mounted, and
+        // foreground/background changes deterministically restart/stop the same monitor.
+        .task(id: enabled && isActive) {
+            if enabled && isActive {
+                monitor.start()
+            } else {
+                monitor.stop()
+            }
         }
+        .onDisappear { monitor.stop() }
     }
 }
 
@@ -409,8 +409,27 @@ final class CameraLevelMonitor: ObservableObject {
     @Published private(set) var levelDeviation: Double = .infinity
 
     private let motionManager = CMMotionManager()
+    private let motionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "com.swazi.LowPolyCam.level-motion"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
     private var invalidSampleCount = 0
     private let invalidSamplesBeforeHiding = 6
+
+    // A persisted ON toggle is only considered healthy after a valid gravity sample arrives.
+    // Core Motion delivery happens off-main so cold camera/session setup cannot starve the stream.
+    private var wantsMonitoring = false
+    private var startupGeneration: UInt64 = 0
+    private var startupRetryCount = 0
+    private var startupRetryWorkItem: DispatchWorkItem?
+    private var healthWatchdogWorkItem: DispatchWorkItem?
+    private var receivedValidSampleThisAttempt = false
+    private var hasReceivedValidSample = false
+    private var lastMotionDeliveryUptime: TimeInterval?
 
     var isLevel: Bool {
         let tolerance = 1.5 * Double.pi / 180
@@ -418,47 +437,200 @@ final class CameraLevelMonitor: ObservableObject {
     }
 
     func start() {
-        guard motionManager.isDeviceMotionAvailable else {
-            markUnavailable(resetFilter: true)
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.start() }
             return
         }
-        guard !motionManager.isDeviceMotionActive else { return }
-
-        invalidSampleCount = 0
-        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
-        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, error in
-            guard let self else { return }
-            guard error == nil,
-                  let gravity = motion?.gravity,
-                  let targetAngle = CameraLevelMath.indicatorAngle(
-                    gravityX: gravity.x,
-                    gravityY: gravity.y
-                  ) else {
-                self.noteInvalidSample()
-                return
+        guard !wantsMonitoring else {
+            if !motionManager.isDeviceMotionActive && startupRetryWorkItem == nil {
+                startupRetryCount = 0
+                attemptStart()
             }
-
-            self.invalidSampleCount = 0
-            let nextAngle = self.isAvailable
-                ? CameraLevelMath.smooth(current: self.angle, target: targetAngle)
-                : targetAngle
-            let nextDeviation = abs(nextAngle)
-            if abs(self.angle - nextAngle) > 0.0005 { self.angle = nextAngle }
-            if abs(self.levelDeviation - nextDeviation) > 0.0005 { self.levelDeviation = nextDeviation }
-            if !self.isAvailable { self.isAvailable = true }
+            return
         }
+
+        wantsMonitoring = true
+        startupRetryCount = 0
+        hasReceivedValidSample = false
+        attemptStart()
     }
 
     func stop() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.stop() }
+            return
+        }
+        wantsMonitoring = false
+        startupGeneration &+= 1
+        cancelStartupRetry()
+        cancelHealthWatchdog()
         motionManager.stopDeviceMotionUpdates()
         markUnavailable(resetFilter: true)
+        lastMotionDeliveryUptime = nil
+        hasReceivedValidSample = false
+    }
+
+    private func attemptStart() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard wantsMonitoring else { return }
+
+        startupGeneration &+= 1
+        let generation = startupGeneration
+        receivedValidSampleThisAttempt = false
+        lastMotionDeliveryUptime = nil
+        cancelStartupRetry()
+        cancelHealthWatchdog()
+
+        guard motionManager.isDeviceMotionAvailable else {
+            markUnavailable(resetFilter: true)
+            scheduleStartupRetry(for: generation)
+            return
+        }
+
+        if motionManager.isDeviceMotionActive {
+            motionManager.stopDeviceMotionUpdates()
+        }
+
+        invalidSampleCount = 0
+        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
+        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: motionQueue) {
+            [weak self] motion, error in
+            let deliveredMotion = motion != nil
+            let targetAngle: Double?
+            if error == nil, let gravity = motion?.gravity {
+                targetAngle = CameraLevelMath.indicatorAngle(
+                    gravityX: gravity.x,
+                    gravityY: gravity.y
+                )
+            } else {
+                targetAngle = nil
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.handleMotionDelivery(
+                    generation: generation,
+                    deliveredMotion: deliveredMotion,
+                    targetAngle: targetAngle
+                )
+            }
+        }
+
+        scheduleStartupRetry(for: generation)
+    }
+
+    private func handleMotionDelivery(
+        generation: UInt64,
+        deliveredMotion: Bool,
+        targetAngle: Double?
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard wantsMonitoring, startupGeneration == generation else { return }
+
+        if deliveredMotion {
+            lastMotionDeliveryUptime = ProcessInfo.processInfo.systemUptime
+        }
+
+        guard let targetAngle else {
+            noteInvalidSample()
+            return
+        }
+
+        // Do not cancel launch recovery merely because Core Motion emitted an object. A real,
+        // finite gravity-derived angle proves the stream is useful and the Level toggle is ON.
+        receivedValidSampleThisAttempt = true
+        hasReceivedValidSample = true
+        cancelStartupRetry()
+        scheduleHealthWatchdog(for: generation)
+
+        invalidSampleCount = 0
+        let nextAngle = isAvailable
+            ? CameraLevelMath.smooth(current: angle, target: targetAngle)
+            : targetAngle
+        let nextDeviation = abs(nextAngle)
+        if abs(angle - nextAngle) > 0.0005 { angle = nextAngle }
+        if abs(levelDeviation - nextDeviation) > 0.0005 { levelDeviation = nextDeviation }
+        if !isAvailable { isAvailable = true }
+    }
+
+    private func scheduleStartupRetry(for generation: UInt64) {
+        guard CameraLevelLifecyclePolicy.shouldRetryStartup(
+            wantsMonitoring: wantsMonitoring,
+            receivedValidSample: receivedValidSampleThisAttempt,
+            retryCount: startupRetryCount
+        ) else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.wantsMonitoring,
+                  self.startupGeneration == generation,
+                  !self.receivedValidSampleThisAttempt else { return }
+
+            self.startupRetryWorkItem = nil
+            self.startupRetryCount += 1
+            if self.motionManager.isDeviceMotionActive {
+                self.motionManager.stopDeviceMotionUpdates()
+            }
+            self.attemptStart()
+        }
+        startupRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + CameraLevelLifecyclePolicy.startupRetryDelay,
+            execute: workItem
+        )
+    }
+
+    private func scheduleHealthWatchdog(for generation: UInt64) {
+        guard wantsMonitoring, hasReceivedValidSample else { return }
+        cancelHealthWatchdog()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.wantsMonitoring,
+                  self.startupGeneration == generation,
+                  self.hasReceivedValidSample else { return }
+
+            self.healthWatchdogWorkItem = nil
+            let now = ProcessInfo.processInfo.systemUptime
+            if !CameraLevelLifecyclePolicy.streamIsStale(
+                now: now,
+                lastDelivery: self.lastMotionDeliveryUptime
+            ) {
+                self.scheduleHealthWatchdog(for: generation)
+                return
+            }
+
+            // isDeviceMotionActive can remain true for a silent stream. Hide stale UI and perform
+            // one bounded launch-style recovery; the existing valid angle is preserved for resume.
+            self.markUnavailable(resetFilter: false)
+            self.startupRetryCount = 0
+            self.hasReceivedValidSample = false
+            if self.motionManager.isDeviceMotionActive {
+                self.motionManager.stopDeviceMotionUpdates()
+            }
+            self.attemptStart()
+        }
+        healthWatchdogWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + CameraLevelLifecyclePolicy.healthCheckInterval,
+            execute: workItem
+        )
+    }
+
+    private func cancelStartupRetry() {
+        startupRetryWorkItem?.cancel()
+        startupRetryWorkItem = nil
+    }
+
+    private func cancelHealthWatchdog() {
+        healthWatchdogWorkItem?.cancel()
+        healthWatchdogWorkItem = nil
     }
 
     private func noteInvalidSample() {
         invalidSampleCount += 1
-        // A single transient Core Motion miss must not visibly snap the indicator to horizontal.
-        // If the phone points nearly straight up/down for a sustained interval, roll is undefined;
-        // hide the meter while preserving the last valid angle for a clean resume.
+        // A single transient miss must not visibly snap the indicator to horizontal. If the phone
+        // points nearly straight up/down for a sustained interval, roll is undefined; hide the
+        // meter while preserving the last valid angle for a clean resume.
         if invalidSampleCount >= invalidSamplesBeforeHiding {
             markUnavailable(resetFilter: false)
         }
@@ -474,3 +646,4 @@ final class CameraLevelMonitor: ObservableObject {
         }
     }
 }
+

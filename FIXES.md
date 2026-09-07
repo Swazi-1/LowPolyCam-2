@@ -91,3 +91,14 @@ This source package can be syntax/regression validated on non-macOS hosts, but A
 - Preserved all existing persisted setting keys so an update does not reset user preferences.
 - Preserved special side effects: Stabilization uses CameraManager, Longevity uses applyLongevityMode, Live Stats/HUD monitoring refreshes remain explicit, Photo aspect refreshes the resolution catalog, Mirror Selfies uses the existing movie-output refresh observer, and Haptic Strength can still preview on reselect.
 - Added scripts/run-settings-regressions.sh and wired it into GitHub Actions to guard the critical setting-to-engine routes and persisted keys.
+
+### 2026-09-07 — 4K60 held-zoom reveal, Level startup health, Settings QA polish
+- Physical-lens handoffs now reconcile the newest same-gesture zoom value on the newly committed sensor before the optical cover is allowed to sharpen. Rear 4K60 therefore no longer intentionally reveals the boundary 1x value and then catches up to the finger afterward.
+- If the newest held-drag value has already reversed across the physical lens boundary, the current cover is retained and ownership chains directly into the replacement lens handoff instead of exposing the temporary sensor for a clear frame.
+- Rear 4K60 movie-output/stabilization preparation is deferred until the interactive zoom mailbox is idle. Recording start still performs its normal exact connection/settings validation, and stale/device-mismatched preparation is discarded.
+- Level Meter Core Motion delivery now uses a dedicated serial operation queue. Startup is considered healthy only after a valid gravity-derived level sample, with bounded startup recovery and a freshness watchdog for a stream that reports active but stops delivering useful motion updates.
+- Restored the Accent Preview to Appearance and removed the duplicate Light/Dark/System selector from that submenu. Interface style remains available on the main Settings screen.
+- Added a contrast-safe accent-as-text variant for pale/custom themes while preserving the exact selected accent for fills, toggles, preview colors and selected backgrounds.
+- Settings selection labels are single-line/tightening rather than mid-word hyphenated, and navigation tiles prioritize text width so labels such as Medium, Viewfinder & HUD and Advanced Recording do not split or truncate at normal iPhone widths.
+- Root mode names use natural capitalization and supported resolution choices are presented 720p -> 1080p -> 4K while remaining capability-driven.
+- Added portable regressions for pre-reveal latest-value reconciliation, stale/new zoom generations, and Level Meter startup/stream-health policy.

@@ -3,6 +3,7 @@ import SwiftUI
 struct VideoPresetsView: View {
   @ObservedObject var camera: CameraManager
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   @Environment(\.dismiss) private var dismiss
   @State private var preview: VideoQuickPreset = .balanced
   private var accent = CameraAccent()
@@ -40,7 +41,7 @@ struct VideoPresetsView: View {
             VStack(alignment: .leading, spacing: 8) {
               HStack {
                 Image(systemName: preview == preset ? "checkmark.circle.fill" : "circle")
-                  .foregroundStyle(theme)
+                  .foregroundStyle(readableTheme)
                 Spacer()
               }
               Text(preset.rawValue)
@@ -62,7 +63,7 @@ struct VideoPresetsView: View {
             .overlay {
               RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(
-                  preview == preset ? theme.opacity(0.7) : Color.primary.opacity(0.05), lineWidth: 1
+                  preview == preset ? readableTheme.opacity(0.78) : Color.primary.opacity(0.05), lineWidth: 1
                 )
                 .allowsHitTesting(false)
             }

@@ -25,6 +25,23 @@ final class LatestValueMailbox<Value> {
         return value
     }
 
+    /// Atomically consumes the pending value only when it belongs to the currently executing
+    /// operation. This lets an optical handoff reconcile the latest same-gesture zoom before the
+    /// preview is revealed without accidentally stealing a newer generation.
+    func take(where predicate: (Value) -> Bool) -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = pending, predicate(value) else { return nil }
+        pending = nil
+        return value
+    }
+
+    var isIdle: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !draining && pending == nil
+    }
+
     /// Call after processing, even when the value was invalidated. The lock makes handing
     /// consumer ownership back to a concurrent producer atomic, preventing lost wakeups.
     func finish() -> Bool {

@@ -91,8 +91,16 @@ for key in cameraGridEnabled gridOpacity levelMeterEnabled; do
   grep -Fq "@AppStorage(\"$key\")" Sources/Settings/ViewfinderHUDSettingsView.swift
 done
 
-# The new interface-style key must be shared by the main Settings screen and Appearance page.
+# Interface style stays on the main Settings surface; Appearance is accent-only with a live preview.
 grep -Fq '@AppStorage("settingsInterfaceStyle")' Sources/Settings/VideoSettingsView.swift
-grep -Fq '@AppStorage("settingsInterfaceStyle")' Sources/Settings/AppearanceSettingsView.swift
+grep -Fq '@AppStorage("settingsInterfaceStyle")' Sources/Settings/SettingsComponents.swift
+if grep -Fq '@AppStorage("settingsInterfaceStyle")' Sources/Settings/AppearanceSettingsView.swift; then
+  echo "Appearance submenu must not duplicate Interface Style" >&2
+  exit 1
+fi
+require Sources/Settings/AppearanceSettingsView.swift 'SettingsSectionHeader(title: "Accent Preview")'
+require Sources/Settings/VideoSettingsView.swift 'subtitle: "Accent colors & preview"'
+require Sources/Settings/CameraTheme.swift 'readableTextColor'
+require Sources/Settings/SettingsComponents.swift '.lineLimit(1)'
 
 echo "Settings regression checks passed"

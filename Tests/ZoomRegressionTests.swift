@@ -30,9 +30,11 @@ private enum ZoomRegressionTests {
         opticalRouting()
         latestPendingValue()
         producerDuringConsumption()
+        pendingReconciliation()
         concurrentProducers()
         previewTransitionOwnership()
         levelMeterMath()
+        levelMeterLifecyclePolicy()
         print("Zoom regression tests passed")
     }
 
@@ -112,6 +114,31 @@ private enum ZoomRegressionTests {
         expect(mailbox.submit(40), "A producer after ownership release must schedule the next drain")
         expect(mailbox.take() == 40, "No wakeup may be lost at the idle handoff")
         expect(!mailbox.finish(), "Drain the final value")
+    }
+
+    private static func pendingReconciliation() {
+        struct TaggedZoom {
+            let generation: Int
+            let value: Int
+        }
+
+        let mailbox = LatestValueMailbox<TaggedZoom>()
+        expect(mailbox.submit(TaggedZoom(generation: 1, value: 100)), "Boundary zoom must acquire the consumer")
+        expect(mailbox.take()?.value == 100, "The consumer must begin at the optical boundary")
+        expect(!mailbox.submit(TaggedZoom(generation: 1, value: 115)), "Held drag stays under one consumer")
+        expect(!mailbox.submit(TaggedZoom(generation: 1, value: 127)), "Intermediate held values coalesce")
+        expect(!mailbox.submit(TaggedZoom(generation: 1, value: 134)), "The latest held value replaces the old one")
+        expect(mailbox.take(where: { $0.generation == 1 })?.value == 134,
+               "A physical handoff must reconcile the newest same-gesture zoom before preview reveal")
+        expect(!mailbox.finish(), "Consuming the pre-reveal value must release ownership when no work remains")
+        expect(mailbox.isIdle, "The mailbox must report idle after a complete pre-reveal reconciliation")
+
+        expect(mailbox.submit(TaggedZoom(generation: 2, value: 70)), "A reverse drag must start a fresh consumer")
+        expect(mailbox.take(where: { $0.generation == 1 }) == nil,
+               "An old handoff must never steal a newer zoom generation")
+        expect(mailbox.take(where: { $0.generation == 2 })?.value == 70,
+               "The newer reverse request must remain available for its own handoff")
+        expect(!mailbox.finish(), "The reverse request must release ownership exactly once")
     }
 
     private static func concurrentProducers() {
@@ -194,6 +221,28 @@ private enum ZoomRegressionTests {
                "Landscape-side tilt must fold smoothly toward level")
         expect(CameraLevelMath.indicatorAngle(gravityX: 0, gravityY: 0) == nil,
                "Face-up/down roll with no horizontal gravity must be treated as unavailable")
+    }
+
+    private static func levelMeterLifecyclePolicy() {
+        expect(CameraLevelLifecyclePolicy.shouldRetryStartup(
+            wantsMonitoring: true, receivedValidSample: false, retryCount: 0),
+               "A persisted ON level must retry when launch has not produced a valid sample")
+        expect(!CameraLevelLifecyclePolicy.shouldRetryStartup(
+            wantsMonitoring: true, receivedValidSample: true, retryCount: 0),
+               "One valid gravity sample must stop launch retries")
+        expect(!CameraLevelLifecyclePolicy.shouldRetryStartup(
+            wantsMonitoring: false, receivedValidSample: false, retryCount: 0),
+               "Turning Level OFF must suppress every retry")
+        expect(!CameraLevelLifecyclePolicy.shouldRetryStartup(
+            wantsMonitoring: true, receivedValidSample: false,
+            retryCount: CameraLevelLifecyclePolicy.maximumStartupRetries),
+               "Launch recovery must remain bounded")
+        expect(!CameraLevelLifecyclePolicy.streamIsStale(now: 10, lastDelivery: 9.5),
+               "A recent Core Motion delivery is healthy")
+        expect(CameraLevelLifecyclePolicy.streamIsStale(now: 10, lastDelivery: 8),
+               "An active-but-silent Core Motion stream must be recoverable")
+        expect(CameraLevelLifecyclePolicy.streamIsStale(now: 10, lastDelivery: nil),
+               "A stream that never delivered must be treated as stale")
     }
 
 }
