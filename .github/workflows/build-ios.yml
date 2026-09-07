@@ -44,8 +44,9 @@ jobs:
       - name: Show build environment
         run: xcodebuild -version
 
-      - name: Test zoom, recording, and settings regressions
+      - name: Test state, zoom, recording, and settings regressions
         run: |
+          bash scripts/run-state-regressions.sh
           bash scripts/run-zoom-regressions.sh
           bash scripts/run-recording-regressions.sh
           bash scripts/run-settings-regressions.sh
@@ -63,6 +64,16 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             clean build
+
+      - name: Verify Files app document sharing
+        run: |
+          set -euo pipefail
+          APP_PLIST="build/DerivedData/Build/Products/Release-iphoneos/LowPolyCam.app/Info.plist"
+          echo "Built Info.plist Files keys:"
+          /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Print :LSSupportsOpeningDocumentsInPlace" "$APP_PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UIFileSharingEnabled' "$APP_PLIST")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSSupportsOpeningDocumentsInPlace' "$APP_PLIST")" = "true"
 
       - name: Package unsigned IPA
         run: |

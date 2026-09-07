@@ -25,6 +25,7 @@ final class DiagnosticLogger {
     private let queue = DispatchQueue(label: "com.swazi.LowPolyCam.diagnostics", qos: .utility)
     private let queueKey = DispatchSpecificKey<UInt8>()
     private let fileManager = FileManager.default
+    private let documentsURL: URL
     private let directoryURL: URL
     private let logURL: URL
     private var handle: FileHandle?
@@ -37,9 +38,9 @@ final class DiagnosticLogger {
 
     private init() {
         queue.setSpecific(key: queueKey, value: 1)
-        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+        documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        directoryURL = documents.appendingPathComponent("LowPolyCam Logs", isDirectory: true)
+        directoryURL = documentsURL.appendingPathComponent("LowPolyCam Logs", isDirectory: true)
 
         let filenameFormatter = DateFormatter()
         filenameFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -48,7 +49,9 @@ final class DiagnosticLogger {
         logURL = directoryURL.appendingPathComponent(filename, isDirectory: false)
 
         do {
+            try fileManager.createDirectory(at: documentsURL, withIntermediateDirectories: true)
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            createFilesVisibilityMarkers()
             trimOldSessionLogs()
             if !fileManager.fileExists(atPath: logURL.path) {
                 fileManager.createFile(atPath: logURL.path, contents: nil)
@@ -65,6 +68,14 @@ final class DiagnosticLogger {
         } catch {
             handle = nil
         }
+    }
+
+
+    /// The active session log. Useful for the in-app Share sheet if Files indexing is delayed.
+    var currentLogFileURL: URL { logURL }
+
+    func flush() {
+        synchronized { handle?.synchronizeFile() }
     }
 
     func start() {
@@ -255,6 +266,27 @@ final class DiagnosticLogger {
         value
             .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+
+    private func createFilesVisibilityMarkers() {
+        let rootMarker = documentsURL.appendingPathComponent("LowPolyCam Diagnostic Logs.txt")
+        let folderMarker = directoryURL.appendingPathComponent("README.txt")
+        let rootText = """
+        LowPolyCam diagnostic logs are saved in the "LowPolyCam Logs" folder next to this file.
+        If you are reporting a bug, share the newest LowPolyCam-*.log file.
+        """
+        let folderText = """
+        This folder contains LowPolyCam diagnostic logs.
+        Newest session logs are named LowPolyCam-YYYY-MM-DD_HH-mm-ss.log.
+        """
+
+        if !fileManager.fileExists(atPath: rootMarker.path) {
+            try? rootText.write(to: rootMarker, atomically: true, encoding: .utf8)
+        }
+        if !fileManager.fileExists(atPath: folderMarker.path) {
+            try? folderText.write(to: folderMarker, atomically: true, encoding: .utf8)
+        }
     }
 
     private func trimOldSessionLogs() {

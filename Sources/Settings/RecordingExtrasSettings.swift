@@ -162,6 +162,19 @@ struct AdvancedRecordingSettingsView: View {
           )
         }
         .buttonStyle(.plain)
+        SettingsDivider()
+        ShareLink(item: DiagnosticLogger.shared.currentLogFileURL) {
+          SettingsNavigationRow(
+            title: "Export Diagnostic Log",
+            subtitle: "Share or save the current log to Files",
+            symbol: "square.and.arrow.up"
+          )
+        }
+        .simultaneousGesture(TapGesture().onEnded {
+          DiagnosticLogger.shared.action("Export Diagnostic Log pressed")
+          DiagnosticLogger.shared.flush()
+        })
+        .buttonStyle(.plain)
       }
     }
     .navigationTitle("Advanced Recording")
