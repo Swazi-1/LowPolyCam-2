@@ -186,7 +186,7 @@ struct VideoSettingsView: View {
         SettingsCard(title: "Photo", symbol: "camera.fill") {
             ThemeMenu(title: "Aspect Ratio", selection: $photoAspect, options: [("4:3", "4:3"), ("1:1", "1:1")])
             ThemeMenu(title: "Burst Photos", selection: $burstCount, options: [(5, "5"), (10, "10"), (15, "15")])
-            Text("Hold the shutter to take the selected number of photos. Each photo saves separately.").font(.caption).foregroundStyle(.secondary)
+            Text("Hold the shutter to burst. Release to stop early. Each photo saves separately.").font(.caption).foregroundStyle(.secondary)
             SettingsDivider()
             ThemeMenu(title: "Save Format", selection: $camera.photoFileFormat, options: [("HEIC", "HEIC"), ("JPEG", "JPEG")])
             Text("HEIC uses less storage. JPEG offers broader compatibility. Unsupported HEIC capture falls back to JPEG.")
@@ -196,18 +196,41 @@ struct VideoSettingsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Photo Quality")
                         .font(.subheadline.weight(.semibold))
-                    Text("Uses the maximum resolution supported by the active camera")
+                    Text("Captures at full sensor quality, then saves at the selected MP and aspect ratio")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(camera.currentPhotoResolutionLabel)
+                Menu {
+                    ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
+                        Button {
+                            camera.selectPhotoMegapixels(megapixels)
+                        } label: {
+                            if megapixels == camera.selectedPhotoMegapixels {
+                                Label("\(megapixels) MP", systemImage: "checkmark")
+                            } else {
+                                Text("\(megapixels) MP")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(camera.currentPhotoResolutionLabel)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                    }
                     .font(.caption.weight(.bold))
                     .foregroundStyle(theme)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(theme.opacity(0.13), in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
+        }
+        .onAppear { camera.updatePhotoAspectSelection(photoAspect) }
+        .onChange(of: photoAspect) { _, newAspect in
+            camera.updatePhotoAspectSelection(newAspect)
         }
     }
 
@@ -295,7 +318,7 @@ private struct CameraHUDSettingsMenu: View {
                         SettingsDivider()
                         SettingsToggleRow(
                             title: "Resolution",
-                            subtitle: camera.captureMode == .photo ? "Show current maximum photo resolution" : "Show selected video resolution",
+                            subtitle: camera.captureMode == .photo ? "Show selected photo resolution" : "Show selected video resolution",
                             isOn: $hudResolution
                         )
 

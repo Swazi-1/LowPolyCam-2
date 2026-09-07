@@ -276,20 +276,22 @@ struct CameraView: View {
                 }
                 Spacer()
                 if camera.captureMode == .photo {
-                    PhotoButton(isCapturing: camera.isCapturingPhoto) { shutterPressed() }
-                        .highPriorityGesture(
-                            LongPressGesture(minimumDuration: 0.45).exclusively(before: TapGesture())
-                                .onEnded { value in
-                                    guard !editingStats else { return }
-                                    switch value {
-                                    case .first:
-                                        cancelCountdown()
-                                        captureHaptic()
-                                        camera.captureBurst()
-                                    case .second: shutterPressed()
-                                    }
-                                }
-                        )
+                    PhotoButton(
+                        isCapturing: camera.isCapturingPhoto,
+                        onTap: {
+                            guard !editingStats else { return }
+                            shutterPressed()
+                        },
+                        onBurstStart: {
+                            guard !editingStats else { return }
+                            cancelCountdown()
+                            captureHaptic()
+                            camera.captureBurst()
+                        },
+                        onBurstEnd: {
+                            camera.stopBurst()
+                        }
+                    )
                 } else if camera.isRecording && recordingLock {
                     Image(systemName: "lock.fill")
                         .font(.title2).foregroundStyle(accent.color)

@@ -86,8 +86,10 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isPreviewTransitioning = false
     @Published private(set) var isLensTransitioning = false
     @Published private(set) var availableStorageBytes: Int64 = 0
-    @Published private(set) var currentPhotoResolutionLabel = "MAX"
+    @Published private(set) var currentPhotoResolutionLabel = "12 MP"
     @Published private(set) var currentPhotoPixelCount: Int64 = 12_000_000
+    @Published private(set) var selectedPhotoMegapixels = 12
+    @Published private(set) var supportedPhotoMegapixels = Array((1...12).reversed())
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
     @Published private(set) var supportedSlowMotionResolutions: [VideoResolution] = []
@@ -160,8 +162,13 @@ final class CameraManager: NSObject, ObservableObject {
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
     private var burstRemaining = 0
+    private var burstStopRequested = false
     private var burstAspect = "4:3"
+    private var burstMegapixels = 12
     private var pendingPhotoAspect = "4:3"
+    private var pendingPhotoMegapixels = 12
+    private var nativePhotoDimensions = CMVideoDimensions(width: 0, height: 0)
+    private var preferredPhotoMegapixels = 12
     private var processingPhoto = false
     private var photoCaptureFinished = false
     private var photoSaveResult: Bool?
@@ -275,6 +282,7 @@ final class CameraManager: NSObject, ObservableObject {
     private static let slowMotionResolutionKey = "selectedSlowMotionResolution"
     private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
     private static let videoStabilizationKey = "videoStabilizationEnabled"
+    private static let photoMegapixelsKey = "selectedPhotoMegapixels"
     private static let mediaSequenceKey = "lowPolyCamMediaSequence"
 
     override init() {
@@ -288,6 +296,11 @@ final class CameraManager: NSObject, ObservableObject {
         selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
         isVideoStabilizationEnabled = UserDefaults.standard.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
         super.init()
+        let savedPhotoMegapixels = UserDefaults.standard.integer(forKey: Self.photoMegapixelsKey)
+        preferredPhotoMegapixels = (1...12).contains(savedPhotoMegapixels) ? savedPhotoMegapixels : 12
+        selectedPhotoMegapixels = preferredPhotoMegapixels
+        currentPhotoResolutionLabel = "\(selectedPhotoMegapixels) MP"
+        currentPhotoPixelCount = Int64(selectedPhotoMegapixels) * 1_000_000
         if UserDefaults.standard.bool(forKey: "rememberCaptureMode"),
            let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
            let mode = CaptureMode(rawValue: saved) { captureMode = mode }
@@ -405,6 +418,8 @@ final class CameraManager: NSObject, ObservableObject {
     private func handleSessionInterrupted() {
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
+        burstRemaining = 0
+        burstStopRequested = true
         synchronizeTorchState()
         guard recordingState.requestsRecording || movieOutput.isRecording else { return }
 
@@ -500,7 +515,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var estimatedBytesPerPhoto: Double {
         let pixels = max(Double(currentPhotoPixelCount), 1)
         let bytesPerPixel = photoFileFormat == "HEIC" ? 0.22 : 0.48
-        return max(pixels * bytesPerPixel, photoFileFormat == "HEIC" ? 1_200_000 : 2_000_000)
+        return max(pixels * bytesPerPixel, photoFileFormat == "HEIC" ? 250_000 : 500_000)
     }
 
     func start() {
@@ -525,6 +540,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
+            self.burstStopRequested = true
             self.segmentTimer?.cancel()
             if self.movieOutput.isRecording {
                 self.transitionRecordingToFinalizing(resetClock: true)
@@ -545,6 +561,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
+            self.burstStopRequested = true
             self.segmentTimer?.cancel()
 
             // Keep hardware and UI in sync when the app/phone becomes inactive. iOS normally
@@ -1106,16 +1123,44 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func selectPhotoMegapixels(_ megapixels: Int) {
+        guard supportedPhotoMegapixels.contains(megapixels) else { return }
+        preferredPhotoMegapixels = megapixels
+        UserDefaults.standard.set(megapixels, forKey: Self.photoMegapixelsKey)
+        selectedPhotoMegapixels = megapixels
+        currentPhotoResolutionLabel = "\(megapixels) MP"
+        currentPhotoPixelCount = Int64(megapixels) * 1_000_000
+        refreshAvailableStorage()
+    }
+
+    func updatePhotoAspectSelection(_ aspect: String) {
+        sessionQueue.async { [weak self] in
+            guard let self,
+                  self.nativePhotoDimensions.width > 0,
+                  self.nativePhotoDimensions.height > 0 else { return }
+            self.updatePhotoMegapixelAvailability(for: self.nativePhotoDimensions, aspect: aspect)
+        }
+    }
+
     func captureBurst() {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
-        let count = UserDefaults.standard.integer(forKey: "burstCount")
-        guard [5, 10, 15].contains(count) else { return }
+        let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
+        let count = [5, 10, 15].contains(savedCount) ? savedCount : 5
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.burstRemaining = count
+            self.burstStopRequested = false
             self.burstAspect = UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
+            self.burstMegapixels = self.selectedPhotoMegapixels
             self.beginPhotoCapture()
+        }
+    }
+
+    func stopBurst() {
+        sessionQueue.async { [weak self] in
+            guard let self, self.burstRemaining > 0 else { return }
+            self.burstStopRequested = true
         }
     }
 
@@ -1124,6 +1169,8 @@ final class CameraManager: NSObject, ObservableObject {
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.burstRemaining = 0
+            self.burstStopRequested = false
             self.beginPhotoCapture()
         }
     }
@@ -2013,6 +2060,44 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func photoMegapixelOptions(for dimensions: CMVideoDimensions, aspect: String) -> [Int] {
+        let width = Double(dimensions.width)
+        let height = Double(dimensions.height)
+        guard width > 0, height > 0 else { return Array((1...12).reversed()) }
+
+        let pixels: Double
+        if aspect == "1:1" {
+            let side = min(width, height)
+            pixels = side * side
+        } else {
+            let targetRatio = width >= height ? (4.0 / 3.0) : (3.0 / 4.0)
+            if width / height > targetRatio {
+                let croppedWidth = height * targetRatio
+                pixels = croppedWidth * height
+            } else {
+                let croppedHeight = width / targetRatio
+                pixels = width * croppedHeight
+            }
+        }
+
+        let megapixels = pixels / 1_000_000.0
+        let rounded = megapixels.rounded()
+        let maximumNative = abs(megapixels - rounded) < 0.35 ? Int(rounded) : Int(megapixels.rounded(.down))
+        let maximum = max(1, min(12, maximumNative))
+        return Array((1...maximum).reversed())
+    }
+
+    private func updatePhotoMegapixelAvailability(for dimensions: CMVideoDimensions, aspect: String) {
+        let options = photoMegapixelOptions(for: dimensions, aspect: aspect)
+        let effective = options.contains(preferredPhotoMegapixels) ? preferredPhotoMegapixels : (options.first ?? 1)
+        publish {
+            self.supportedPhotoMegapixels = options
+            self.selectedPhotoMegapixels = effective
+            self.currentPhotoResolutionLabel = "\(effective) MP"
+            self.currentPhotoPixelCount = Int64(effective) * 1_000_000
+        }
+    }
+
     @discardableResult
     private func applyBestPhotoFormat(preferVirtualCamera: Bool = true) -> Bool {
         let devices = capabilityDevices(for: cameraPosition.avPosition)
@@ -2046,6 +2131,7 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
+        nativePhotoDimensions = photoChoice.dimensions
         isUsingVideoPreviewProxy = false
         isUsingSlowMotionPreview = false
         let minimum = minimumSupportedZoom(for: desiredDevice)
@@ -2057,9 +2143,11 @@ final class CameraManager: NSObject, ObservableObject {
             self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
-            self.currentPhotoResolutionLabel = self.formatSelector.photoResolutionLabel(for: photoChoice.dimensions)
-            self.currentPhotoPixelCount = Int64(photoChoice.dimensions.width) * Int64(photoChoice.dimensions.height)
         }
+        updatePhotoMegapixelAvailability(
+            for: photoChoice.dimensions,
+            aspect: UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
+        )
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
         return true
@@ -2464,12 +2552,16 @@ final class CameraManager: NSObject, ObservableObject {
         photoSaveResult = nil
         processingPhoto = false
         guard session.isRunning else {
+            burstRemaining = 0
+            burstStopRequested = false
             publish { self.isCapturingPhoto = false }
             showError("Camera isn’t ready yet.")
             return
         }
 
-        pendingPhotoAspect = burstRemaining > 0 ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
+        let isBurst = burstRemaining > 0
+        pendingPhotoAspect = isBurst ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
+        pendingPhotoMegapixels = isBurst ? burstMegapixels : selectedPhotoMegapixels
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
@@ -2482,7 +2574,7 @@ final class CameraManager: NSObject, ObservableObject {
         let settings = useHEIC
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-        settings.photoQualityPrioritization = burstRemaining > 0 ? .balanced : .quality
+        settings.photoQualityPrioritization = isBurst ? .balanced : .quality
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
@@ -2868,12 +2960,12 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             guard let self else { return }
             self.processingPhoto = true
             let filename = self.pendingPhotoFilename ?? self.nextMediaFilename(fileExtension: "jpg")
-            let square = self.pendingPhotoAspect == "1:1"
+            let aspect = self.pendingPhotoAspect
+            let megapixels = self.pendingPhotoMegapixels
             self.pendingPhotoFilename = nil
             self.storageQueue.async {
-                let result = square ? PhotoAspectProcessor.square(data) : data
-                guard let result else {
-                    self.showError("Couldn’t crop the photo. Please try again.")
+                guard let result = PhotoAspectProcessor.process(data, aspect: aspect, megapixels: megapixels) else {
+                    self.showError("Couldn’t process the photo. Please try again.")
                     self.completePhoto(saveSucceeded: false)
                     return
                 }
@@ -2902,10 +2994,11 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             photoSaveResult = nil
             processingPhoto = false
             burstRemaining = saveSucceeded ? max(0, burstRemaining - 1) : 0
-            if self.burstRemaining > 0 && self.session.isRunning {
+            if self.burstRemaining > 0 && !self.burstStopRequested && self.session.isRunning {
                 self.beginPhotoCapture()
             } else {
                 self.burstRemaining = 0
+                self.burstStopRequested = false
                 self.publish { self.isCapturingPhoto = false }
                 if saveSucceeded { self.postStatus("Photos saved to Photos") }
                 self.refreshAvailableStorage()
@@ -2918,15 +3011,6 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             if let error {
                 self.showError("Photo capture failed: \(error.localizedDescription)")
                 if !self.processingPhoto { self.photoSaveResult = false }
-            }
-            let size = resolvedSettings.photoDimensions
-            let side = min(size.width, size.height)
-            let displayed = self.pendingPhotoAspect == "1:1" ? CMVideoDimensions(width: side, height: side) : size
-            self.publish {
-                if displayed.width > 0 && displayed.height > 0 {
-                    self.currentPhotoResolutionLabel = self.formatSelector.photoResolutionLabel(for: displayed)
-                    self.currentPhotoPixelCount = Int64(displayed.width) * Int64(displayed.height)
-                }
             }
             self.finishPhotoIfReady()
         }

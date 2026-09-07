@@ -37,11 +37,12 @@ struct CameraFormatSelector {
                 continue
             }
 
-            // Max still-photo resolution always wins. For formats that produce the same
-            // max-resolution photo, prefer 30 fps and then the sharpest live-preview format.
+            // Max still-photo resolution always wins. When still resolution ties, prefer
+            // the sharpest live-preview format first so Photo mode never chooses a softer
+            // preview just because another format happens to include 30 fps.
             if candidate.photoPixels > current.photoPixels ||
-                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS && !current.supports30FPS) ||
-                (candidate.photoPixels == current.photoPixels && candidate.supports30FPS == current.supports30FPS && candidate.previewPixels > current.previewPixels) {
+                (candidate.photoPixels == current.photoPixels && candidate.previewPixels > current.previewPixels) ||
+                (candidate.photoPixels == current.photoPixels && candidate.previewPixels == current.previewPixels && candidate.supports30FPS && !current.supports30FPS) {
                 best = candidate
             }
         }

@@ -56,25 +56,66 @@ struct RecordButton: View {
 }
 
 struct PhotoButton: View {
-    @Environment(\.cameraTint) private var theme
     let isCapturing: Bool
-    let action: () -> Void
+    let onTap: () -> Void
+    let onBurstStart: () -> Void
+    let onBurstEnd: () -> Void
+
+    @State private var isPressing = false
+    @State private var burstStarted = false
+    @State private var holdTask: Task<Void, Never>?
 
     var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle()
-                    .stroke(.white, lineWidth: 4)
-                    .frame(width: 76, height: 76)
-                Circle()
-                    .fill(.white)
-                    .frame(width: 62, height: 62)
-                    .scaleEffect(isCapturing ? 0.86 : 1)
-            }
-            .animation(.easeOut(duration: 0.12), value: isCapturing)
+        ZStack {
+            Circle()
+                .stroke(.white, lineWidth: 4)
+                .frame(width: 76, height: 76)
+            Circle()
+                .fill(.white)
+                .frame(width: 62, height: 62)
+                .scaleEffect(isCapturing || isPressing ? 0.86 : 1)
         }
-        .disabled(isCapturing)
+        .animation(.easeOut(duration: 0.12), value: isCapturing || isPressing)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !isPressing else { return }
+                    isPressing = true
+                    burstStarted = false
+                    holdTask?.cancel()
+                    holdTask = Task { @MainActor in
+                        do { try await Task.sleep(nanoseconds: 450_000_000) } catch { return }
+                        guard isPressing else { return }
+                        burstStarted = true
+                        onBurstStart()
+                    }
+                }
+                .onEnded { _ in
+                    isPressing = false
+                    holdTask?.cancel()
+                    holdTask = nil
+                    if burstStarted {
+                        burstStarted = false
+                        onBurstEnd()
+                    } else {
+                        onTap()
+                    }
+                }
+        )
+        .onDisappear {
+            holdTask?.cancel()
+            holdTask = nil
+            isPressing = false
+            if burstStarted {
+                burstStarted = false
+                onBurstEnd()
+            }
+        }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Take photo")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onTap() }
     }
 }
 
