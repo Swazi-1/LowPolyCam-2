@@ -536,6 +536,7 @@ struct VideoSettingsView: View {
 
 private struct PhotoResolutionCard: View {
   @Environment(\.cameraTint) private var theme
+  @Environment(\.cameraReadableTint) private var readableTheme
   @ObservedObject var camera: CameraManager
 
   private var selectedOption: CameraManager.PhotoResolutionOption? {
