@@ -137,6 +137,14 @@ private enum ZoomRegressionTests {
         let a = PreviewTransitionRequest(id: 1, reason: .lens, targetDeviceID: "wide", blocksControls: false)
         let b = PreviewTransitionRequest(id: 2, reason: .lens, targetDeviceID: "ultra", blocksControls: false)
 
+        expect(a.usesScenePreservingOpticalBlend, "Physical lens handoffs must use the scene-preserving optical blend")
+        expect(PreviewTransitionRequest(id: 10, reason: .whiteBalanceInput, targetDeviceID: nil, blocksControls: false).usesScenePreservingOpticalBlend,
+               "WB input swaps must use the same scene-preserving physical handoff")
+        expect(!PreviewTransitionRequest(id: 11, reason: .cameraFlip, targetDeviceID: nil, blocksControls: true).usesScenePreservingOpticalBlend,
+               "Front/back flipping keeps its separate transition policy")
+        expect(!PreviewTransitionRequest(id: 12, reason: .configuration, targetDeviceID: nil, blocksControls: true).usesScenePreservingOpticalBlend,
+               "Ordinary configuration covers must not pretend to be an optical handoff")
+
         expect(transitions.begin(a) == nil, "The first transition must acquire visual ownership")
         expect(transitions.acknowledgeCovered(id: 1), "The current transition may acknowledge its cover")
         expect(transitions.begin(b) == a, "A reverse request must replace the old transition without clearing ownership")

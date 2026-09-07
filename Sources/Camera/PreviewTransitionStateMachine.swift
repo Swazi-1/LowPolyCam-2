@@ -13,6 +13,13 @@ struct PreviewTransitionRequest: Equatable {
     let targetDeviceID: String?
     let blocksControls: Bool
 
+    /// Optical handoffs should preserve the outgoing scene's color while the physical input
+    /// changes. Normal virtual-camera zoom never creates a lens request, so smooth 1080p paths
+    /// stay completely uncovered.
+    var usesScenePreservingOpticalBlend: Bool {
+        reason == .lens || reason == .whiteBalanceInput
+    }
+
     func bindingTargetDeviceID(_ deviceID: String) -> PreviewTransitionRequest {
         PreviewTransitionRequest(
             id: id, reason: reason, targetDeviceID: deviceID, blocksControls: blocksControls

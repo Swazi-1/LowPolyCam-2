@@ -60,3 +60,10 @@ This source package can be syntax/regression validated on non-macOS hosts, but A
 4. Reverse a drag during the blur; flip/mode/record at the handoff boundary; interrupt with Control Center, lock/background, then return. Verify no stuck cover, no stale zoom backlog, and preserved useful zoom state.
 5. Record/stop on every supported tested path and inspect saved dimensions, cadence, codec, audio, duration, and playback. The preview blur must never appear in media.
 6. Test Reduce Motion, optional monitoring off/on, and a warm device. Unsupported Ultra Wide HFR combinations must stay unavailable rather than being fabricated.
+
+## 2026-09-07 — iOS Camera-style physical lens transition tuning
+- Physical lens/WB input handoffs now use a scene-preserving blur instead of the dark Chrome material cover.
+- The outgoing preview is reduced to a tiny 12×20 scene plate plus an average scene color, then enlarged under the blur so the sensor gap keeps the outgoing scene tone instead of falling to black. UIKit-incomplete/near-empty captures are rejected and fall back to the live blur.
+- 4K60/Slo-Mo/Photo physical handoffs begin only after the optical cover has had two 60 Hz display opportunities; reverse requests already under cover remain immediate.
+- The incoming lens is revealed underneath the blur and then sharpened over a short dissolve, matching the observed iOS Camera transition shape more closely.
+- Normal virtual-camera zoom paths (for example supported 1080p rear zoom) do not create a physical-lens transition and remain uncovered.
