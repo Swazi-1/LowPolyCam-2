@@ -161,17 +161,23 @@ final class CameraManager: NSObject, ObservableObject {
     private var metricsTimer: DispatchSourceTimer?
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
+    private struct PhotoCaptureContext {
+        let aspect: String
+        let megapixels: Int
+        let filename: String
+        let isBurst: Bool
+    }
+
     private var burstRemaining = 0
     private var burstStopRequested = false
     private var burstAspect = "4:3"
     private var burstMegapixels = 12
-    private var pendingPhotoAspect = "4:3"
-    private var pendingPhotoMegapixels = 12
     private var nativePhotoDimensions = CMVideoDimensions(width: 0, height: 0)
     private var preferredPhotoMegapixels = 12
-    private var processingPhoto = false
-    private var photoCaptureFinished = false
-    private var photoSaveResult: Bool?
+    private var photoCaptureContexts: [Int64: PhotoCaptureContext] = [:]
+    private var activePhotoCaptureID: Int64?
+    private var activePhotoCaptureIsBurst = false
+    private var pendingPhotoSaves = 0
 
     private var videoInput: AVCaptureDeviceInput?
     private var requestedZoom: CGFloat = 1
@@ -179,7 +185,6 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingFocusReturnWorkItem: DispatchWorkItem?
-    private var pendingPhotoFilename: String?
     private let zoomRequests = RequestToken()
     private let cameraSwitchRequests = RequestToken()
     private let whiteBalanceRequests = RequestToken()
@@ -2548,9 +2553,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginPhotoCapture() {
-        photoCaptureFinished = false
-        photoSaveResult = nil
-        processingPhoto = false
+        guard activePhotoCaptureID == nil else { return }
         guard session.isRunning else {
             burstRemaining = 0
             burstStopRequested = false
@@ -2560,8 +2563,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let isBurst = burstRemaining > 0
-        pendingPhotoAspect = isBurst ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
-        pendingPhotoMegapixels = isBurst ? burstMegapixels : selectedPhotoMegapixels
+        let aspect = isBurst ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
+        let megapixels = isBurst ? burstMegapixels : selectedPhotoMegapixels
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
@@ -2574,12 +2577,24 @@ final class CameraManager: NSObject, ObservableObject {
         let settings = useHEIC
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-        settings.photoQualityPrioritization = isBurst ? .balanced : .quality
+
+        // Balanced is AVFoundation's default speed/quality tradeoff. It avoids the extra
+        // shot-to-shot latency of .quality while keeping more quality than .speed.
+        settings.photoQualityPrioritization = .balanced
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
         }
-        pendingPhotoFilename = nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg")
+
+        let captureID = settings.uniqueID
+        photoCaptureContexts[captureID] = PhotoCaptureContext(
+            aspect: aspect,
+            megapixels: megapixels,
+            filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
+            isBurst: isBurst
+        )
+        activePhotoCaptureID = captureID
+        activePhotoCaptureIsBurst = isBurst
         refreshAvailableStorage()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -2951,68 +2966,105 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraManager: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let captureID = photo.resolvedSettings.uniqueID
         guard error == nil, let data = photo.fileDataRepresentation() else {
+            sessionQueue.async {
+                self.photoCaptureContexts.removeValue(forKey: captureID)
+                self.burstStopRequested = true
+            }
             showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
-            completePhoto(saveSucceeded: false)
             return
         }
+
         sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.processingPhoto = true
-            let filename = self.pendingPhotoFilename ?? self.nextMediaFilename(fileExtension: "jpg")
-            let aspect = self.pendingPhotoAspect
-            let megapixels = self.pendingPhotoMegapixels
-            self.pendingPhotoFilename = nil
+            guard let self, let context = self.photoCaptureContexts[captureID] else { return }
+            self.pendingPhotoSaves += 1
+
             self.storageQueue.async {
-                guard let result = PhotoAspectProcessor.process(data, aspect: aspect, megapixels: megapixels) else {
+                guard let result = PhotoAspectProcessor.process(
+                    data,
+                    aspect: context.aspect,
+                    megapixels: context.megapixels
+                ) else {
                     self.showError("Couldn’t process the photo. Please try again.")
-                    self.completePhoto(saveSucceeded: false)
+                    self.completePhotoSave(captureID: captureID, context: context, success: false)
                     return
                 }
+
                 PHPhotoLibrary.shared().performChanges({
                     let request = PHAssetCreationRequest.forAsset()
                     let options = PHAssetResourceCreationOptions()
-                    options.originalFilename = filename
+                    options.originalFilename = context.filename
                     request.addResource(with: .photo, data: result, options: options)
                 }) { success, error in
-                    if !success { self.showError(error?.localizedDescription ?? "Couldn’t save the photo.") }
-                    self.completePhoto(saveSucceeded: success)
+                    if !success {
+                        self.showError(error?.localizedDescription ?? "Couldn’t save the photo.")
+                    }
+                    self.completePhotoSave(captureID: captureID, context: context, success: success)
                 }
             }
         }
     }
 
-    private func completePhoto(saveSucceeded: Bool) {
+    private func completePhotoSave(captureID: Int64, context: PhotoCaptureContext, success: Bool) {
         sessionQueue.async {
-            self.photoSaveResult = saveSucceeded
-            self.finishPhotoIfReady()
-        }
-    }
+            self.photoCaptureContexts.removeValue(forKey: captureID)
+            self.pendingPhotoSaves = max(0, self.pendingPhotoSaves - 1)
 
-    private func finishPhotoIfReady() {
-            guard photoCaptureFinished, let saveSucceeded = photoSaveResult else { return }
-            photoSaveResult = nil
-            processingPhoto = false
-            burstRemaining = saveSucceeded ? max(0, burstRemaining - 1) : 0
-            if self.burstRemaining > 0 && !self.burstStopRequested && self.session.isRunning {
-                self.beginPhotoCapture()
-            } else {
-                self.burstRemaining = 0
-                self.burstStopRequested = false
-                self.publish { self.isCapturingPhoto = false }
-                if saveSucceeded { self.postStatus("Photos saved to Photos") }
+            if !success {
+                self.burstStopRequested = true
+            } else if !context.isBurst {
+                self.postStatus("Photo saved to Photos")
+            } else if self.pendingPhotoSaves == 0,
+                      self.activePhotoCaptureID == nil,
+                      self.burstRemaining == 0 {
+                self.postStatus("Photos saved to Photos")
+            }
+
+            if self.pendingPhotoSaves == 0 {
                 self.refreshAvailableStorage()
             }
+        }
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        let captureID = resolvedSettings.uniqueID
         sessionQueue.async {
-            self.photoCaptureFinished = true
-            if let error {
-                self.showError("Photo capture failed: \(error.localizedDescription)")
-                if !self.processingPhoto { self.photoSaveResult = false }
+            guard self.activePhotoCaptureID == captureID else {
+                if error != nil {
+                    self.photoCaptureContexts.removeValue(forKey: captureID)
+                }
+                return
             }
-            self.finishPhotoIfReady()
+
+            let wasBurst = self.activePhotoCaptureIsBurst
+            self.activePhotoCaptureID = nil
+            self.activePhotoCaptureIsBurst = false
+
+            if let error {
+                self.photoCaptureContexts.removeValue(forKey: captureID)
+                self.burstRemaining = 0
+                self.burstStopRequested = false
+                self.publish { self.isCapturingPhoto = false }
+                self.showError("Photo capture failed: \(error.localizedDescription)")
+                return
+            }
+
+            if wasBurst {
+                self.burstRemaining = max(0, self.burstRemaining - 1)
+                if self.burstRemaining > 0 && !self.burstStopRequested && self.session.isRunning {
+                    self.beginPhotoCapture()
+                } else {
+                    self.burstRemaining = 0
+                    self.burstStopRequested = false
+                    self.publish { self.isCapturingPhoto = false }
+                }
+            } else {
+                // The hardware capture is finished. Cropping, resizing and Photos-library
+                // saving can continue on storageQueue without making the shutter feel stuck.
+                self.publish { self.isCapturingPhoto = false }
+            }
         }
     }
 }
+

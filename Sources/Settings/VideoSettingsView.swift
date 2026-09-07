@@ -6,6 +6,7 @@ struct VideoSettingsView: View {
     var positionStats: () -> Void = {}
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("burstCount") private var burstCount = 5
+    @State private var showingPhotoMegapixelMenu = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -201,22 +202,12 @@ struct VideoSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Menu {
-                    ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
-                        Button {
-                            camera.selectPhotoMegapixels(megapixels)
-                        } label: {
-                            if megapixels == camera.selectedPhotoMegapixels {
-                                Label("\(megapixels) MP", systemImage: "checkmark")
-                            } else {
-                                Text("\(megapixels) MP")
-                            }
-                        }
-                    }
+                Button {
+                    showingPhotoMegapixelMenu.toggle()
                 } label: {
                     HStack(spacing: 5) {
                         Text(camera.currentPhotoResolutionLabel)
-                        Image(systemName: "chevron.up.chevron.down")
+                        Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .bold))
                     }
                     .font(.caption.weight(.bold))
@@ -226,6 +217,32 @@ struct VideoSettingsView: View {
                     .background(theme.opacity(0.13), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .popover(isPresented: $showingPhotoMegapixelMenu) {
+                    VStack(spacing: 0) {
+                        ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
+                            Button {
+                                camera.selectPhotoMegapixels(megapixels)
+                                showingPhotoMegapixelMenu = false
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .opacity(megapixels == camera.selectedPhotoMegapixels ? 1 : 0)
+                                    Text("\(megapixels) MP")
+                                        .font(.system(size: 15, weight: .medium))
+                                    Spacer(minLength: 12)
+                                }
+                                .foregroundStyle(.primary)
+                                .frame(minWidth: 132, minHeight: 32)
+                                .padding(.horizontal, 12)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .presentationCompactAdaptation(.popover)
+                }
             }
         }
         .onAppear { camera.updatePhotoAspectSelection(photoAspect) }
