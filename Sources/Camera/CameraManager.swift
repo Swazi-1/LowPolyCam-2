@@ -881,15 +881,20 @@ final class CameraManager: NSObject, ObservableObject {
             device: prepared.device,
             format: prepared.format,
             frameRate: prepared.frameRate,
-            preparedReplacementInput: prepared.replacementInput
+            preparedReplacementInput: prepared.replacementInput,
+            refreshAuxiliaryOutputs: false
         ) else {
             requestedZoom = previousRequested
             return false
         }
 
-        // Input replacement can recreate the movie-output connection, so reapply its existing
-        // codec/bitrate/stabilization settings once. This does not rescan quality capabilities.
-        _ = configureMovieOutputSettings()
+        // Input replacement may recreate the movie-output connection, but on devices where the
+        // connection and its settings survive the swap, do not tear the encoder/stabilization
+        // configuration down and rebuild it again. That extra reset is especially expensive at
+        // 4K60 and is unnecessary when the desired settings are already in place.
+        if !movieOutputSettingsMatchCurrentConfiguration() {
+            _ = configureMovieOutputSettings()
+        }
         isUsingVideoPreviewProxy = false
         isUsingSlowMotionPreview = false
 
@@ -907,9 +912,13 @@ final class CameraManager: NSObject, ObservableObject {
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
 
-        return videoInput?.device.uniqueID == request.targetDeviceID &&
-            activeCaptureFormatMatches(request) &&
-            activeHardwareZoomMatches(request.requestedZoom, device: prepared.device)
+        // applyAtomicCaptureConfiguration has already validated the input replacement, locked the
+        // target device, applied the requested format/FPS/zoom, and successfully committed the
+        // capture-session transaction. Do not fail the transition on an immediate post-commit
+        // read-back: AVFoundation can report transient duration/zoom state while the new 4K60/HFR
+        // stream is still settling, which produced the false “Couldn’t finish…” message even though
+        // the lens switch itself completed correctly.
+        return true
     }
 
     private func beginCoveredPhysicalLensTransition(_ request: LensTransitionRequest) {
@@ -950,9 +959,11 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
 
-            // PreviewView itself now waits for AVCaptureVideoPreviewLayer to be rendering before it
-            // removes the blur, so no fixed 100 ms "hope the 4K preview is ready" delay is needed.
-            self.finishCoveredPhysicalLensTransition(request.id, revealDelay: 0.02)
+            // Keep the cover through the first part of the new stream settling. PreviewView also
+            // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
+            // can remain true across an input rebuild, so a tiny post-commit hold prevents the cover
+            // from disappearing on a stale pre-switch preview state.
+            self.finishCoveredPhysicalLensTransition(request.id, revealDelay: 0.10)
         }
     }
 
@@ -970,34 +981,6 @@ final class CameraManager: NSObject, ObservableObject {
         guard activeLensTransitionRequestID != nil else { return }
         activeLensTransitionRequestID = nil
         publish { self.isLensTransitioning = false }
-    }
-
-    private func activeCaptureFormatMatches(_ request: LensTransitionRequest) -> Bool {
-        guard let device = videoInput?.device else { return false }
-        let resolution: VideoResolution
-        let frameRate: Double
-        switch request.mode {
-        case .video:
-            resolution = request.videoResolution
-            frameRate = Double(request.videoFrameRate.rawValue)
-        case .sloMo:
-            resolution = request.slowMotionResolution
-            frameRate = Double(request.slowMotionFrameRate.rawValue)
-        case .photo:
-            return false
-        }
-
-        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-        guard dimensions.width == resolution.dimensions.width,
-              dimensions.height == resolution.dimensions.height else { return false }
-        let duration = device.activeVideoMinFrameDuration.seconds
-        return duration > 0 && abs(1 / duration - frameRate) < (request.mode == .sloMo ? 1 : 0.5)
-    }
-
-    private func activeHardwareZoomMatches(_ displayedZoom: CGFloat, device: AVCaptureDevice) -> Bool {
-        let snapped = snappedZoomFactor(displayedZoom, for: device)
-        let expected = deviceZoomFactor(for: snapped, device: device)
-        return abs(device.videoZoomFactor - expected) < 0.01
     }
 
     private func nextZoomRequestID() -> UInt64 {
@@ -1689,7 +1672,8 @@ final class CameraManager: NSObject, ObservableObject {
         format: AVCaptureDevice.Format,
         frameRate: Double,
         photoDimensions: CMVideoDimensions? = nil,
-        preparedReplacementInput: AVCaptureDeviceInput? = nil
+        preparedReplacementInput: AVCaptureDeviceInput? = nil,
+        refreshAuxiliaryOutputs: Bool = true
     ) -> CGFloat? {
         let oldInput = videoInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
@@ -1712,7 +1696,9 @@ final class CameraManager: NSObject, ObservableObject {
 
         session.beginConfiguration()
         var committed = false
-        configureLiveMetrics()
+        if refreshAuxiliaryOutputs {
+            configureLiveMetrics()
+        }
         defer {
             if !committed { session.commitConfiguration() }
         }
