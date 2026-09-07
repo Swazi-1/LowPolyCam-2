@@ -318,7 +318,11 @@ struct CameraView: View {
                         .frame(width: 76, height: 76)
                         .background(.black.opacity(0.6), in: Circle())
                         .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(captureOnly: true); camera.startOrStopRecording() }
+                        .onLongPressGesture(minimumDuration: 1) {
+                            DiagnosticLogger.shared.action("Locked recording stop hold completed")
+                            CameraHaptics.fire(captureOnly: true)
+                            camera.startOrStopRecording()
+                        }
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
@@ -379,6 +383,7 @@ struct CameraView: View {
     }
 
     private func shutterPressed() {
+        DiagnosticLogger.shared.trace("Shutter handler entered", category: "UI", metadata: ["mode": camera.captureMode.rawValue, "recording": String(camera.isRecording), "countdown": String(countdown)])
         if countdown > 0 { cancelCountdown(); return }
         if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
         guard !camera.isRecordingStarting, !camera.isFinalizingRecording,

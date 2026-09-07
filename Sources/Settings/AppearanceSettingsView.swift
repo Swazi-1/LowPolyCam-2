@@ -23,6 +23,7 @@ struct AppearanceSettingsView: View {
       LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
         ForEach(names, id: \.self) { name in
           Button {
+            DiagnosticLogger.shared.action("Accent color selected", metadata: ["accent": name])
             guard appearance != name else { return }
             appearance = name
           } label: {

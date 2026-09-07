@@ -36,6 +36,7 @@ struct VideoPresetsView: View {
       LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
         ForEach(VideoQuickPreset.allCases) { preset in
           Button {
+            DiagnosticLogger.shared.action("Video preset preview selected", metadata: ["preset": String(describing: preset)])
             preview = preset
           } label: {
             VStack(alignment: .leading, spacing: 8) {
@@ -75,6 +76,7 @@ struct VideoPresetsView: View {
       }
 
       Button {
+        DiagnosticLogger.shared.action("Apply video preset pressed", metadata: ["preset": String(describing: preview)])
         camera.applyQuickPreset(preview) { success in
           if success { dismiss() }
         }

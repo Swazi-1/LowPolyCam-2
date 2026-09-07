@@ -16,6 +16,7 @@ struct PermissionDeniedView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 Button("Open Settings") {
+                    DiagnosticLogger.shared.action("Open iOS Settings pressed")
                     guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                     UIApplication.shared.open(url)
                 }

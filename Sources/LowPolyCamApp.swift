@@ -6,6 +6,8 @@ struct LowPolyCamApp: App {
     private var accent = CameraAccent()
 
     init() {
+        DiagnosticLogger.shared.start()
+        DiagnosticLogger.shared.info("LowPolyCam app initialized", category: "App")
         // Set the haptics-during-recording policy before AVCaptureSession can activate audio.
         CameraHaptics.prepareSystemPolicy()
     }

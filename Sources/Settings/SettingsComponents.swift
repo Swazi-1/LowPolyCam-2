@@ -170,6 +170,9 @@ struct SettingsToggleRow: View {
       }
     }
     .tint(theme)
+    .onChange(of: isOn) { enabled in
+      DiagnosticLogger.shared.action("Settings toggle changed", metadata: ["setting": title, "enabled": String(enabled)])
+    }
     .frame(minHeight: 54)
   }
 }
@@ -197,6 +200,9 @@ struct SettingsSliderChildRow: View {
           Slider(value: $value, in: range)
             .tint(theme)
             .accessibilityLabel(title)
+            .onChange(of: value) { newValue in
+              DiagnosticLogger.shared.trace("Settings slider changed", category: "UI", metadata: ["setting": title, "value": String(format: "%.3f", newValue)])
+            }
           Text("\(Int((value * 100).rounded()))%")
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
@@ -354,6 +360,8 @@ struct SettingsSelectionControl<Value: Hashable>: View {
 
   private func commit(_ value: Value) {
     guard !disabledOptions.contains(value) else { return }
+    let tappedLabel = options.first(where: { $0.0 == value })?.1 ?? "unknown"
+    DiagnosticLogger.shared.action("Settings option selected", metadata: ["setting": title, "value": tappedLabel])
     if value == selection {
       if firesActionOnReselect { onSelect?(value) }
       return
@@ -495,6 +503,7 @@ struct SettingsMenuRow<Value: Hashable>: View {
       Menu {
         ForEach(options, id: \.0) { value, label in
           Button {
+            DiagnosticLogger.shared.action("Settings menu option selected", metadata: ["setting": title, "value": label])
             guard value != selection else { return }
             selection = value
           } label: {
@@ -592,7 +601,10 @@ struct SettingsActionRow: View {
   let action: () -> Void
 
   var body: some View {
-    Button(role: role, action: action) {
+    Button(role: role, action: {
+      DiagnosticLogger.shared.action("Settings action pressed", metadata: ["action": title])
+      action()
+    }) {
       HStack(spacing: 12) {
         SettingsSymbolBox(symbol: symbol)
         VStack(alignment: .leading, spacing: 3) {

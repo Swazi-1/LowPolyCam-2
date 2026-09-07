@@ -340,6 +340,7 @@ final class CameraManager: NSObject, ObservableObject {
         isVideoStabilizationEnabled = preferences.videoStabilizationEnabled
         selectedPhotoResolutionID = preferences.photoResolutionID
         super.init()
+        DiagnosticLogger.shared.info("CameraManager initialized", category: "CameraLifecycle")
         if let mode = preferences.rememberedCaptureMode() { captureMode = mode }
         if longevityModeEnabled {
             suppressPreferencePersistence = true
@@ -697,6 +698,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func start() {
+        DiagnosticLogger.shared.trace("Camera start requested", category: "CameraLifecycle")
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureLifecycleActive = true
@@ -719,6 +721,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        DiagnosticLogger.shared.trace("Camera stop requested", category: "CameraLifecycle")
         requestGate.invalidate(.zoom)
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -761,6 +764,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func appDidBecomeInactive() {
+        DiagnosticLogger.shared.trace("App became inactive", category: "CameraLifecycle")
         requestGate.invalidate(.zoom)
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -812,6 +816,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func appDidBecomeActive() {
+        DiagnosticLogger.shared.trace("App became active", category: "CameraLifecycle")
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.captureLifecycleActive = true
@@ -840,6 +845,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func toggleTorch() {
+        DiagnosticLogger.shared.trace("Torch toggle requested", category: "CameraAction", metadata: ["currentlyOn": String(isTorchOn), "available": String(torchAvailable)])
         sessionQueue.async { [weak self] in
             guard let self, let device = self.videoInput?.device, device.hasTorch else { return }
             if device.torchMode != .on && !device.isTorchAvailable {
@@ -891,6 +897,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func beginInteractiveZoom() {
+        DiagnosticLogger.shared.trace("Interactive zoom began", category: "Zoom", metadata: ["zoom": String(describing: zoomFactor)])
         // Keep the gesture token alive across samples so input swaps can complete while held.
         interactiveZoomRequestID = requestGate.next(.zoom)
     }
@@ -901,12 +908,14 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func endInteractiveZoom(_ requestedFactor: CGFloat) {
+        DiagnosticLogger.shared.trace("Interactive zoom ended", category: "Zoom", metadata: ["requested": String(describing: requestedFactor)])
         defer { interactiveZoomRequestID = nil }
         guard let token = currentInteractiveZoomToken() else { return }
         enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: false, requestID: token)
     }
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
+        DiagnosticLogger.shared.trace("Zoom set requested", category: "Zoom", metadata: ["requested": String(describing: requestedFactor)])
         interactiveZoomRequestID = nil
         enqueueZoomRequest(requestedFactor, settleOpticalRoute: true, animate: true, requestID: requestGate.next(.zoom))
     }
@@ -1386,6 +1395,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera() {
+        DiagnosticLogger.shared.trace("Camera switch requested", category: "CameraAction", metadata: ["from": cameraPosition.rawValue])
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
         let previous = cameraPosition
         let previousConfigurationRequest = makeConfigurationRequest()
@@ -1452,6 +1462,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectCaptureMode(_ mode: CaptureMode) {
+        DiagnosticLogger.shared.trace("Capture mode selected", category: "CameraAction", metadata: ["from": captureMode.rawValue, "to": mode.rawValue])
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, captureMode != mode else { return }
         let previousMode = captureMode
         let requestID = requestGate.next(.modeChange)
@@ -1651,6 +1662,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func applyLongevityMode(_ enabled: Bool) {
+        DiagnosticLogger.shared.trace("Longevity Mode changed", category: "Settings", metadata: ["enabled": String(enabled), "camera": cameraPosition.rawValue])
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording else {
             postStatus("Stop recording before changing Longevity Mode.")
             return
@@ -1734,6 +1746,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func captureBurst() {
+        DiagnosticLogger.shared.trace("Burst capture requested", category: "Photo")
         guard captureMode == .photo, isSessionRunning, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording, !isPreviewTransitioning else { return }
         let count = captureSettingsStore.burstCount
         isCapturingPhoto = true
@@ -1747,6 +1760,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     /// Stops a held burst after the photo currently in flight returns from the camera.
     func cancelBurst() {
+        DiagnosticLogger.shared.trace("Burst capture cancelled", category: "Photo")
         sessionQueue.async { [weak self] in
             guard let self, self.burstRemaining > 0 else { return }
             self.burstRemaining = 0
@@ -1754,6 +1768,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func capturePhoto() {
+        DiagnosticLogger.shared.trace("Photo capture requested", category: "Photo", metadata: ["format": photoFileFormat, "resolution": currentPhotoResolutionLabel])
         guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning else { return }
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
@@ -1763,6 +1778,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectPhotoResolution(_ option: PhotoResolutionOption) {
+        DiagnosticLogger.shared.trace("Photo resolution selected", category: "Settings", metadata: ["id": option.id, "label": option.label])
         guard supportedPhotoResolutions.contains(option), option.id != selectedPhotoResolutionID else { return }
         let token = requestGate.next(.photoSettings)
         preferenceStore.savePhotoResolutionID(option.id)
@@ -1794,24 +1810,28 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func focusAndExpose(at point: CGPoint) {
+        DiagnosticLogger.shared.trace("Tap focus/exposure", category: "Focus", metadata: ["x": String(describing: point.x), "y": String(describing: point.y)])
         sessionQueue.async { [weak self] in
             self?.configureFocusAndExposure(at: point, lockAfterFocusing: false)
         }
     }
 
     func lockFocusAndExposure(at point: CGPoint) {
+        DiagnosticLogger.shared.trace("Focus/exposure lock requested", category: "Focus", metadata: ["x": String(describing: point.x), "y": String(describing: point.y)])
         sessionQueue.async { [weak self] in
             self?.configureFocusAndExposure(at: point, lockAfterFocusing: true)
         }
     }
 
     func setExposureBias(_ bias: Float) {
+        DiagnosticLogger.shared.trace("Exposure bias changed", category: "Settings", metadata: ["bias": String(bias)])
         sessionQueue.async { [weak self] in
             self?.applyExposureBias(bias)
         }
     }
 
     func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
+        DiagnosticLogger.shared.trace("White balance selected", category: "Settings", metadata: ["preset": preset.rawValue])
         let requestID = requestGate.next(.whiteBalance)
         let configurationToken = requestGate.next(.configuration)
         requestGate.invalidate(.zoom)
@@ -1962,6 +1982,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectVideoCodec(_ codec: String) {
+        DiagnosticLogger.shared.trace("Video codec selected", category: "Settings", metadata: ["codec": codec, "mode": captureMode.rawValue])
         if longevityModeEnabled && captureMode == .video {
             postStatus("Turn off Longevity Mode before changing the codec.")
             return
@@ -1978,6 +1999,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectVideoCompression(_ compression: VideoCompression) {
+        DiagnosticLogger.shared.trace("Video compression selected", category: "Settings", metadata: ["compression": compression.rawValue, "mode": captureMode.rawValue])
         if longevityModeEnabled && captureMode == .video {
             postStatus("Turn off Longevity Mode before changing compression.")
             return
@@ -1987,6 +2009,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectResolution(_ resolution: VideoResolution) {
+        DiagnosticLogger.shared.trace("Video resolution selected", category: "Settings", metadata: ["resolution": resolution.rawValue])
         if longevityModeEnabled && captureMode == .video {
             postStatus("Turn off Longevity Mode before changing video quality.")
             return
@@ -2036,6 +2059,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
+        DiagnosticLogger.shared.trace("Video frame rate selected", category: "Settings", metadata: ["fps": frameRate.label])
         if longevityModeEnabled && captureMode == .video {
             postStatus("Turn off Longevity Mode before changing frame rate.")
             return
@@ -2085,6 +2109,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectSlowMotionResolution(_ resolution: VideoResolution) {
+        DiagnosticLogger.shared.trace("Slo-Mo resolution selected", category: "Settings", metadata: ["resolution": resolution.rawValue])
         guard resolution != selectedSlowMotionResolution else { return }
         let previous = selectedSlowMotionResolution
         let token = requestGate.next(.configuration)
@@ -2130,6 +2155,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
+        DiagnosticLogger.shared.trace("Slo-Mo frame rate selected", category: "Settings", metadata: ["fps": frameRate.label])
         guard frameRate != selectedSlowMotionFrameRate else { return }
         let previous = selectedSlowMotionFrameRate
         let token = requestGate.next(.configuration)
@@ -2175,6 +2201,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func setVideoStabilizationEnabled(_ enabled: Bool) {
+        DiagnosticLogger.shared.trace("Video stabilization changed", category: "Settings", metadata: ["enabled": String(enabled)])
         guard enabled != isVideoStabilizationEnabled else { return }
         let previous = isVideoStabilizationEnabled
         let token = requestGate.next(.configuration)
@@ -2221,6 +2248,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func refreshMovieOutputSettings() {
+        DiagnosticLogger.shared.trace("Movie output settings refresh requested", category: "Encoder")
         sessionQueue.async { [weak self] in
             guard let self,
                   !self.pendingSessionRecovery,
@@ -2234,6 +2262,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func startOrStopRecording() {
+        DiagnosticLogger.shared.trace("Record control requested", category: "Recording", metadata: ["lifecycle": String(describing: recordingLifecycle), "movieOutputRecording": String(movieOutput.isRecording)])
         guard captureMode == .video || captureMode == .sloMo else { return }
         let recordingRequest = makeConfigurationRequest()
         sessionQueue.async { [weak self] in
@@ -2294,6 +2323,7 @@ final class CameraManager: NSObject, ObservableObject {
 
 
     func applyQuickPreset(_ preset: VideoQuickPreset, completion: ((Bool) -> Void)? = nil) {
+        DiagnosticLogger.shared.trace("Quick preset selected", category: "Settings", metadata: ["preset": String(describing: preset)])
         guard !longevityModeEnabled else {
             postStatus("Turn off Longevity Mode before applying a quick preset.")
             completion?(false)
@@ -2498,6 +2528,7 @@ final class CameraManager: NSObject, ObservableObject {
         request suppliedRequest: CaptureConfigurationRequest? = nil,
         requestedDisplayedZoom: CGFloat? = nil
     ) -> CaptureConfigurationApplyResult? {
+        DiagnosticLogger.shared.trace("Atomic camera configuration entered", category: "Configuration", metadata: ["device": desiredDevice.uniqueID, "fps": String(frameRate)])
         let request = suppliedRequest ?? makeConfigurationRequest(displayedZoom: requestedDisplayedZoom)
         let intendedDisplayedZoom = requestedDisplayedZoom ?? request.displayedZoom
         guard let supportedRange = format.videoSupportedFrameRateRanges.first(where: {
@@ -3325,6 +3356,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
+        DiagnosticLogger.shared.trace("configureCurrentMode entered", category: "Configuration", metadata: ["phase": String(describing: phase), "mode": (suppliedRequest ?? makeConfigurationRequest()).mode.rawValue])
         let request = suppliedRequest ?? makeConfigurationRequest()
         var transaction = CaptureConfigurationTransaction()
         transaction.begin()
@@ -3339,6 +3371,7 @@ final class CameraManager: NSObject, ObservableObject {
         )
 
         if transaction.finish(success: success) {
+            DiagnosticLogger.shared.error("Camera configuration failed; rollback path entered", category: "Configuration", metadata: ["mode": request.mode.rawValue, "phase": String(describing: phase)])
             if !isRollingBackCaptureConfiguration {
                 _ = rollbackToLastSuccessfulCaptureConfiguration(excludingToken: requestToken)
             }
@@ -3351,6 +3384,7 @@ final class CameraManager: NSObject, ObservableObject {
         if phase == .preview && !deferMovieOutputConfiguration && !isRollingBackCaptureConfiguration {
             rememberStableCaptureConfiguration(request: request)
         }
+        DiagnosticLogger.shared.info("Camera configuration succeeded", category: "Configuration", metadata: ["mode": request.mode.rawValue, "phase": String(describing: phase)])
         return true
     }
 
@@ -3362,6 +3396,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request: CaptureConfigurationRequest
     ) -> Bool {
+        DiagnosticLogger.shared.trace("configureCurrentModeRaw entered", category: "Configuration", metadata: ["phase": String(describing: phase), "mode": request.mode.rawValue, "camera": request.position.rawValue])
         let requiresPhysicalWB = WhiteBalanceController.requiresPhysicalRearInput(
             preset: request.whiteBalancePreset,
             position: request.position
@@ -3425,6 +3460,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func rollbackToLastSuccessfulCaptureConfiguration(
         excludingToken requestToken: CaptureRequestGate.Token? = nil
     ) -> Bool {
+        DiagnosticLogger.shared.warning("Configuration rollback requested", category: "Configuration")
         guard let stable = lastSuccessfulCaptureConfiguration else { return false }
         if let requestToken, !requestGate.isCurrent(requestToken) {
             // A newer request owns the graph now; never let an older failed operation roll it back.
@@ -3671,6 +3707,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
+        DiagnosticLogger.shared.trace("Video format application entered", category: "Configuration")
         let request = suppliedRequest ?? makeConfigurationRequest()
         if let requestToken, !requestGate.isCurrent(requestToken) { return false }
         let devices = capabilityDevices(for: request.position.avPosition)
@@ -3784,6 +3821,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
+        DiagnosticLogger.shared.trace("Slo-Mo format application entered", category: "Configuration")
         let request = suppliedRequest ?? makeConfigurationRequest()
         if let requestToken, !requestGate.isCurrent(requestToken) { return false }
         let devices = capabilityDevices(for: request.position.avPosition)
@@ -4006,6 +4044,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
+        DiagnosticLogger.shared.trace("Movie output configuration entered", category: "Encoder", metadata: ["mode": (suppliedRequest ?? makeConfigurationRequest()).mode.rawValue, "codec": (suppliedRequest ?? makeConfigurationRequest()).codec, "compression": (suppliedRequest ?? makeConfigurationRequest()).compression.rawValue])
         let request = suppliedRequest ?? makeConfigurationRequest()
         if let requestToken, !requestGate.isCurrent(requestToken) { return false }
 
@@ -4141,6 +4180,7 @@ final class CameraManager: NSObject, ObservableObject {
                   let validatedSettings = validatedMovieOutputSettings(requestedSettings, for: connection) else {
                 return false
             }
+            DiagnosticLogger.shared.trace("Calling AVCaptureMovieFileOutput.setOutputSettings", category: "Encoder", metadata: ["signature": requestedSignature])
             movieOutput.setOutputSettings(validatedSettings, for: connection)
             applied = movieOutput.outputSettings(for: connection)
         }
@@ -4167,6 +4207,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         lastAppliedMovieSettingsSignature = requestedSignature
+        DiagnosticLogger.shared.info("Movie output settings applied", category: "Encoder", metadata: ["signature": requestedSignature])
         return true
     }
 
@@ -4197,6 +4238,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginPhotoCapture() {
+        DiagnosticLogger.shared.trace("beginPhotoCapture entered", category: "Photo", metadata: ["burstRemaining": String(burstRemaining)])
         guard session.isRunning else {
             burstRemaining = 0
             publish { self.isCapturingPhoto = false }
@@ -4255,6 +4297,7 @@ final class CameraManager: NSObject, ObservableObject {
         requestToken: CaptureRequestGate.Token,
         request: CaptureConfigurationRequest
     ) {
+        DiagnosticLogger.shared.trace("beginRecording entered", category: "Recording", metadata: ["mode": request.mode.rawValue, "codec": request.codec])
         guard requestGate.isCurrent(requestToken) else { return }
 
         func failStart(_ message: String? = nil) {
@@ -4388,6 +4431,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func retryRecoverableMedia() {
+        DiagnosticLogger.shared.trace("Recovery retry requested", category: "Recovery", metadata: ["items": String(recoverableMediaCount)])
         sessionQueue.async { [weak self] in
             guard let self else { return }
             let inventory = CameraRecoveryStore.items()
@@ -4415,6 +4459,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func retryRecoverableRecordings() {
+        DiagnosticLogger.shared.trace("Recording recovery retry requested", category: "Recovery", metadata: ["recordings": String(recoverableRecordingCount)])
         retryRecoverableMedia()
     }
 
@@ -4535,6 +4580,7 @@ final class CameraManager: NSObject, ObservableObject {
         runDiagnostics: Bool,
         recoveryRetry: Bool = false
     ) {
+        DiagnosticLogger.shared.trace("Video Photos import started", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "retry": String(recoveryRetry)])
         if runDiagnostics {
             diagnosticsGeneration &+= 1
             publish { self.lastFrameGaps = nil }
@@ -4565,6 +4611,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if recoveryRetry { self.recoveryRetryState.finish(fileURL) }
 
                 if success {
+                    DiagnosticLogger.shared.info("Video saved to Photos", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "retry": String(recoveryRetry)])
                     if let diagnosticsCopy {
                         ClipFrameDiagnostics.inspect(diagnosticsCopy) { [weak self] gaps in
                             try? FileManager.default.removeItem(at: diagnosticsCopy)
@@ -4577,6 +4624,7 @@ final class CameraManager: NSObject, ObservableObject {
                     }
                     self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
                 } else {
+                    DiagnosticLogger.shared.error("Video Photos import failed", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "error": error?.localizedDescription ?? "unknown"])
                     if let diagnosticsCopy { try? FileManager.default.removeItem(at: diagnosticsCopy) }
                     let preserved = CameraRecoveryStore.preserve(fileURL) != nil
                     self.showError(preserved
@@ -4595,6 +4643,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func savePhotoResourceToPhotos(_ fileURL: URL, recoveryRetry: Bool = false) {
+        DiagnosticLogger.shared.trace("Photo Photos import started", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "retry": String(recoveryRetry)])
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCreationRequest.forAsset()
             let options = PHAssetResourceCreationOptions()
@@ -4607,8 +4656,10 @@ final class CameraManager: NSObject, ObservableObject {
                 self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
                 if recoveryRetry { self.recoveryRetryState.finish(fileURL) }
                 if success {
+                    DiagnosticLogger.shared.info("Photo saved to Photos", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "retry": String(recoveryRetry)])
                     self.postStatus(recoveryRetry ? "Recovered photo saved to Photos" : "Saved to Photos")
                 } else {
+                    DiagnosticLogger.shared.error("Photo Photos import failed", category: "Recovery", metadata: ["file": fileURL.lastPathComponent, "error": error?.localizedDescription ?? "unknown"])
                     let retained = FileManager.default.fileExists(atPath: fileURL.path) ||
                         CameraRecoveryStore.preserve(fileURL) != nil
                     self.showError(retained
@@ -4623,6 +4674,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func postStatus(_ message: String) {
+        DiagnosticLogger.shared.info("Status: \(message)", category: "Status")
         publish {
             self.statusMessageID &+= 1
             self.statusMessage = message
@@ -4637,12 +4689,14 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func showError(_ message: String) {
+        DiagnosticLogger.shared.error(message, category: "AppError")
         postStatus(message)
     }
 }
 
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        DiagnosticLogger.shared.info("AVCaptureMovieFileOutput started recording", category: "Recording", metadata: ["file": fileURL.lastPathComponent])
         sessionQueue.async { [weak self] in
             guard let self else { return }
             // `startIssued` only describes the gap between startRecording(...) and this callback.
@@ -4687,6 +4741,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        DiagnosticLogger.shared.info("AVCaptureMovieFileOutput finished recording", category: "Recording", metadata: ["file": outputFileURL.lastPathComponent, "error": error?.localizedDescription ?? "none"])
         let successful = error == nil || (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true
 
         sessionQueue.async { [weak self] in
@@ -4804,6 +4859,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraManager: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        DiagnosticLogger.shared.info("AVCapturePhotoOutput finished processing photo", category: "Photo", metadata: ["id": String(photo.resolvedSettings.uniqueID), "error": error?.localizedDescription ?? "none"])
         let captureID = photo.resolvedSettings.uniqueID
         let data = error == nil ? photo.fileDataRepresentation() : nil
 

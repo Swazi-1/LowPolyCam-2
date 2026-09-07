@@ -56,7 +56,10 @@ struct VideoSettingsView: View {
       }
       .toolbar {
         ToolbarItem(placement: .navigationBarTrailing) {
-          Button("Done") { dismiss() }
+          Button("Done") {
+            DiagnosticLogger.shared.action("Settings Done pressed")
+            dismiss()
+          }
             .font(.body.weight(.semibold))
         }
       }
@@ -148,6 +151,7 @@ struct VideoSettingsView: View {
     HStack(spacing: 3) {
       ForEach(SettingsInterfaceStyle.allCases) { style in
         Button {
+          DiagnosticLogger.shared.action("Interface style selected", metadata: ["style": style.rawValue])
           guard interfaceStyle != style.rawValue else { return }
           interfaceStyle = style.rawValue
         } label: {
@@ -449,7 +453,10 @@ struct VideoSettingsView: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Button("Retry") { camera.retryRecoverableMedia() }
+        Button("Retry") {
+          DiagnosticLogger.shared.action("Recovery Retry pressed")
+          camera.retryRecoverableMedia()
+        }
           .font(.caption.weight(.bold))
           .buttonStyle(.borderedProminent)
       }
@@ -586,6 +593,7 @@ private struct PhotoResolutionCard: View {
           Menu {
             ForEach(camera.supportedPhotoResolutions) { option in
               Button {
+                DiagnosticLogger.shared.action("Photo resolution menu item pressed", metadata: ["value": option.label])
                 guard option.id != camera.selectedPhotoResolutionID else { return }
                 camera.selectPhotoResolution(option)
               } label: {

@@ -10,7 +10,11 @@ struct CameraIconButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: { CameraHaptics.fire(); action() }) {
+        Button(action: {
+            DiagnosticLogger.shared.action("Button pressed", metadata: ["button": accessibilityLabel])
+            CameraHaptics.fire()
+            action()
+        }) {
             Image(systemName: symbol)
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 48, height: 48)
@@ -38,7 +42,10 @@ struct RecordButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            DiagnosticLogger.shared.action(isRecording ? "Stop recording button pressed" : "Record button pressed")
+            action()
+        }) {
             ZStack {
                 Circle()
                     .fill(.white)
@@ -108,6 +115,7 @@ struct PhotoButton: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAction {
             guard isEnabled, !isCapturing else { return }
+            DiagnosticLogger.shared.action("Photo shutter accessibility action")
             action()
         }
         .onChange(of: isEnabled) { enabled in if !enabled { cancelPress() } }
@@ -137,6 +145,7 @@ struct PhotoButton: View {
             guard !Task.isCancelled, isPressActive else { return }
             isBurstActive = true
             pressTask = nil
+            DiagnosticLogger.shared.action("Photo shutter hold started burst")
             onBurstStart()
         }
     }
@@ -150,8 +159,10 @@ struct PhotoButton: View {
         isBurstActive = false
 
         if didStartBurst {
+            DiagnosticLogger.shared.action("Photo burst hold released")
             onBurstEnd()
         } else if isEnabled, !isCapturing {
+            DiagnosticLogger.shared.action("Photo shutter pressed")
             action()
         }
     }
@@ -176,6 +187,7 @@ struct CaptureModeSelector: View {
         HStack(spacing: 22) {
             ForEach(CameraManager.CaptureMode.allCases) { mode in
                 Button {
+                    DiagnosticLogger.shared.action("Capture mode button pressed", metadata: ["mode": mode.rawValue])
                     onSelect(mode)
                 } label: {
                     Text(mode.rawValue)
@@ -242,6 +254,7 @@ struct ProToolsPopup: View {
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                     Button("Reset") {
+                        DiagnosticLogger.shared.action("Exposure reset pressed")
                         camera.setExposureBias(0)
                     }
                     .font(.caption.weight(.semibold))
@@ -303,6 +316,9 @@ struct ProToolsPopup: View {
                 .overlay(.white.opacity(0.15))
 
             Toggle("Level Meter", isOn: $isLevelMeterEnabled)
+                .onChange(of: isLevelMeterEnabled) { enabled in
+                    DiagnosticLogger.shared.action("Level Meter toggle changed", metadata: ["enabled": String(enabled)])
+                }
                 .font(.subheadline.weight(.semibold))
                 .tint(theme)
         }

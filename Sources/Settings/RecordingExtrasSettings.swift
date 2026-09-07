@@ -67,11 +67,15 @@ struct LiveStatsOverlay: View {
         VStack {
           HStack {
             Button("Reset") {
+              DiagnosticLogger.shared.action("HUD position reset pressed")
               x = 0.5
               y = 0.28
             }
             Spacer()
-            Button("Done", action: finish).font(.body.weight(.bold))
+            Button("Done") {
+              DiagnosticLogger.shared.action("HUD position editor done pressed")
+              finish()
+            }.font(.body.weight(.bold))
           }
           .padding().background(.black.opacity(0.85), in: Capsule())
           Spacer()
