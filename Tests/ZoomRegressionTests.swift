@@ -32,6 +32,7 @@ private enum ZoomRegressionTests {
         producerDuringConsumption()
         concurrentProducers()
         previewTransitionOwnership()
+        levelMeterMath()
         print("Zoom regression tests passed")
     }
 
@@ -164,6 +165,35 @@ private enum ZoomRegressionTests {
         expect(transitions.activeRequest?.targetDeviceID == "front-wide", "The committed device identity must be retained")
         expect(transitions.cancel(id: 3), "Cancellation releases ownership once")
         expect(!transitions.cancel(id: 3), "Cancellation must not release the same ownership twice")
+    }
+
+    private static func levelMeterMath() {
+        func gravity(_ degrees: Double) -> (Double, Double) {
+            let radians = degrees * Double.pi / 180
+            return (sin(radians), -cos(radians))
+        }
+        func angle(_ degrees: Double) -> Double {
+            let vector = gravity(degrees)
+            return CameraLevelMath.indicatorAngle(gravityX: vector.0, gravityY: vector.1) ?? .nan
+        }
+
+        for cardinal in [0.0, 90.0, 180.0, 270.0] {
+            expect(abs(angle(cardinal)) < 0.000_001,
+                   "The level indicator must be horizontal at every cardinal device orientation")
+        }
+        let fortyFour = angle(44)
+        let fortyFive = angle(45)
+        let fortySix = angle(46)
+        expect(abs(fortyFive - fortyFour) < 2 * Double.pi / 180,
+               "Approaching 45 degrees must stay continuous")
+        expect(abs(fortySix - fortyFive) < 2 * Double.pi / 180,
+               "Passing 45 degrees must not snap to the opposite side")
+        expect(abs(angle(30) - 30 * Double.pi / 180) < 0.000_001,
+               "Portrait-side tilt must track the visible deviation")
+        expect(abs(angle(60) - 30 * Double.pi / 180) < 0.000_001,
+               "Landscape-side tilt must fold smoothly toward level")
+        expect(CameraLevelMath.indicatorAngle(gravityX: 0, gravityY: 0) == nil,
+               "Face-up/down roll with no horizontal gravity must be treated as unavailable")
     }
 
 }

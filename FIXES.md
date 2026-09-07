@@ -67,3 +67,9 @@ This source package can be syntax/regression validated on non-macOS hosts, but A
 - 4K60/Slo-Mo/Photo physical handoffs begin only after the optical cover has had two 60 Hz display opportunities; reverse requests already under cover remain immediate.
 - The incoming lens is revealed underneath the blur and then sharpened over a short dissolve, matching the observed iOS Camera transition shape more closely.
 - Normal virtual-camera zoom paths (for example supported 1080p rear zoom) do not create a physical-lens transition and remain uncovered.
+
+### 2026-09-07 — 4K60 handoff critical path + Level Meter
+- Rear 4K60 physical lens handoffs now announce the committed sensor to the preview before refreshing recorder-only movie connection settings/stabilization. Record taps remain serialized behind that preparation, and recording start still re-validates the exact output connection.
+- Physical input replacement no longer invalidates the movie settings signature solely because topology changed; the actual new connection settings are inspected and repaired when needed.
+- Added the required Motion usage description for the Core Motion level meter.
+- Level Meter now uses continuous cardinal-folded roll math: horizontal/level at 0/90/180/270 degrees without the old ~45-degree snap, hides when motion roll is genuinely unavailable instead of showing a fake straight line, and tolerates brief invalid samples without resetting.

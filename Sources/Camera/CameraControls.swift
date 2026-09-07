@@ -344,8 +344,10 @@ struct CameraLevelOverlay: View {
                 .rotationEffect(.radians(-angle))
         }
         .frame(width: 260, height: 72)
-        .opacity(isAvailable ? 1 : 0.30)
+        .opacity(isAvailable ? 1 : 0)
         .animation(.easeOut(duration: 0.10), value: isLevel)
+        .animation(.easeOut(duration: 0.12), value: isAvailable)
+        .accessibilityHidden(!isAvailable)
         .accessibilityLabel(isLevel ? "Camera level" : "Camera not level")
     }
 }
@@ -407,8 +409,8 @@ final class CameraLevelMonitor: ObservableObject {
     @Published private(set) var levelDeviation: Double = .infinity
 
     private let motionManager = CMMotionManager()
-    private var lastRawRoll: Double?
-    private var unwrappedRoll: Double = 0
+    private var invalidSampleCount = 0
+    private let invalidSamplesBeforeHiding = 6
 
     var isLevel: Bool {
         let tolerance = 1.5 * Double.pi / 180
@@ -417,40 +419,30 @@ final class CameraLevelMonitor: ObservableObject {
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
-            isAvailable = false
+            markUnavailable(resetFilter: true)
             return
         }
         guard !motionManager.isDeviceMotionActive else { return }
 
+        invalidSampleCount = 0
         motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
         motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, error in
             guard let self else { return }
-            guard error == nil, let gravity = motion?.gravity else {
-                self.resetMeasurement()
+            guard error == nil,
+                  let gravity = motion?.gravity,
+                  let targetAngle = CameraLevelMath.indicatorAngle(
+                    gravityX: gravity.x,
+                    gravityY: gravity.y
+                  ) else {
+                self.noteInvalidSample()
                 return
             }
 
-            let horizonStrength = hypot(gravity.x, gravity.y)
-            guard horizonStrength > 0.06 else {
-                self.resetMeasurement()
-                return
-            }
-
-            let rawRoll = atan2(gravity.x, -gravity.y)
-            let nextAngle: Double
-            if let lastRawRoll = self.lastRawRoll {
-                // Unwrap the -π/+π boundary so the indicator keeps rotating continuously.
-                let delta = atan2(sin(rawRoll - lastRawRoll), cos(rawRoll - lastRawRoll))
-                self.unwrappedRoll += delta
-                nextAngle = self.angle + (self.unwrappedRoll - self.angle) * 0.50
-            } else {
-                self.unwrappedRoll = rawRoll
-                nextAngle = rawRoll
-            }
-            self.lastRawRoll = rawRoll
-            let quarterTurn = Double.pi / 2
-            let nearestLevel = (nextAngle / quarterTurn).rounded() * quarterTurn
-            let nextDeviation = abs(nextAngle - nearestLevel)
+            self.invalidSampleCount = 0
+            let nextAngle = self.isAvailable
+                ? CameraLevelMath.smooth(current: self.angle, target: targetAngle)
+                : targetAngle
+            let nextDeviation = abs(nextAngle)
             if abs(self.angle - nextAngle) > 0.0005 { self.angle = nextAngle }
             if abs(self.levelDeviation - nextDeviation) > 0.0005 { self.levelDeviation = nextDeviation }
             if !self.isAvailable { self.isAvailable = true }
@@ -459,14 +451,26 @@ final class CameraLevelMonitor: ObservableObject {
 
     func stop() {
         motionManager.stopDeviceMotionUpdates()
-        resetMeasurement()
+        markUnavailable(resetFilter: true)
     }
 
-    private func resetMeasurement() {
-        lastRawRoll = nil
-        unwrappedRoll = 0
-        angle = 0
+    private func noteInvalidSample() {
+        invalidSampleCount += 1
+        // A single transient Core Motion miss must not visibly snap the indicator to horizontal.
+        // If the phone points nearly straight up/down for a sustained interval, roll is undefined;
+        // hide the meter while preserving the last valid angle for a clean resume.
+        if invalidSampleCount >= invalidSamplesBeforeHiding {
+            markUnavailable(resetFilter: false)
+        }
+    }
+
+    private func markUnavailable(resetFilter: Bool) {
+        // Hide first so resetting internal state can never flash a fake horizontal "level" line.
+        if isAvailable { isAvailable = false }
         levelDeviation = .infinity
-        isAvailable = false
+        if resetFilter {
+            invalidSampleCount = 0
+            angle = 0
+        }
     }
 }

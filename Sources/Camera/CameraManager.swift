@@ -218,6 +218,7 @@ final class CameraManager: NSObject, ObservableObject {
         let request: PreviewTransitionRequest
         let isStillValid: () -> Bool
         let applyHardware: () -> Bool
+        let afterHardwareCommitted: (() -> Void)?
         let completion: (Bool) -> Void
         var started = false
         var finished = false
@@ -227,12 +228,14 @@ final class CameraManager: NSObject, ObservableObject {
             request: PreviewTransitionRequest,
             isStillValid: @escaping () -> Bool,
             applyHardware: @escaping () -> Bool,
+            afterHardwareCommitted: (() -> Void)?,
             completion: @escaping (Bool) -> Void
         ) {
             self.id = id
             self.request = request
             self.isStillValid = isStillValid
             self.applyHardware = applyHardware
+            self.afterHardwareCommitted = afterHardwareCommitted
             self.completion = completion
         }
     }
@@ -825,6 +828,7 @@ final class CameraManager: NSObject, ObservableObject {
         blocksControls: Bool,
         isStillValid: @escaping () -> Bool,
         applyHardware: @escaping () -> Bool,
+        afterHardwareCommitted: (() -> Void)? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
@@ -845,6 +849,7 @@ final class CameraManager: NSObject, ObservableObject {
             request: request,
             isStillValid: isStillValid,
             applyHardware: applyHardware,
+            afterHardwareCommitted: afterHardwareCommitted,
             completion: completion
         )
         activePreviewHandoff = operation
@@ -905,11 +910,15 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
+        // Let the preview begin its readiness/reveal path as soon as the physical session commit
+        // has completed. Expensive recorder-connection cleanup may still run on sessionQueue below,
+        // but it no longer holds the visible optical cover closed.
         DispatchQueue.main.async { [previewTransitionController] in
             previewTransitionController.hardwareCommitted(id: id, deviceID: deviceID)
         }
-        // Hardware ownership is released at the safe commit point. The visual cover remains
-        // until PreviewView's bounded readiness heuristic sees the committed target.
+        operation.afterHardwareCommitted?()
+        // Keep hardware/mailbox ownership until post-commit recorder preparation is complete so a
+        // reverse zoom or queued Record tap cannot race a connection that is still being refreshed.
         finishPreviewHandoff(operation, success: true, cancelVisual: false)
     }
 
@@ -1014,6 +1023,13 @@ final class CameraManager: NSObject, ObservableObject {
             let previousRequested = requestedZoom
             requestedZoom = targetZoom
             let configurationRequest = requestSnapshot.replacingDisplayedZoom(targetZoom)
+            // Rear 4K60 must use physical inputs on iPhone 11. Its movie/stabilization connection
+            // can be relatively expensive to rebuild, so commit the new sensor first and let the
+            // Apple-style preview reveal start before refreshing recorder-only connection state.
+            let deferMovieOutputConfiguration = requestSnapshot.mode == .video &&
+                requestSnapshot.position == .back &&
+                requestSnapshot.resolution == .p4k &&
+                requestSnapshot.frameRate == .fps60
 
             beginPreviewHandoff(
                 reason: .lens,
@@ -1033,6 +1049,7 @@ final class CameraManager: NSObject, ObservableObject {
                     let configured = self.configureCurrentMode(
                         phase: .preview,
                         preferVirtualCamera: forcePhysical ? false : nil,
+                        deferMovieOutputConfiguration: deferMovieOutputConfiguration,
                         requestToken: requestID,
                         request: configurationRequest
                     )
@@ -1041,6 +1058,21 @@ final class CameraManager: NSObject, ObservableObject {
                     }
                     return configured
                 },
+                afterHardwareCommitted: deferMovieOutputConfiguration ? { [weak self] in
+                    guard let self,
+                          self.requestGate.isCurrent(requestID),
+                          self.captureLifecycleActive,
+                          !self.pendingSessionRecovery,
+                          !self.movieOutput.isRecording else { return }
+#if DEBUG
+                    let signpostID = OSSignpostID(log: self.transitionLog)
+                    os_signpost(.begin, log: self.transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID)
+                    defer { os_signpost(.end, log: self.transitionLog, name: "PostCommitMoviePreparation", signpostID: signpostID) }
+#endif
+                    // Best-effort idle preparation. startRecording revalidates this connection again,
+                    // so a preview handoff is never rolled back just because encoder preparation fails.
+                    _ = self.configureMovieOutputSettings(requestToken: requestID, request: configurationRequest)
+                } : nil,
                 completion: { [weak self] success in
                     if !success, let self, self.requestGate.isCurrent(requestID) {
                         self.requestedZoom = previousRequested
@@ -2243,9 +2275,10 @@ final class CameraManager: NSObject, ObservableObject {
             }
             session.addInput(replacementInput)
             videoInput = replacementInput
-            // A topology change produces a new movie connection even if codec/compression did not
-            // change, so the connection-dependent no-op signature must be rebuilt once.
-            lastAppliedMovieSettingsSignature = nil
+            // A topology change can produce a new movie connection, but outputSettings(for:)
+            // remains the authority. Keep the requested signature so an already-correct new
+            // connection stays a true no-op; configureMovieOutputSettings still inspects and
+            // repairs the actual connection before recording.
         }
 
         var deviceLocked = false
@@ -2915,6 +2948,7 @@ final class CameraManager: NSObject, ObservableObject {
         phase: CaptureConfigurationPhase,
         preferVirtualCamera override: Bool? = nil,
         synchronizeWhiteBalance: Bool = true,
+        deferMovieOutputConfiguration: Bool = false,
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
@@ -2935,6 +2969,7 @@ final class CameraManager: NSObject, ObservableObject {
                 preferVirtualCamera: preferVirtualCamera,
                 phase: phase,
                 synchronizeWhiteBalance: synchronizeWhiteBalance,
+                deferMovieOutputConfiguration: deferMovieOutputConfiguration,
                 requestToken: requestToken,
                 request: request
             )
@@ -3140,6 +3175,7 @@ final class CameraManager: NSObject, ObservableObject {
         preferVirtualCamera: Bool = true,
         phase: CaptureConfigurationPhase,
         synchronizeWhiteBalance: Bool = true,
+        deferMovieOutputConfiguration: Bool = false,
         requestToken: CaptureRequestGate.Token? = nil,
         request suppliedRequest: CaptureConfigurationRequest? = nil
     ) -> Bool {
@@ -3224,7 +3260,9 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         previewPipeline = .native
-        guard configureMovieOutputSettings(requestToken: requestToken, request: request) else { return false }
+        if !deferMovieOutputConfiguration {
+            guard configureMovieOutputSettings(requestToken: requestToken, request: request) else { return false }
+        }
         let zoomDomain = publishedZoomDomain(legalDevices: supportedDevices, currentDevice: desiredDevice)
         publishIfCurrent(requestToken) {
             self.minimumZoomFactor = zoomDomain.lowerBound
