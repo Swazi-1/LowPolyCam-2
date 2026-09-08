@@ -190,6 +190,13 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingFocusReturnWorkItem: DispatchWorkItem?
+    private struct ZoomSubmission {
+        let factor: CGFloat
+        let requestID: UInt64
+    }
+    private let zoomSubmissionLock = NSLock()
+    private var pendingZoomSubmission: ZoomSubmission?
+    private var isZoomSubmissionScheduled = false
     private let zoomRequests = RequestToken()
     private let cameraSwitchRequests = RequestToken()
     private let whiteBalanceRequests = RequestToken()
@@ -658,11 +665,47 @@ final class CameraManager: NSObject, ObservableObject {
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
         let requestID = zoomRequests.next()
-        sessionQueue.async { [weak self] in
-            guard let self, self.zoomRequests.isLatest(requestID),
-                  let currentDevice = self.videoInput?.device else { return }
+        // A 60 Hz drag can outpace an expensive 4K60 lens handoff. Retain only the newest value
+        // instead of leaving obsolete device/format scans queued behind the current camera work.
+        zoomSubmissionLock.lock()
+        pendingZoomSubmission = ZoomSubmission(factor: requestedFactor, requestID: requestID)
+        let shouldSchedule = !isZoomSubmissionScheduled
+        if shouldSchedule { isZoomSubmissionScheduled = true }
+        zoomSubmissionLock.unlock()
 
-            let requested = min(max(requestedFactor, self.minimumZoomFactor), self.maximumZoomFactor)
+        guard shouldSchedule else { return }
+        sessionQueue.async { [weak self] in
+            self?.drainZoomSubmissions()
+        }
+    }
+
+    private func drainZoomSubmissions() {
+        while let submission = takePendingZoomSubmission() {
+            applyZoomSubmission(submission)
+        }
+    }
+
+    private func takePendingZoomSubmission() -> ZoomSubmission? {
+        zoomSubmissionLock.lock()
+        defer { zoomSubmissionLock.unlock() }
+        guard let submission = pendingZoomSubmission else {
+            isZoomSubmissionScheduled = false
+            return nil
+        }
+        pendingZoomSubmission = nil
+        return submission
+    }
+
+    private func applyZoomSubmission(_ submission: ZoomSubmission) {
+            let requestID = submission.requestID
+            guard zoomRequests.isLatest(requestID),
+                  let currentDevice = videoInput?.device else { return }
+
+            let requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
+            if !lensTransitionCoordinator.hasActiveTransition,
+               abs(requested - requestedZoom) < 0.0005 {
+                return
+            }
 
             // When rear 4K60 can stay on Apple's virtual Dual-Wide/Triple camera, keep the
             // capture session intact and let AVFoundation switch constituent cameras via zoom.
@@ -869,7 +912,6 @@ final class CameraManager: NSObject, ObservableObject {
             } catch {
                 self.showError("Couldn’t change the zoom.")
             }
-        }
     }
 
     private func applyVirtualLensZoom(_ request: LensTransitionCoordinator.Request, device: AVCaptureDevice) -> Bool {
