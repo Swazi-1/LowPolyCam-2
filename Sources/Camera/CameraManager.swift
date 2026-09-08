@@ -671,6 +671,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.torchAvailable = device.isTorchAvailable
                 self.isTorchOn = actualState
             }
+            AppEventLog.event("Torch applied: \(actualState ? "on" : "off") on \(device.localizedName)")
         } catch {
             synchronizeTorchState()
             if showErrorOnFailure { showError("Couldn’t change the torch.") }
@@ -989,6 +990,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
+        logAppliedCaptureConfiguration("Lens handoff")
 
         // applyAtomicCaptureConfiguration has already validated the input replacement, locked the
         // target device, applied the requested format/FPS/zoom, and successfully committed the
@@ -1029,6 +1031,7 @@ final class CameraManager: NSObject, ObservableObject {
             guard self.cameraSwitchRequests.isLatest(requestID) else { return }
             self.updateCapabilities()
             self.synchronizeTorchState()
+            AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")")
         }
     }
 
@@ -1047,6 +1050,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
             if success { self.synchronizeTorchState() }
+            AppEventLog.event("Capture mode \(success ? "applied" : "failed"): \(mode.rawValue)")
 
             self.publish {
                 self.isPreviewTransitioning = false
@@ -1266,6 +1270,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
+        AppEventLog.event("White balance requested: \(preset.rawValue)")
         let requestID = whiteBalanceRequests.next()
         sessionQueue.async { [weak self] in
             guard let self, self.whiteBalanceRequests.isLatest(requestID),
@@ -1294,6 +1299,7 @@ final class CameraManager: NSObject, ObservableObject {
                         self.whiteBalancePreset = preset
                         self.isPreviewTransitioning = false
                     }
+                    AppEventLog.event("White balance applied: \(preset.rawValue)")
                 } else {
                     self.requestedWhiteBalancePreset = previousPreset
                     _ = self.applyWhiteBalancePresetToCurrentCamera(previousPreset)
@@ -1326,6 +1332,8 @@ final class CameraManager: NSObject, ObservableObject {
                     self.showError(preset == .auto
                         ? "Couldn’t enable Auto white balance."
                         : "Manual white balance isn’t available on this lens.")
+                } else {
+                    AppEventLog.event("White balance applied after camera handoff: \(preset.rawValue)")
                 }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
@@ -2112,6 +2120,9 @@ final class CameraManager: NSObject, ObservableObject {
             }
             device.unlockForConfiguration()
             publish { self.isFocusExposureLocked = false }
+            AppEventLog.event(
+                "Focus/exposure applied: point=(\(String(format: "%.3f", clampedPoint.x)), \(String(format: "%.3f", clampedPoint.y))), lock requested=\(lockAfterFocusing)"
+            )
         } catch {
             showError("Couldn’t set focus and exposure.")
             return
@@ -2143,6 +2154,7 @@ final class CameraManager: NSObject, ObservableObject {
                     if canLockExposure { current.exposureMode = .locked }
                     current.unlockForConfiguration()
                     self.publish { self.isFocusExposureLocked = canLockFocus || canLockExposure }
+                    AppEventLog.event("Focus/exposure lock applied: focus=\(canLockFocus), exposure=\(canLockExposure)")
                 } catch {
                     self.showError("Couldn’t lock focus and exposure.")
                 }
@@ -2273,6 +2285,7 @@ final class CameraManager: NSObject, ObservableObject {
         )
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
+        logAppliedCaptureConfiguration("Photo")
         return true
     }
 
@@ -2337,6 +2350,31 @@ final class CameraManager: NSObject, ObservableObject {
         if zoomLabel != label {
             zoomLabel = label
         }
+    }
+
+    /// One detailed, post-commit record for diagnostics. This deliberately runs only after a
+    /// mode/format transaction, never for individual preview frames or pinch-zoom ticks.
+    private func logAppliedCaptureConfiguration(_ context: String) {
+        guard let device = videoInput?.device else {
+            AppEventLog.event("APPLIED \(context): failed — no active camera input")
+            return
+        }
+
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        let duration = device.activeVideoMinFrameDuration.seconds
+        let frameRate = duration > 0 ? 1 / duration : 0
+        let connection = movieOutput.connection(with: .video)
+        let settings = connection.map { movieOutput.outputSettings(for: $0) } ?? [:]
+        let codec = settings[AVVideoCodecKey] as? String ?? "system default"
+        let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
+        let bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
+        let lensKind = device.isVirtualDevice ? "virtual" : "physical"
+        let bitRateText = bitRate.map { "\($0 / 1_000_000) Mbps target" } ?? "bitrate default"
+        AppEventLog.event(
+            "APPLIED \(context): \(cameraPosition == .back ? "back" : "front") \(lensKind) \(device.localizedName), " +
+            "\(dimensions.width)x\(dimensions.height) @ \(String(format: "%.1f", frameRate)) fps, " +
+            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(requestedZoom)), WB=\(whiteBalancePreset.rawValue)"
+        )
     }
 
 
@@ -2451,6 +2489,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
+        logAppliedCaptureConfiguration("Video")
         return true
     }
 
@@ -2586,6 +2625,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
+        logAppliedCaptureConfiguration("Slo-Mo")
         return true
     }
 
