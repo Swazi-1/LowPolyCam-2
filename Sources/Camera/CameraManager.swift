@@ -451,18 +451,17 @@ final class CameraManager: NSObject, ObservableObject {
         resolution: VideoResolution,
         frameRate: VideoFrameRate
     ) -> Bool {
-        // On the supported iPhone 11 rear capture path, AVCaptureMovieFileOutput falls back to
-        // HEVC for 4K60 when H.264 is requested. Keep the controls locked before the user taps;
+        // On the supported iPhone 11 camera paths, AVCaptureMovieFileOutput falls back to HEVC
+        // for 4K60 when H.264 is requested. Keep the controls locked before the user taps;
         // configureMovieOutputSettings remains the final readback guard for other combinations.
         codec == "H264" &&
-            cameraPosition == .back &&
             resolution == .p4k &&
             frameRate == .fps60
     }
 
-    /// Keeps the requested 4K60 quality when the selected encoder cannot produce AVC on the
-    /// rear capture path. This is called from the main-thread state transitions before the next
-    /// session-queue configuration is scheduled, so the UI and hardware request share one codec.
+    /// Keeps the requested 4K60 quality when the selected encoder cannot produce AVC on either
+    /// supported camera path. This is called from the main-thread state transitions before the
+    /// next session-queue configuration is scheduled, so the UI and hardware request share one codec.
     @discardableResult
     private func autoPromoteH264ForUnsupportedVideoSelection(
         position: CameraPosition,
@@ -476,14 +475,14 @@ final class CameraManager: NSObject, ObservableObject {
                   resolution: resolution,
                   frameRate: frameRate
               ),
-              position == .back else { return false }
+              position == cameraPosition else { return false }
 
         let wasSuppressing = suppressAutomaticReconfiguration
         suppressAutomaticReconfiguration = true
         selectedVideoCodec = "HEVC"
         suppressAutomaticReconfiguration = wasSuppressing
         codecAvailabilityMessage = nil
-        AppEventLog.event("Video codec promoted automatically: H264 -> HEVC for rear 4K60")
+        AppEventLog.event("Video codec promoted automatically: H264 -> HEVC for \(position == .back ? "rear" : "front") 4K60")
         return true
     }
 
