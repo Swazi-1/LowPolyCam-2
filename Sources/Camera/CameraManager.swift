@@ -379,6 +379,13 @@ final class CameraManager: NSObject, ObservableObject {
            let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
            let mode = CaptureMode(rawValue: saved) { captureMode = mode }
         installSessionObservers()
+        if captureMode == .video {
+            _ = autoPromoteH264ForUnsupportedVideoSelection(
+                position: cameraPosition,
+                resolution: selectedResolution,
+                frameRate: selectedFrameRate
+            )
+        }
     }
 
     deinit {
@@ -421,8 +428,9 @@ final class CameraManager: NSObject, ObservableObject {
         }
         if codec == selectedVideoCodec {
             return codecAvailabilityMessage == nil &&
-                isVideoResolutionSupported(selectedResolution) &&
-                isVideoFrameRateSupported(selectedFrameRate)
+                (!isVideoAvailabilityKnown ||
+                    (isVideoResolutionSupported(selectedResolution) &&
+                        isVideoFrameRateSupported(selectedFrameRate)))
         }
 
         let selector = CameraFormatSelector(
@@ -450,6 +458,33 @@ final class CameraManager: NSObject, ObservableObject {
             cameraPosition == .back &&
             resolution == .p4k &&
             frameRate == .fps60
+    }
+
+    /// Keeps the requested 4K60 quality when the selected encoder cannot produce AVC on the
+    /// rear capture path. This is called from the main-thread state transitions before the next
+    /// session-queue configuration is scheduled, so the UI and hardware request share one codec.
+    @discardableResult
+    private func autoPromoteH264ForUnsupportedVideoSelection(
+        position: CameraPosition,
+        resolution: VideoResolution,
+        frameRate: VideoFrameRate
+    ) -> Bool {
+        guard captureMode == .video,
+              selectedVideoCodec == "H264",
+              isKnownUnsupportedH264VideoSelection(
+                  codec: selectedVideoCodec,
+                  resolution: resolution,
+                  frameRate: frameRate
+              ),
+              position == .back else { return false }
+
+        let wasSuppressing = suppressAutomaticReconfiguration
+        suppressAutomaticReconfiguration = true
+        selectedVideoCodec = "HEVC"
+        suppressAutomaticReconfiguration = wasSuppressing
+        codecAvailabilityMessage = nil
+        AppEventLog.event("Video codec promoted automatically: H264 -> HEVC for rear 4K60")
+        return true
     }
 
     func isSlowMotionResolutionSupported(_ resolution: VideoResolution) -> Bool {
@@ -1414,10 +1449,25 @@ final class CameraManager: NSObject, ObservableObject {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isLensTransitioning else { return }
         let previous = cameraPosition
         let target: CameraPosition = previous == .back ? .front : .back
+        let previousCodec = selectedVideoCodec
+        let previousSupportedResolutions = supportedResolutions
+        let previousSupportedFrameRates = supportedFrameRates
+        let previousVideoAvailabilityKnown = isVideoAvailabilityKnown
+        let previousVideoAvailable = isVideoAvailable
+        let previousSupportedSlowMotionResolutions = supportedSlowMotionResolutions
+        let previousSupportedSlowMotionFrameRates = supportedSlowMotionFrameRates
+        let previousSlowMotionAvailabilityKnown = isSlowMotionAvailabilityKnown
+        let previousSlowMotionAvailable = isSlowMotionAvailable
         AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")")
         codecAvailabilityMessage = nil
         isVideoAvailabilityKnown = false
         isVideoAvailable = true
+        supportedResolutions.removeAll(keepingCapacity: true)
+        supportedFrameRates.removeAll(keepingCapacity: true)
+        supportedSlowMotionResolutions.removeAll(keepingCapacity: true)
+        supportedSlowMotionFrameRates.removeAll(keepingCapacity: true)
+        isSlowMotionAvailabilityKnown = false
+        isSlowMotionAvailable = true
         let requestID = cameraSwitchRequests.next()
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
         _ = qualityRequests.next() // Do not apply an old quality request to the new input.
@@ -1427,6 +1477,11 @@ final class CameraManager: NSObject, ObservableObject {
 
         cameraPosition = target
         loadCameraPreferences(for: target)
+        _ = autoPromoteH264ForUnsupportedVideoSelection(
+            position: target,
+            resolution: selectedResolution,
+            frameRate: selectedFrameRate
+        )
 
         sessionQueue.async { [weak self] in
             guard let self, self.cameraSwitchRequests.isLatest(requestID) else { return }
@@ -1437,6 +1492,21 @@ final class CameraManager: NSObject, ObservableObject {
                 self.publish {
                     self.cameraPosition = previous
                     self.loadCameraPreferences(for: previous)
+                    let wasSuppressing = self.suppressAutomaticReconfiguration
+                    self.suppressAutomaticReconfiguration = true
+                    if self.selectedVideoCodec != previousCodec {
+                        self.selectedVideoCodec = previousCodec
+                    }
+                    self.suppressAutomaticReconfiguration = wasSuppressing
+                    self.supportedResolutions = previousSupportedResolutions
+                    self.supportedFrameRates = previousSupportedFrameRates
+                    self.isVideoAvailabilityKnown = previousVideoAvailabilityKnown
+                    self.isVideoAvailable = previousVideoAvailable
+                    self.supportedSlowMotionResolutions = previousSupportedSlowMotionResolutions
+                    self.supportedSlowMotionFrameRates = previousSupportedSlowMotionFrameRates
+                    self.isSlowMotionAvailabilityKnown = previousSlowMotionAvailabilityKnown
+                    self.isSlowMotionAvailable = previousSlowMotionAvailable
+                    self.codecAvailabilityMessage = nil
                 }
                 self.showError("That camera is unavailable.")
                 return
@@ -1858,7 +1928,12 @@ final class CameraManager: NSObject, ObservableObject {
     func selectResolution(_ resolution: VideoResolution) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard isVideoResolutionSupported(resolution) else { return }
-        guard selectedResolution != resolution else { return }
+        let promotedCodec = autoPromoteH264ForUnsupportedVideoSelection(
+            position: cameraPosition,
+            resolution: resolution,
+            frameRate: selectedFrameRate
+        )
+        guard selectedResolution != resolution || promotedCodec else { return }
         AppEventLog.event("Video resolution requested: \(selectedResolution.rawValue) to \(resolution.rawValue)")
         codecAvailabilityMessage = nil
         selectedResolution = resolution
