@@ -1032,7 +1032,16 @@ final class CameraManager: NSObject, ObservableObject {
 
     // Called inside the same transaction as the input/format change.
     private func configureLiveMetrics() {
-        let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats") && captureMode != .photo
+        let isRear4K60 = captureMode == .video &&
+            cameraPosition == .back &&
+            selectedResolution == .p4k &&
+            selectedFrameRate == .fps60
+        // A second video-data stream can push multi-camera 4K60 beyond the device's sustainable
+        // capture budget and trigger a runtime-error rebuild loop. File bitrate remains available
+        // without this optional output; only measured FPS/drop counters are omitted in rear 4K60.
+        let wanted = UserDefaults.standard.bool(forKey: "liveRecordingStats") &&
+            captureMode != .photo &&
+            !isRear4K60
         let attached = session.outputs.contains { $0 === liveMetrics.output }
 
         if wanted && !attached && session.canAddOutput(liveMetrics.output) {
