@@ -158,6 +158,7 @@ struct CameraView: View {
             }
         }
         .onChange(of: camera.isRecording) { _, recording in
+            AppEventLog.event("Camera UI: recording visible state changed to \(recording)")
             if recording && longevity && camera.captureMode == .video {
                 if restoreBrightness == nil { restoreBrightness = UIScreen.main.brightness }
                 UIScreen.main.brightness = min(UIScreen.main.brightness, 0.25)
@@ -229,6 +230,12 @@ struct CameraView: View {
             }
         }
         .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
+        .onChange(of: isShowingSettings) { _, showing in
+            AppEventLog.event("Camera UI: Settings sheet \(showing ? "opened" : "closed")")
+        }
+        .onChange(of: isShowingProTools) { _, showing in
+            AppEventLog.event("Camera UI: Pro controls \(showing ? "opened" : "closed")")
+        }
     }
 
     private var topControls: some View {
@@ -348,6 +355,7 @@ struct CameraView: View {
             .onChanged { value in
                 if dragStartZoom == nil {
                     dragStartZoom = camera.zoomFactor
+                    AppEventLog.event("Zoom gesture began at \(camera.zoomLabel)")
                 }
                 guard let dragStartZoom else { return }
                 let screenWidth = max(zoomWidth, 1)
@@ -358,13 +366,16 @@ struct CameraView: View {
             .onEnded { value in
                 if tapZoomReset, abs(value.translation.width) < 4, abs(value.translation.height) < 4 {
                     camera.setZoomFactor(1)
+                    AppEventLog.event("Zoom gesture tapped: reset requested to 1×")
                 }
+                AppEventLog.event("Zoom gesture ended at \(camera.zoomLabel)")
                 dragStartZoom = nil
             }
     }
 
     private func captureHaptic() {
         guard isHapticCaptureEnabled else { return }
+        AppEventLog.event("Capture haptic requested")
         CameraHaptics.fire(captureOnly: true)
     }
 
@@ -379,19 +390,27 @@ struct CameraView: View {
     }
 
     private func cancelCountdown() {
+        if countdown > 0 || shutterTask != nil {
+            AppEventLog.event("Shutter countdown canceled at \(countdown) seconds remaining")
+        }
         shutterTask?.cancel()
         shutterTask = nil
         countdown = 0
     }
 
     private func shutterPressed() {
+        AppEventLog.event("Shutter pressed: mode=\(camera.captureMode.rawValue), recording=\(camera.isRecording), delay=\(shutterDelay)s")
         if countdown > 0 { cancelCountdown(); return }
         if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
         guard !camera.isRecordingStarting, !camera.isFinalizingRecording,
-              shutterTask == nil, camera.isSessionRunning else { return }
+              shutterTask == nil, camera.isSessionRunning else {
+            AppEventLog.event("Shutter ignored: starting=\(camera.isRecordingStarting), finalizing=\(camera.isFinalizingRecording), pendingCountdown=\(shutterTask != nil), sessionRunning=\(camera.isSessionRunning)")
+            return
+        }
         let mode = camera.captureMode
         shutterTask = Task { @MainActor in
             countdown = shutterDelay
+            if countdown > 0 { AppEventLog.event("Shutter countdown started: \(countdown)s") }
             while countdown > 0 {
                 if countdownHaptics { CameraHaptics.fire() }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
@@ -399,6 +418,7 @@ struct CameraView: View {
                 countdown -= 1
             }
             guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else { return }
+            AppEventLog.event("Shutter executing: mode=\(mode.rawValue)")
             captureHaptic()
             if mode == .photo { camera.capturePhoto() } else { camera.startOrStopRecording() }
             shutterTask = nil

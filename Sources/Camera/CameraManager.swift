@@ -339,8 +339,12 @@ final class CameraManager: NSObject, ObservableObject {
         startClock: Bool = false,
         clearLastFrameGaps: Bool = false
     ) {
+        let previousState = recordingState
         let previousFlags = recordingState.uiFlags
         recordingState = newState
+        if String(describing: previousState) != String(describing: newState) {
+            AppEventLog.event("Recording state: \(String(describing: previousState)) -> \(String(describing: newState))")
+        }
         let flags = newState.uiFlags
         let flagsChanged = previousFlags.starting != flags.starting ||
             previousFlags.recording != flags.recording ||
@@ -439,7 +443,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterrupted() {
-        AppEventLog.event("SESSION INTERRUPTED")
+        AppEventLog.event("SESSION INTERRUPTED: running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
         burstRemaining = 0
@@ -464,6 +468,7 @@ final class CameraManager: NSObject, ObservableObject {
         if !session.isRunning { session.startRunning() }
         synchronizeTorchState()
         publish { self.isSessionRunning = self.session.isRunning }
+        logSessionSnapshot("after interruption recovery")
     }
 
     private func rebuildSessionAfterMediaServicesReset() {
@@ -1116,6 +1121,9 @@ final class CameraManager: NSObject, ObservableObject {
                 self.liveMetricsAvailable = available
             }
         }
+        AppEventLog.event(
+            "Live metrics configured: requested=\(wanted), attached=\(available), rear4K60=\(isRear4K60), mode=\(captureMode.rawValue)"
+        )
     }
 
     private func setLiveMetricsConnectionEnabled(_ enabled: Bool) {
@@ -1125,10 +1133,14 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func stopLiveMetrics() {
+        let wasRunning = metricsTimer != nil
         metricsTimer?.cancel()
         metricsTimer = nil
         liveMetrics.setRunning(false)
         setLiveMetricsConnectionEnabled(false)
+        if wasRunning {
+            AppEventLog.event("Live metrics stopped")
+        }
     }
 
     private func startLiveMetrics() {
@@ -1136,13 +1148,17 @@ final class CameraManager: NSObject, ObservableObject {
         previousMetricBytes = 0
         previousMetricDuration = 0
         publish { self.liveStats.reset() }
-        guard UserDefaults.standard.bool(forKey: "liveRecordingStats") else { return }
+        guard UserDefaults.standard.bool(forKey: "liveRecordingStats") else {
+            AppEventLog.event("Live metrics not started: setting disabled")
+            return
+        }
 
         let captureMetricsAvailable = session.outputs.contains { $0 === liveMetrics.output }
         if captureMetricsAvailable {
             setLiveMetricsConnectionEnabled(true)
             liveMetrics.setRunning(true)
         }
+        AppEventLog.event("Live metrics started: captureMetricsAvailable=\(captureMetricsAvailable), mode=\(captureMode.rawValue)")
 
         // Bitrate comes from AVCaptureMovieFileOutput and remains available even if the optional
         // video-data output could not be attached. Only FPS/drop measurement depends on it.
@@ -1167,6 +1183,14 @@ final class CameraManager: NSObject, ObservableObject {
                 drops = measurement.fps != nil ? measurement.drops : nil
             }
 
+            let fpsText = fps.map { String(format: "%.1f", $0) } ?? "unavailable"
+            let bitrateText = mbps.map { String(format: "%.2f Mbps", $0) } ?? "unavailable"
+            let dropsText = drops.map { String($0) } ?? "unavailable"
+            AppEventLog.event(
+                "LIVE METRICS: duration=\(String(format: "%.1f", duration))s, bytes=\(bytes), bitrate=\(bitrateText), " +
+                "fps=\(fpsText), drops=\(dropsText), captureMetricsAttached=\(attached)"
+            )
+
             self.publish {
                 self.liveStats.update(fps: fps, mbps: mbps, drops: drops)
             }
@@ -1176,7 +1200,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func applyLongevityMode(_ enabled: Bool) {
-        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else {
+            AppEventLog.event("Longevity Mode ignored: recording is active")
+            return
+        }
+        AppEventLog.event("Longevity Mode requested: \(enabled)")
         let defaults = UserDefaults.standard
         if enabled {
             defaults.set(selectedResolution.rawValue, forKey: "longevityPreviousResolution")
@@ -1201,26 +1229,31 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.lensTransitionCoordinator.cancel()
-            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            AppEventLog.event("Longevity Mode \(success ? "applied" : "failed"): enabled=\(enabled)")
         }
     }
 
     func selectPhotoMegapixels(_ megapixels: Int) {
         guard supportedPhotoMegapixels.contains(megapixels), selectedPhotoMegapixels != megapixels else { return }
+        AppEventLog.event("Photo megapixels requested: \(selectedPhotoMegapixels) MP -> \(megapixels) MP")
         preferredPhotoMegapixels = megapixels
         UserDefaults.standard.set(megapixels, forKey: Self.photoMegapixelsKey)
         selectedPhotoMegapixels = megapixels
         currentPhotoResolutionLabel = "\(megapixels) MP"
         currentPhotoPixelCount = Int64(megapixels) * 1_000_000
         refreshAvailableStorage()
+        AppEventLog.event("Photo megapixels applied: \(megapixels) MP")
     }
 
     func updatePhotoAspectSelection(_ aspect: String) {
+        AppEventLog.event("Photo aspect requested: \(aspect)")
         sessionQueue.async { [weak self] in
             guard let self,
                   self.nativePhotoDimensions.width > 0,
                   self.nativePhotoDimensions.height > 0 else { return }
             self.updatePhotoMegapixelAvailability(for: self.nativePhotoDimensions, aspect: aspect)
+            AppEventLog.event("Photo aspect applied: \(aspect), supported megapixels=\(self.supportedPhotoMegapixels.map { String($0) }.joined(separator: ","))")
         }
     }
 
@@ -1228,6 +1261,7 @@ final class CameraManager: NSObject, ObservableObject {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
         let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
         let count = [5, 10, 15].contains(savedCount) ? savedCount : 5
+        AppEventLog.event("Burst capture requested: count=\(count)")
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -1243,6 +1277,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.burstRemaining > 0 else { return }
             self.burstStopRequested = true
+            AppEventLog.event("Burst capture stop requested: remaining=\(self.burstRemaining)")
         }
     }
 
@@ -1517,8 +1552,12 @@ final class CameraManager: NSObject, ObservableObject {
 
     func setVideoStabilizationEnabled(_ enabled: Bool) {
         guard isVideoStabilizationEnabled != enabled else { return }
+        AppEventLog.event("Video stabilization requested: \(isVideoStabilizationEnabled) -> \(enabled)")
         isVideoStabilizationEnabled = enabled
-        guard captureMode == .video else { return }
+        guard captureMode == .video else {
+            AppEventLog.event("Video stabilization saved; no active Video format to reconfigure")
+            return
+        }
         sessionQueue.async { [weak self] in self?.configureMovieOutputSettings() }
     }
 
@@ -1565,9 +1604,12 @@ final class CameraManager: NSObject, ObservableObject {
 
     func applyQuickPreset(_ preset: VideoQuickPreset, completion: ((Bool) -> Void)? = nil) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isCapturingPhoto, !isLensTransitioning else {
+            AppEventLog.event("Quick preset ignored: \(preset.rawValue), camera busy or not in Video mode")
             completion?(false)
             return
         }
+
+        AppEventLog.event("Quick preset requested: \(preset.rawValue), \(preset.resolution.rawValue) \(preset.frameRate.rawValue) fps, codec=HEVC, compression=\(preset.compression.rawValue)")
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -1597,6 +1639,7 @@ final class CameraManager: NSObject, ObservableObject {
                     let success = self.applySelectedFormat(
                         preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput
                     )
+                    AppEventLog.event("Quick preset \(success ? "applied" : "failed"): \(preset.rawValue)")
                     self.publish { completion?(success) }
                 }
             }
@@ -1693,6 +1736,7 @@ final class CameraManager: NSObject, ObservableObject {
             synchronizeTorchState()
         }
         AppEventLog.event("Camera session configured")
+        logSessionSnapshot("after session configuration")
     }
 
 
@@ -2385,6 +2429,25 @@ final class CameraManager: NSObject, ObservableObject {
         )
     }
 
+    /// Records the pieces AVFoundation does not expose in the normal format trace. This is
+    /// intentionally emitted only for state boundaries, never preview frames or zoom ticks.
+    private func logSessionSnapshot(_ context: String) {
+        let inputs = session.inputs.map { input -> String in
+            if let deviceInput = input as? AVCaptureDeviceInput {
+                return "camera:\(deviceInput.device.localizedName)"
+            }
+            if input is AVCaptureDeviceInput { return "device input" }
+            return String(describing: type(of: input))
+        }.joined(separator: ", ")
+        let outputs = session.outputs.map { String(describing: type(of: $0)) }.joined(separator: ", ")
+        AppEventLog.event(
+            "SESSION SNAPSHOT [\(context)]: running=\(session.isRunning), preset=\(session.sessionPreset.rawValue), " +
+            "mode=\(captureMode.rawValue), position=\(cameraPosition == .back ? "back" : "front"), recordingState=\(String(describing: recordingState)), " +
+            "inputs=[\(inputs)], outputs=[\(outputs)], photoResponsive=\(photoOutput.isResponsiveCaptureEnabled), " +
+            "liveMetricsAttached=\(session.outputs.contains { $0 === liveMetrics.output })"
+        )
+    }
+
 
 
     @discardableResult
@@ -2742,10 +2805,11 @@ final class CameraManager: NSObject, ObservableObject {
         let aspect = isBurst ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
         let megapixels = isBurst ? burstMegapixels : selectedPhotoMegapixels
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
+        let mirrored = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
         if let connection = photoOutput.connection(with: .video) {
             if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
-                connection.isVideoMirrored = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
+                connection.isVideoMirrored = mirrored
             }
             applyCaptureRotation(to: connection)
         }
@@ -2771,7 +2835,10 @@ final class CameraManager: NSObject, ObservableObject {
         )
         activePhotoCaptureID = captureID
         activePhotoCaptureIsBurst = isBurst
-        AppEventLog.event("Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG")")
+        AppEventLog.event(
+            "Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG"), " +
+            "aspect=\(aspect), mirrored=\(mirrored), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
+        )
         refreshAvailableStorage()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -2832,6 +2899,8 @@ final class CameraManager: NSObject, ObservableObject {
         applyCaptureRotation(to: movieOutput.connection(with: .video))
         movieOutput.metadata = CameraMovieMetadata.items(isSlowMotion: captureMode == .sloMo)
         refreshAvailableStorage()
+        logAppliedCaptureConfiguration("recording preparation")
+        logSessionSnapshot("recording preparation")
 
         // When the idle preview is already the exact recording configuration (the normal case for
         // rear 4K60 and Slo-Mo now), start immediately instead of imposing the old AF/AE wait. Only
@@ -3044,6 +3113,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func postStatus(_ message: String) {
+        AppEventLog.event("STATUS: \(message)")
         publish {
             self.statusMessageID &+= 1
             self.statusMessage = message
@@ -3069,6 +3139,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             guard let self else { return }
 
             AppEventLog.event("Recording started: \(fileURL.lastPathComponent)")
+            self.logAppliedCaptureConfiguration("recording started")
+            self.logSessionSnapshot("recording started")
 
             if !self.recordingState.requestsRecording {
                 self.transitionRecordingToDiscard()
@@ -3101,7 +3173,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)")
+            let errorDetail = error.map { " error=\($0.localizedDescription)" } ?? ""
+            AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)\(errorDetail)")
             self.stopLiveMetrics()
             self.segmentTimer?.cancel()
 
