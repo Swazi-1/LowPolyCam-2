@@ -57,6 +57,28 @@ final class CameraManager: NSObject, ObservableObject {
         let transitionID: UInt64?
     }
 
+    private struct CodecSupportKey: Equatable {
+        let isBackCamera: Bool
+        let resolution: String
+        let frameRate: Int
+        let deviceIDs: [String]
+        let generation: UInt64
+    }
+
+    private struct CodecSupportSnapshot {
+        let key: CodecSupportKey
+        let hevcSupported: Bool
+        let h264Supported: Bool
+
+        func supports(_ codec: String) -> Bool {
+            switch codec {
+            case "HEVC": return hevcSupported
+            case "H264": return h264Supported
+            default: return false
+            }
+        }
+    }
+
     enum WhiteBalancePreset: String, CaseIterable, Identifiable {
         case auto = "Auto"
         case daylight = "Daylight"
@@ -124,6 +146,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
+            invalidateCodecSupportCache()
             let qualityRequestID = qualityRequests.next()
             codecAvailabilityMessage = nil
             isVideoAvailabilityKnown = false
@@ -160,6 +183,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var selectedResolution: VideoResolution {
         didSet {
             if selectedResolution != oldValue {
+                invalidateCodecSupportCache()
                 _ = captureConfigurationGeneration.next()
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.resolutionKey, value: selectedResolution.rawValue)
@@ -170,6 +194,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var selectedFrameRate: VideoFrameRate {
         didSet {
             if selectedFrameRate != oldValue {
+                invalidateCodecSupportCache()
                 _ = captureConfigurationGeneration.next()
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.frameRateKey, value: selectedFrameRate.rawValue)
@@ -263,6 +288,9 @@ final class CameraManager: NSObject, ObservableObject {
     private let videoConfigurationRequests = RequestToken()
     private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
+    private let codecSupportCacheLock = NSLock()
+    private var codecSupportCacheGeneration: UInt64 = 0
+    private var codecSupportSnapshot: CodecSupportSnapshot?
 
     private var activeVideoCodec: String {
         captureMode == .sloMo ? "HEVC" : selectedVideoCodec
@@ -451,21 +479,78 @@ final class CameraManager: NSObject, ObservableObject {
         if codec == selectedVideoCodec {
             return codecAvailabilityMessage == nil &&
                 (!isVideoAvailabilityKnown ||
-                    (isVideoResolutionSupported(selectedResolution) &&
+                (isVideoResolutionSupported(selectedResolution) &&
                         isVideoFrameRateSupported(selectedFrameRate)))
         }
 
-        let selector = CameraFormatSelector(
-            selectedVideoCodec: codec,
+        let devices = capabilityDevices(for: cameraPosition.avPosition)
+        let cacheKey: CodecSupportKey
+        let cachedSnapshot: CodecSupportSnapshot?
+        codecSupportCacheLock.lock()
+        let generation = codecSupportCacheGeneration
+        cacheKey = CodecSupportKey(
+            isBackCamera: cameraPosition == .back,
+            resolution: selectedResolution.rawValue,
+            frameRate: selectedFrameRate.rawValue,
+            deviceIDs: devices.map(\.uniqueID),
+            generation: generation
+        )
+        cachedSnapshot = codecSupportSnapshot?.key == cacheKey ? codecSupportSnapshot : nil
+        codecSupportCacheLock.unlock()
+
+        if let cachedSnapshot {
+            return cachedSnapshot.supports(codec)
+        }
+
+        let hevcSelector = CameraFormatSelector(
+            selectedVideoCodec: "HEVC",
             selectedResolution: selectedResolution,
             selectedFrameRate: selectedFrameRate
         )
-        return capabilityDevices(for: cameraPosition.avPosition).contains { device in
-            device.formats.contains {
-                selector.format($0, supports: selectedResolution, at: selectedFrameRate) &&
-                    selector.formatSupportsSelectedCodec($0)
+        let h264Selector = CameraFormatSelector(
+            selectedVideoCodec: "H264",
+            selectedResolution: selectedResolution,
+            selectedFrameRate: selectedFrameRate
+        )
+        var hevcSupported = false
+        var h264Supported = false
+        for device in devices {
+            for format in device.formats {
+                if !hevcSupported,
+                   hevcSelector.format(format, supports: selectedResolution, at: selectedFrameRate),
+                   hevcSelector.formatSupportsSelectedCodec(format) {
+                    hevcSupported = true
+                }
+                if !h264Supported,
+                   h264Selector.format(format, supports: selectedResolution, at: selectedFrameRate),
+                   h264Selector.formatSupportsSelectedCodec(format) {
+                    h264Supported = true
+                }
+                if hevcSupported && h264Supported {
+                    break
+                }
             }
+            if hevcSupported && h264Supported { break }
         }
+
+        let snapshot = CodecSupportSnapshot(
+            key: cacheKey,
+            hevcSupported: hevcSupported,
+            h264Supported: h264Supported
+        )
+        codecSupportCacheLock.lock()
+        if codecSupportCacheGeneration == generation {
+            codecSupportSnapshot = snapshot
+        }
+        codecSupportCacheLock.unlock()
+        return snapshot.supports(codec)
+    }
+
+    private func invalidateCodecSupportCache() {
+        codecSupportCacheLock.lock()
+        codecSupportCacheGeneration &+= 1
+        codecSupportSnapshot = nil
+        codecSupportCacheLock.unlock()
     }
 
     private func isKnownUnsupportedH264VideoSelection(
@@ -1499,6 +1584,7 @@ final class CameraManager: NSObject, ObservableObject {
         let previousSlowMotionAvailabilityKnown = isSlowMotionAvailabilityKnown
         let previousSlowMotionAvailable = isSlowMotionAvailable
         AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")")
+        invalidateCodecSupportCache()
         codecAvailabilityMessage = nil
         isVideoAvailabilityKnown = false
         isVideoAvailable = true
@@ -2288,6 +2374,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
+        invalidateCodecSupportCache()
         AppEventLog.event("Configuring camera session\(forceRebuild ? " rebuild" : "")")
 
         invalidatePendingVideoConfiguration()
@@ -2963,17 +3050,13 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    /// One detailed capture-state readback for diagnostics. This deliberately runs only at
-    /// low-frequency configuration and recording lifecycle points, never for preview frames or
-    /// pinch-zoom ticks.
-    private func logCaptureConfiguration(
+    /// Captures only immutable primitive values on sessionQueue. AppEventLog formats and writes
+    /// the detailed message on its own utility queue so record start is not held by interpolation.
+    private func captureConfigurationLogSnapshot(
         _ context: String,
         label: String = "CAPTURE FORMAT/INPUT APPLIED"
-    ) {
-        guard let device = videoInput?.device else {
-            AppEventLog.event("\(label) [\(context)]: failed — no active camera input")
-            return
-        }
+    ) -> AppEventLog.CaptureConfigurationLogSnapshot? {
+        guard let device = videoInput?.device else { return nil }
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let duration = device.activeVideoMinFrameDuration.seconds
@@ -2983,32 +3066,72 @@ final class CameraManager: NSObject, ObservableObject {
         let codec = settings[AVVideoCodecKey] as? String ?? "system default"
         let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
         let bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
-        let lensKind = device.isVirtualDevice ? "virtual" : "physical"
-        let bitRateText = bitRate.map { "\($0 / 1_000_000) Mbps target" } ?? "bitrate default"
-        AppEventLog.event(
-            "\(label) [\(context)]: \(cameraPosition == .back ? "back" : "front") \(lensKind) \(device.localizedName), " +
-            "\(dimensions.width)x\(dimensions.height) @ \(String(format: "%.1f", frameRate)) fps, " +
-            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(for: requestedZoom)), WB=\(requestedWhiteBalancePreset.rawValue)"
+        return AppEventLog.CaptureConfigurationLogSnapshot(
+            label: label,
+            context: context,
+            isBackCamera: cameraPosition == .back,
+            isVirtualDevice: device.isVirtualDevice,
+            deviceName: device.localizedName,
+            width: dimensions.width,
+            height: dimensions.height,
+            frameRate: frameRate,
+            codec: codec,
+            bitRate: bitRate,
+            zoomFactor: Double(requestedZoom),
+            whiteBalance: requestedWhiteBalancePreset.rawValue
         )
     }
 
-    /// Records the pieces AVFoundation does not expose in the normal format trace. This is
-    /// intentionally emitted only for state boundaries, never preview frames or zoom ticks.
-    private func logSessionSnapshot(_ context: String) {
-        let inputs = session.inputs.map { input -> String in
+    private func enqueueCaptureConfigurationLog(
+        _ snapshot: AppEventLog.CaptureConfigurationLogSnapshot?,
+        context: String,
+        label: String
+    ) {
+        if let snapshot {
+            AppEventLog.event(snapshot)
+        } else {
+            AppEventLog.event("\(label) [\(context)]: failed — no active camera input")
+        }
+    }
+
+    /// Records the pieces AVFoundation does not expose in the normal format trace. The primitive
+    /// snapshot is collected on sessionQueue; formatting and disk I/O stay on AppEventLog.queue.
+    private func captureSessionLogSnapshot(_ context: String) -> AppEventLog.SessionLogSnapshot {
+        let inputNames = session.inputs.map { input -> String in
             if let deviceInput = input as? AVCaptureDeviceInput {
                 return "camera:\(deviceInput.device.localizedName)"
             }
             if input is AVCaptureDeviceInput { return "device input" }
             return String(describing: type(of: input))
-        }.joined(separator: ", ")
-        let outputs = session.outputs.map { String(describing: type(of: $0)) }.joined(separator: ", ")
-        AppEventLog.event(
-            "SESSION SNAPSHOT [\(context)]: running=\(session.isRunning), preset=\(session.sessionPreset.rawValue), " +
-            "mode=\(captureMode.rawValue), position=\(cameraPosition == .back ? "back" : "front"), recordingState=\(String(describing: recordingState)), " +
-            "inputs=[\(inputs)], outputs=[\(outputs)], photoResponsive=\(photoOutput.isResponsiveCaptureEnabled), " +
-            "liveMetricsAttached=\(session.outputs.contains { $0 === liveMetrics.output })"
+        }
+        let outputNames = session.outputs.map { String(describing: type(of: $0)) }
+        return AppEventLog.SessionLogSnapshot(
+            context: context,
+            isRunning: session.isRunning,
+            preset: session.sessionPreset.rawValue,
+            mode: captureMode.rawValue,
+            isBackCamera: cameraPosition == .back,
+            recordingState: String(describing: recordingState),
+            inputNames: inputNames,
+            outputNames: outputNames,
+            photoResponsive: photoOutput.isResponsiveCaptureEnabled,
+            liveMetricsAttached: session.outputs.contains { $0 === liveMetrics.output }
         )
+    }
+
+    private func logCaptureConfiguration(
+        _ context: String,
+        label: String = "CAPTURE FORMAT/INPUT APPLIED"
+    ) {
+        enqueueCaptureConfigurationLog(
+            captureConfigurationLogSnapshot(context, label: label),
+            context: context,
+            label: label
+        )
+    }
+
+    private func logSessionSnapshot(_ context: String) {
+        AppEventLog.event(captureSessionLogSnapshot(context))
     }
 
 
@@ -3550,26 +3673,41 @@ final class CameraManager: NSObject, ObservableObject {
         applyCaptureRotation(to: movieOutput.connection(with: .video))
         movieOutput.metadata = CameraMovieMetadata.items(isSlowMotion: captureMode == .sloMo)
         refreshAvailableStorage()
-        logCaptureConfiguration(
-            "before start",
-            label: "RECORDING PREPARATION READBACK"
-        )
-        logSessionSnapshot("recording preparation")
 
         // When the idle preview is already the exact recording configuration (the normal case for
         // rear 4K60 and Slo-Mo now), start immediately instead of imposing the old AF/AE wait. Only
         // keep the settle window for the recovery path that actually had to reconfigure hardware.
         let readinessDeadline = reconfiguredForRecording ? Date().addingTimeInterval(1.0) : Date()
-        startMovieOutputWhenReady(deadline: readinessDeadline)
+        let preparationCaptureSnapshot = captureConfigurationLogSnapshot(
+            "before start",
+            label: "RECORDING PREPARATION READBACK"
+        )
+        let preparationSessionSnapshot = captureSessionLogSnapshot("recording preparation")
+        let enqueuePreparationDiagnostics: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.enqueueCaptureConfigurationLog(
+                preparationCaptureSnapshot,
+                context: "before start",
+                label: "RECORDING PREPARATION READBACK"
+            )
+            AppEventLog.event(preparationSessionSnapshot)
+        }
+        startMovieOutputWhenReady(
+            deadline: readinessDeadline,
+            afterStart: enqueuePreparationDiagnostics
+        )
     }
 
-    private func startMovieOutputWhenReady(deadline: Date) {
+    private func startMovieOutputWhenReady(
+        deadline: Date,
+        afterStart: @escaping () -> Void = {}
+    ) {
         guard recordingState.requestsRecording, !movieOutput.isRecording else { return }
         if let device = videoInput?.device,
            (device.isAdjustingFocus || device.isAdjustingExposure),
            Date() < deadline {
             sessionQueue.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-                self?.startMovieOutputWhenReady(deadline: deadline)
+                self?.startMovieOutputWhenReady(deadline: deadline, afterStart: afterStart)
             }
             return
         }
@@ -3579,6 +3717,7 @@ final class CameraManager: NSObject, ObservableObject {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         AppEventLog.event("Starting movie output: \(filename)")
         movieOutput.startRecording(to: url, recordingDelegate: self)
+        afterStart()
     }
 
     private func nextMediaFilename(fileExtension: String) -> String {
@@ -3797,13 +3936,6 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         sessionQueue.async { [weak self] in
             guard let self else { return }
 
-            AppEventLog.event("Recording started: \(fileURL.lastPathComponent)")
-            self.logCaptureConfiguration(
-                "delegate callback",
-                label: "RECORDING START CALLBACK"
-            )
-            self.logSessionSnapshot("recording started")
-
             if !self.recordingState.requestsRecording {
                 self.transitionRecordingToDiscard()
                 if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
@@ -3827,6 +3959,15 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 to: .recording(splitDuration: splitDuration),
                 startClock: true
             )
+
+            // Validate and publish the recording state before collecting detailed diagnostics.
+            // Snapshot formatting and disk I/O are handled asynchronously by AppEventLog.
+            AppEventLog.event("Recording started: \(fileURL.lastPathComponent)")
+            self.logCaptureConfiguration(
+                "delegate callback",
+                label: "RECORDING START CALLBACK"
+            )
+            self.logSessionSnapshot("recording started")
         }
     }
 

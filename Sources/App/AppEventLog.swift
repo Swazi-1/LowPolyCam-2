@@ -4,6 +4,52 @@ import UIKit
 /// Keeps one lightweight, user-readable log for the current app run.
 /// The next cold launch replaces it so diagnostics never accumulate indefinitely.
 enum AppEventLog {
+    struct CaptureConfigurationLogSnapshot {
+        let label: String
+        let context: String
+        let isBackCamera: Bool
+        let isVirtualDevice: Bool
+        let deviceName: String
+        let width: Int32
+        let height: Int32
+        let frameRate: Double
+        let codec: String
+        let bitRate: Int?
+        let zoomFactor: Double
+        let whiteBalance: String
+
+        var formattedMessage: String {
+            let bitRateText = bitRate.map { "\($0 / 1_000_000) Mbps target" } ?? "bitrate default"
+            let lensKind = isVirtualDevice ? "virtual" : "physical"
+            let zoomText = abs(zoomFactor.rounded() - zoomFactor) < 0.01
+                ? "\(Int(zoomFactor.rounded()))×"
+                : String(format: "%.1f×", zoomFactor)
+            return "\(label) [\(context)]: \(isBackCamera ? "back" : "front") \(lensKind) \(deviceName), " +
+                "\(width)x\(height) @ \(String(format: "%.1f", frameRate)) fps, " +
+                "codec=\(codec), \(bitRateText), zoom=\(zoomText), WB=\(whiteBalance)"
+        }
+    }
+
+    struct SessionLogSnapshot {
+        let context: String
+        let isRunning: Bool
+        let preset: String
+        let mode: String
+        let isBackCamera: Bool
+        let recordingState: String
+        let inputNames: [String]
+        let outputNames: [String]
+        let photoResponsive: Bool
+        let liveMetricsAttached: Bool
+
+        var formattedMessage: String {
+            "SESSION SNAPSHOT [\(context)]: running=\(isRunning), preset=\(preset), " +
+                "mode=\(mode), position=\(isBackCamera ? "back" : "front"), recordingState=\(recordingState), " +
+                "inputs=[\(inputNames.joined(separator: ", "))], outputs=[\(outputNames.joined(separator: ", "))], " +
+                "photoResponsive=\(photoResponsive), liveMetricsAttached=\(liveMetricsAttached)"
+        }
+    }
+
     private static let filename = "LowPolyCam-Session.log"
     private static let queue = DispatchQueue(label: "com.swazi.lowpolycam.eventLog", qos: .utility)
     private static let timestampFormatter = ISO8601DateFormatter()
@@ -82,6 +128,20 @@ enum AppEventLog {
         queue.async {
             beginNewSessionLocked()
             appendLocked(message)
+        }
+    }
+
+    static func event(_ snapshot: CaptureConfigurationLogSnapshot) {
+        queue.async {
+            beginNewSessionLocked()
+            appendLocked(snapshot.formattedMessage)
+        }
+    }
+
+    static func event(_ snapshot: SessionLogSnapshot) {
+        queue.async {
+            beginNewSessionLocked()
+            appendLocked(snapshot.formattedMessage)
         }
     }
 
