@@ -91,7 +91,7 @@ struct RecordingExtrasSettings: View {
         Group {
             if camera.captureMode == .video {
                 SettingsCard(title: "Long Sessions & Stats", symbol: "battery.100percent") {
-                    SettingsToggleRow(title: "Longevity Mode", subtitle: "Starts video at 720p · 30 fps · HEVC · Data Saver and dims the screen while recording. You can customize quality afterward. Previous video settings return when disabled.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
+                    SettingsToggleRow(title: "Longevity Mode", subtitle: "Uses 720p, 30 fps, HEVC and Data Saver, then dims the screen while recording. Your previous setup returns when turned off.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
                     SettingsDivider()
                     liveStatsControls
                 }
@@ -106,7 +106,7 @@ struct RecordingExtrasSettings: View {
 
     @ViewBuilder
     private var liveStatsControls: some View {
-        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Measured capture FPS, file bitrate and capture-output drops. Encoder drops are not exposed by iOS. Adds some processing overhead.", isOn: $stats)
+        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Shows capture FPS, file bitrate and dropped capture frames. Uses a little extra processing.", isOn: $stats)
         SettingsDivider()
         NavigationLink {
             LiveStatsSettings(positionStats: positionStats)

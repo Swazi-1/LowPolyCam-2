@@ -111,22 +111,26 @@ struct SettingsAppearanceQuickRow: View {
     @Binding var selection: String
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 10) {
             Image(systemName: "circle.lefthalf.filled")
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: 34, height: 34)
+                .frame(width: 30, height: 34)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Appearance")
                     .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Text("App theme")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer(minLength: 8)
+            .layoutPriority(1)
+            Spacer(minLength: 4)
             AppearanceModeSwitcher(selection: $selection)
         }
-        .padding(14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
         .settingsCardSurface()
     }
 }
@@ -141,7 +145,7 @@ struct AppearanceModeSwitcher: View {
     ]
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(options, id: \.value) { option in
                 Button {
                     selection = option.value
@@ -152,7 +156,7 @@ struct AppearanceModeSwitcher: View {
                         Text(option.label)
                             .font(.system(size: 10, weight: .semibold))
                     }
-                    .frame(width: 56, height: 44)
+                    .frame(width: 52, height: 44)
                     .background(
                         selection == option.value ? theme : Color.primary.opacity(0.07),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -204,15 +208,16 @@ struct SettingsOptionCard: View {
                 }
                 Spacer(minLength: 0)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 ForEach(options, id: \.id) { option in
                     Button {
                         onSelect(option.id)
                     } label: {
                         Text(option.label)
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: option.label.count > 8 ? 11 : 12, weight: .bold))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.75)
+                            .minimumScaleFactor(0.68)
+                            .allowsTightening(true)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
                             .background(
@@ -225,7 +230,7 @@ struct SettingsOptionCard: View {
                 }
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .settingsCardSurface()
     }
@@ -331,18 +336,20 @@ struct SettingsNavigationRow: View {
 struct SettingsCard<Content: View>: View {
     let title: String
     let symbol: String
+    let contentSpacing: CGFloat
     let content: Content
 
-    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
+    init(title: String, symbol: String, contentSpacing: CGFloat = 14, @ViewBuilder content: () -> Content) {
         self.title = title
         self.symbol = symbol
+        self.contentSpacing = contentSpacing
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsSectionHeader(title: title)
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: contentSpacing) {
                 content
             }
             .padding(16)
@@ -408,6 +415,29 @@ struct SettingsSubRow<Content: View>: View {
         }
         .padding(.leading, 24)
         .padding(.bottom, 4)
+    }
+}
+
+// MARK: - Non-scrolling page for short menus that should stay fixed in place
+
+struct StaticSettingsPage<Content: View>: View {
+    @Environment(\.cameraTint) private var theme
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            content
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .tint(theme)
     }
 }
 

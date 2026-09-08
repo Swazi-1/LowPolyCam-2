@@ -139,12 +139,14 @@ struct VideoSettingsView: View {
                 }
                 .buttonStyle(.plain)
 
-                NavigationLink {
-                    AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)
-                } label: {
-                    SettingsGridNavRow(symbol: "waveform.path.ecg", title: "Advanced Recording", subtitle: "Pro options and diagnostics")
+                if camera.captureMode != .photo {
+                    NavigationLink {
+                        AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)
+                    } label: {
+                        SettingsGridNavRow(symbol: "waveform.path.ecg", title: "Advanced Recording", subtitle: "Pro options and diagnostics")
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }

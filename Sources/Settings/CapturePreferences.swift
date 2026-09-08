@@ -72,55 +72,174 @@ struct CameraAccent: DynamicProperty {
 struct CapturePreferencesView: View {
     @ObservedObject var camera: CameraManager
     init(camera: CameraManager) { self.camera = camera }
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Capture Settings", symbol: "camera.fill") {
+                NavigationLink {
+                    ShutterHapticsSettingsView()
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Shutter & Haptics",
+                        subtitle: "Timer, feedback and strength",
+                        symbol: "timer"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                SettingsDivider()
+
+                NavigationLink {
+                    ZoomRecordingSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Zoom & Recording",
+                        subtitle: "Zoom feel and capture safeguards",
+                        symbol: "plus.magnifyingglass"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                SettingsDivider()
+
+                NavigationLink {
+                    CameraControlsSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Camera Controls",
+                        subtitle: "Mode memory, guides and reset",
+                        symbol: "slider.horizontal.3"
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .navigationTitle("Capture")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ShutterHapticsSettingsView: View {
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("hapticCaptureEnabled") private var haptics = true
     @AppStorage("hapticStrength") private var strength = "Medium"
-    @AppStorage("iconAppearance") private var appearance = "Ice"
-    @AppStorage("iconCustomRed") private var red = 0.55
-    @AppStorage("iconCustomGreen") private var green = 0.85
-    @AppStorage("iconCustomBlue") private var blue = 1.0
-    @AppStorage("centerCrosshair") private var crosshair = false
-    @AppStorage("mirrorSelfies") private var mirrorSelfies = false
-    private var accent = CameraAccent()
-    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
-    @AppStorage("tapZoomReset") private var tapZoomReset = true
-    @AppStorage("recordingLock") private var recordingLock = false
-    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
-    @AppStorage("countdownHaptics") private var countdownHaptics = false
-    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         SettingsPage {
             SettingsCard(title: "Shutter", symbol: "timer") {
                 ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (10, "10 seconds")])
             }
+
             SettingsCard(title: "Capture Haptics", symbol: "waveform") {
-                Toggle("Enabled", isOn: $haptics)
-                ThemeMenu(title: "Strength", selection: $strength, options: ["Low", "Medium", "Strong"].map { ($0, $0) }, onSelect: { CameraHaptics.fire(strength: $0) }).disabled(!haptics)
-            }
-            SettingsCard(title: "Zoom & Recording", symbol: "plus.magnifyingglass") {
-                ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
-                Toggle("Tap Zoom to Reset to 1×", isOn: $tapZoomReset)
-                if camera.captureMode != .photo {
-                    Toggle("Lock Recording Controls", isOn: $recordingLock)
-                    Text("When locked, hold the shutter for one second to stop.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Toggle("Low Storage Warning", isOn: $lowStorageWarning)
-            }
-            SettingsCard(title: "More Controls", symbol: "slider.horizontal.3") {
-                Toggle("Countdown Haptics", isOn: $countdownHaptics)
-                Toggle("Remember Last Camera Mode", isOn: $rememberCaptureMode)
-                Button("Reset Exposure & White Balance") { camera.setExposureBias(0); camera.selectWhiteBalancePreset(.auto) }
-                Toggle("Center Crosshair", isOn: $crosshair)
-                Toggle("Mirror Saved Selfies", isOn: $mirrorSelfies)
+                SettingsToggleRow(
+                    title: "Haptic Capture",
+                    subtitle: "Feel a tap when the shutter starts or stops",
+                    isOn: $haptics
+                )
+                SettingsDivider()
+                ThemeMenu(
+                    title: "Strength",
+                    selection: $strength,
+                    options: ["Low", "Medium", "Strong"].map { ($0, $0) },
+                    onSelect: { CameraHaptics.fire(strength: $0) }
+                )
+                .disabled(!haptics)
             }
         }
-        .tint(accent.color)
-        .accentColor(accent.color)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
-        .navigationTitle("Capture")
+        .navigationTitle("Shutter & Haptics")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ZoomRecordingSettingsView: View {
+    @ObservedObject var camera: CameraManager
+    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
+    @AppStorage("tapZoomReset") private var tapZoomReset = true
+    @AppStorage("recordingLock") private var recordingLock = false
+    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Zoom", symbol: "plus.magnifyingglass") {
+                ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Tap Zoom to Reset",
+                    subtitle: "Tap the zoom value to return to 1×",
+                    isOn: $tapZoomReset
+                )
+            }
+
+            SettingsCard(title: "Capture Safeguards", symbol: "lock.shield.fill") {
+                if camera.captureMode != .photo {
+                    SettingsToggleRow(
+                        title: "Lock Recording Controls",
+                        subtitle: "Hold the shutter for one second to stop",
+                        isOn: $recordingLock
+                    )
+                    SettingsDivider()
+                }
+                SettingsToggleRow(
+                    title: "Low Storage Warning",
+                    subtitle: "Warn before storage gets too low",
+                    isOn: $lowStorageWarning
+                )
+            }
+        }
+        .navigationTitle("Zoom & Recording")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct CameraControlsSettingsView: View {
+    @Environment(\.cameraTint) private var theme
+    @ObservedObject var camera: CameraManager
+    @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
+    @AppStorage("centerCrosshair") private var crosshair = false
+    @AppStorage("mirrorSelfies") private var mirrorSelfies = false
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Camera Controls", symbol: "slider.horizontal.3") {
+                SettingsToggleRow(title: "Countdown Haptics", subtitle: "Tap along with the shutter timer", isOn: $countdownHaptics)
+                SettingsDivider()
+                SettingsToggleRow(title: "Remember Camera Mode", subtitle: "Open in the last used capture mode", isOn: $rememberCaptureMode)
+                SettingsDivider()
+                SettingsToggleRow(title: "Center Crosshair", subtitle: "Show a marker at the frame center", isOn: $crosshair)
+                SettingsDivider()
+                SettingsToggleRow(title: "Mirror Saved Selfies", subtitle: "Save selfies as they appear in preview", isOn: $mirrorSelfies)
+            }
+
+            SettingsCard(title: "Reset", symbol: "arrow.counterclockwise") {
+                Button {
+                    camera.setExposureBias(0)
+                    camera.selectWhiteBalancePreset(.auto)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(theme)
+                            .frame(width: 34, height: 34)
+                            .background(theme.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reset Exposure & WB")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Restore automatic exposure and color")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.primary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .navigationTitle("Camera Controls")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

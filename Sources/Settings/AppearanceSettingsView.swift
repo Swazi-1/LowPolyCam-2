@@ -86,13 +86,13 @@ struct VideoPresetsView: View {
     @AppStorage("appColorScheme") private var appColorScheme = "system"
     @State private var preview: VideoQuickPreset = .balanced
     var body: some View {
-        SettingsPage {
-            VStack(spacing: 18) {
+        StaticSettingsPage {
+            VStack(spacing: 9) {
                 Image(systemName: "video.fill")
-                    .font(.system(size: 38, weight: .light))
+                    .font(.system(size: 30, weight: .light))
                     .foregroundStyle(theme).shadow(color: theme.opacity(0.4), radius: 14)
                 Text(preview.rawValue).font(.title3.weight(.bold))
-                VStack(spacing: 7) {
+                VStack(spacing: 5) {
                     HStack(spacing: 6) {
                         Circle().fill(.red).frame(width: 6, height: 6)
                         Text("REC  00:00:12").font(.system(.caption, design: .monospaced).weight(.bold))
@@ -103,26 +103,28 @@ struct VideoPresetsView: View {
                         Text("HEVC")
                     }.font(.caption2.weight(.semibold)).foregroundStyle(theme)
                 }
-                .padding(14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
                 .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.opacity(0.4)))
                 Text("HUD preview · example recording timer").font(.caption2).foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity).padding(.vertical, 22)
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
             .background(LinearGradient(colors: [theme.opacity(0.22), Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
-            SettingsCard(title: "Choose a Preset", symbol: "wand.and.stars") {
+            SettingsCard(title: "Choose a Preset", symbol: "wand.and.stars", contentSpacing: 7) {
                 ForEach(VideoQuickPreset.allCases) { preset in
                     Button { preview = preset } label: {
                         HStack {
-                            VStack(alignment: .leading, spacing: 5) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(preset.rawValue).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                                Text(preset.detail).font(.caption).foregroundStyle(.secondary)
+                                Text(preset.detail).font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Image(systemName: preview == preset ? "checkmark.circle.fill" : "circle")
                                 .foregroundStyle(theme)
                         }
-                        .padding(12)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .background(theme.opacity(preview == preset ? 0.16 : 0.04), in: RoundedRectangle(cornerRadius: 12))
                         .contentShape(Rectangle())
                     }.buttonStyle(.plain)
@@ -133,7 +135,7 @@ struct VideoPresetsView: View {
                     }
                 } label: {
                     Text("Use \(preview.rawValue)").font(.subheadline.weight(.bold))
-                        .frame(maxWidth: .infinity).padding(.vertical, 13)
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
                         .background(theme, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
                 }.buttonStyle(.plain)
             }
