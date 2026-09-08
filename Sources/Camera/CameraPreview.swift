@@ -7,6 +7,7 @@ struct CameraPreview: UIViewRepresentable {
     @Environment(\.cameraTint) private var theme
     let session: AVCaptureSession
     let isFocusExposureLocked: Bool
+    let focusExposureLockLabel: String
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
     let reservesTopHUDSpace: Bool
@@ -37,7 +38,7 @@ struct CameraPreview: UIViewRepresentable {
         view.tintColor = UIColor(theme)
         view.onTapToFocus = onTapToFocus
         view.onLongPressToLock = onLongPressToLock
-        view.setFocusExposureLocked(isFocusExposureLocked)
+        view.setFocusExposureLocked(isFocusExposureLocked, label: focusExposureLockLabel)
         view.setStabilizationEnabled(stabilizationEnabled)
     }
 }
@@ -256,9 +257,13 @@ final class PreviewView: UIView {
         transitionDimView = nil
     }
 
-    func setFocusExposureLocked(_ isLocked: Bool) {
+    func setFocusExposureLocked(_ isLocked: Bool, label: String) {
         let wasLocked = focusExposureLocked
         focusExposureLocked = isLocked
+        if lockLabel.text != label {
+            lockLabel.text = label
+            setNeedsLayout()
+        }
         lockLabel.isHidden = !isLocked
         focusIndicator.layer.borderColor = tintColor.cgColor
         if isLocked {

@@ -56,6 +56,7 @@ struct CameraView: View {
             CameraPreview(
                 session: camera.session,
                 isFocusExposureLocked: camera.isFocusExposureLocked,
+                focusExposureLockLabel: camera.focusExposureLockLabel,
                 stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
                 isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
                 reservesTopHUDSpace: isHUDEnabled,
@@ -355,6 +356,7 @@ struct CameraView: View {
             .onChanged { value in
                 if dragStartZoom == nil {
                     dragStartZoom = camera.zoomFactor
+                    camera.beginZoomInteraction()
                     AppEventLog.event("Zoom gesture began at \(camera.zoomLabel)")
                 }
                 guard let dragStartZoom else { return }
@@ -369,6 +371,7 @@ struct CameraView: View {
                     AppEventLog.event("Zoom gesture tapped: reset requested to 1×")
                 }
                 AppEventLog.event("Zoom gesture ended at \(camera.zoomLabel)")
+                camera.endZoomInteraction()
                 dragStartZoom = nil
             }
     }

@@ -28,7 +28,7 @@ struct LiveStatsOverlay: View {
                 }
                 if showFPS { metric(compact ? "FPS" : "Capture FPS", stats.fps.map { String(format: "%.1f", $0) } ?? "—") }
                 if showBitrate { metric(compact ? "Bitrate" : "File bitrate", stats.mbps.map { String(format: "%.1f Mbps", $0) } ?? "—") }
-                if showDrops { metric(compact ? "Drops*" : "Capture drops", stats.drops.map { String($0) } ?? "—") }
+                if showDrops { metric(compact ? "Drops*" : "Capture drops", stats.drops.map { String($0) } ?? "N/A") }
                 if !showFPS && !showBitrate && !showDrops { Text("No stats selected").font(.caption) }
             }
             .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -106,7 +106,7 @@ struct RecordingExtrasSettings: View {
 
     @ViewBuilder
     private var liveStatsControls: some View {
-        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Shows capture FPS, file bitrate and dropped capture frames. Uses a little extra processing.", isOn: $stats)
+        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Shows recording FPS, file bitrate and monitored frame drops. Uses a little extra processing.", isOn: $stats)
         SettingsDivider()
         NavigationLink {
             LiveStatsSettings(positionStats: positionStats)
@@ -132,7 +132,7 @@ struct LiveStatsSettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             SettingsCard(title: "Information", symbol: "list.bullet") {
-                SettingsToggleRow(title: "Capture FPS", subtitle: "Measured frames arriving from the camera", isOn: $showFPS)
+                SettingsToggleRow(title: "Capture FPS", subtitle: "Active recording frame rate", isOn: $showFPS)
                 SettingsDivider()
                 SettingsToggleRow(title: "File Bitrate", subtitle: "Measured recording data in Mbps", isOn: $showBitrate)
                 SettingsDivider()

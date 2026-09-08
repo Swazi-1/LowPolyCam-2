@@ -81,6 +81,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isCapturingPhoto = false
     @Published private(set) var captureMode: CaptureMode = .video
     @Published private(set) var isFocusExposureLocked = false
+    @Published private(set) var focusExposureLockLabel = "AE/AF LOCK"
     @Published private(set) var exposureBias: Float = 0
     @Published private(set) var whiteBalancePreset: WhiteBalancePreset = .auto
     @Published private(set) var isPreviewTransitioning = false
@@ -197,6 +198,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let zoomSubmissionLock = NSLock()
     private var pendingZoomSubmission: ZoomSubmission?
     private var isZoomSubmissionScheduled = false
+    private var didWarnAboutRecordingLensSwitch = false
     private let zoomRequests = RequestToken()
     private let cameraSwitchRequests = RequestToken()
     private let whiteBalanceRequests = RequestToken()
@@ -414,8 +416,8 @@ final class CameraManager: NSObject, ObservableObject {
             center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] note in
                 self?.sessionQueue.async { self?.handleSessionRuntimeError(note) }
             },
-            center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil) { [weak self] _ in
-                self?.sessionQueue.async { self?.handleSessionInterrupted() }
+            center.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil) { [weak self] note in
+                self?.sessionQueue.async { self?.handleSessionInterrupted(note) }
             },
             center.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: nil) { [weak self] _ in
                 self?.sessionQueue.async { self?.handleSessionInterruptionEnded() }
@@ -442,8 +444,9 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func handleSessionInterrupted() {
-        AppEventLog.event("SESSION INTERRUPTED: running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
+    private func handleSessionInterrupted(_ notification: Notification) {
+        let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
+        AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
         burstRemaining = 0
@@ -707,6 +710,17 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func beginZoomInteraction() {
+        sessionQueue.async { [weak self] in
+            self?.didWarnAboutRecordingLensSwitch = false
+        }
+    }
+
+    func endZoomInteraction() {
+        // Kept as a gesture boundary for diagnostics and future zoom policies. The warning flag
+        // resets at the beginning of the next interaction so late queued samples cannot re-spam it.
+    }
+
     private func drainZoomSubmissions() {
         while let submission = takePendingZoomSubmission() {
             applyZoomSubmission(submission)
@@ -835,7 +849,10 @@ final class CameraManager: NSObject, ObservableObject {
                 if wantsDifferentLens {
                     let recordingOrStarting = self.movieOutput.isRecording || self.recordingState.requestsRecording || self.isRecordingStarting
                     if recordingOrStarting && self.captureMode != .video {
-                        self.showError("Stop recording to switch physical lenses.")
+                        if !self.didWarnAboutRecordingLensSwitch {
+                            self.didWarnAboutRecordingLensSwitch = true
+                            self.showError("Stop recording to switch physical lenses.")
+                        }
                         return
                     }
 
@@ -1158,6 +1175,9 @@ final class CameraManager: NSObject, ObservableObject {
             setLiveMetricsConnectionEnabled(true)
             liveMetrics.setRunning(true)
         }
+        let initialDuration = videoInput?.device.activeVideoMinFrameDuration.seconds ?? 0
+        let initialFPS: Double? = initialDuration > 0 ? 1 / initialDuration : nil
+        publish { self.liveStats.update(fps: initialFPS, mbps: nil, drops: nil) }
         AppEventLog.event("Live metrics started: captureMetricsAvailable=\(captureMetricsAvailable), mode=\(captureMode.rawValue)")
 
         // Bitrate comes from AVCaptureMovieFileOutput and remains available even if the optional
@@ -1183,16 +1203,33 @@ final class CameraManager: NSObject, ObservableObject {
                 drops = measurement.fps != nil ? measurement.drops : nil
             }
 
+            let activeDuration = self.videoInput?.device.activeVideoMinFrameDuration.seconds ?? 0
+            let activeFPS: Double? = activeDuration > 0 ? 1 / activeDuration : nil
+            let monitoredStreamRepresentsCaptureRate: Bool
+            if let measuredFPS = fps, let activeFPS {
+                monitoredStreamRepresentsCaptureRate = measuredFPS >= activeFPS * 0.75
+            } else {
+                monitoredStreamRepresentsCaptureRate = false
+            }
+            // AVCaptureVideoDataOutput can be capped below the movie stream (notably rear 240 fps
+            // and front 120 fps), and is intentionally detached for rear 4K60. The active device
+            // duration is the recording frame rate; only expose drop counts when the monitoring
+            // stream is actually keeping up closely enough to make that counter meaningful.
+            let displayedFPS = activeFPS ?? fps
+            let displayedDrops = attached && monitoredStreamRepresentsCaptureRate ? drops : nil
+
             let fpsText = fps.map { String(format: "%.1f", $0) } ?? "unavailable"
+            let activeFPSText = activeFPS.map { String(format: "%.1f", $0) } ?? "unavailable"
             let bitrateText = mbps.map { String(format: "%.2f Mbps", $0) } ?? "unavailable"
             let dropsText = drops.map { String($0) } ?? "unavailable"
             AppEventLog.event(
                 "LIVE METRICS: duration=\(String(format: "%.1f", duration))s, bytes=\(bytes), bitrate=\(bitrateText), " +
-                "fps=\(fpsText), drops=\(dropsText), captureMetricsAttached=\(attached)"
+                "monitoredFPS=\(fpsText), activeFPS=\(activeFPSText), monitoredDrops=\(dropsText), " +
+                "dropsAvailable=\(displayedDrops != nil), captureMetricsAttached=\(attached)"
             )
 
             self.publish {
-                self.liveStats.update(fps: fps, mbps: mbps, drops: drops)
+                self.liveStats.update(fps: displayedFPS, mbps: mbps, drops: displayedDrops)
             }
         }
         metricsTimer = timer
@@ -2205,7 +2242,13 @@ final class CameraManager: NSObject, ObservableObject {
                     if canLockFocus { current.focusMode = .locked }
                     if canLockExposure { current.exposureMode = .locked }
                     current.unlockForConfiguration()
-                    self.publish { self.isFocusExposureLocked = canLockFocus || canLockExposure }
+                    let label = canLockFocus && canLockExposure
+                        ? "AE/AF LOCK"
+                        : (canLockFocus ? "AF LOCK" : "AE LOCK")
+                    self.publish {
+                        self.isFocusExposureLocked = canLockFocus || canLockExposure
+                        self.focusExposureLockLabel = label
+                    }
                     AppEventLog.event("Focus/exposure lock applied: focus=\(canLockFocus), exposure=\(canLockExposure)")
                 } catch {
                     self.showError("Couldn’t lock focus and exposure.")
