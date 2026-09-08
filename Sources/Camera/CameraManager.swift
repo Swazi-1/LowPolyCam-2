@@ -2381,7 +2381,7 @@ final class CameraManager: NSObject, ObservableObject {
         AppEventLog.event(
             "APPLIED \(context): \(cameraPosition == .back ? "back" : "front") \(lensKind) \(device.localizedName), " +
             "\(dimensions.width)x\(dimensions.height) @ \(String(format: "%.1f", frameRate)) fps, " +
-            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(requestedZoom)), WB=\(whiteBalancePreset.rawValue)"
+            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(for: requestedZoom)), WB=\(whiteBalancePreset.rawValue)"
         )
     }
 
