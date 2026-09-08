@@ -4,7 +4,6 @@ import CoreMotion
 import UIKit
 
 struct CameraIconButton: View {
-    @Environment(\.cameraTint) private var theme
     let symbol: String
     let isEnabled: Bool
     let color: Color
@@ -196,9 +195,21 @@ private struct RecordingClockText: View {
     }
 }
 
+/// The HUD receives only the camera state it displays. Zoom and toast updates therefore no
+/// longer directly invalidate this view through CameraManager's broad ObservableObject stream.
+struct CameraHUDSnapshot: Equatable {
+    let isRecording: Bool
+    let captureModeLabel: String
+    let isPhotoMode: Bool
+    let resolutionLabel: String
+    let frameRateLabel: String?
+    let remainingLabel: String
+    let whiteBalanceLabel: String
+    let availableStorageBytes: Int64
+    let lastFrameGaps: Int?
+}
+
 struct CameraHUD: View {
-    @Environment(\.cameraTint) private var theme
-    @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDBattery") private var showBattery = false
     @AppStorage("cameraHUDStorage") private var showStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
@@ -206,77 +217,50 @@ struct CameraHUD: View {
     @AppStorage("thermalHUD") private var showThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
     @State private var thermalState = ProcessInfo.processInfo.thermalState
+    let snapshot: CameraHUDSnapshot
+    let recordingClock: RecordingClockState
     let showResolution: Bool
     let showFPS: Bool
     let showRemaining: Bool
     let showWhiteBalance: Bool
     let maxWidth: CGFloat
 
-    // Keep showZoom as an ignored, defaulted compatibility argument so an older
-    // CameraView/CameraControls pair cannot fail to compile during incremental updates.
     init(
-        camera: CameraManager,
+        snapshot: CameraHUDSnapshot,
+        recordingClock: RecordingClockState,
         showResolution: Bool,
         showFPS: Bool,
         showRemaining: Bool,
-        showZoom: Bool = false,
         showWhiteBalance: Bool,
         maxWidth: CGFloat
     ) {
-        _camera = ObservedObject(wrappedValue: camera)
+        self.snapshot = snapshot
+        self.recordingClock = recordingClock
         self.showResolution = showResolution
         self.showFPS = showFPS
         self.showRemaining = showRemaining
         self.showWhiteBalance = showWhiteBalance
         self.maxWidth = maxWidth
-        _ = showZoom
     }
 
     var body: some View {
-      VStack(spacing: 6) {
-        HStack(spacing: 5) {
-            Circle().fill(camera.isRecording ? Color.red : theme).frame(width: 5, height: 5)
-            Text(camera.isRecording ? "REC" : camera.captureMode.rawValue)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(theme)
-            if camera.isRecording {
-                RecordingClockText(clock: camera.recordingClock)
-            }
-        }
-        if !items.isEmpty {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        Label(item, systemImage: symbol(for: item))
-                    }
-                }
-                .fixedSize(horizontal: true, vertical: false)
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        Label(item, systemImage: symbol(for: item))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                }
-                .frame(maxWidth: maxWidth - 20)
-            }
-        }
-      }
-            .font(.system(size: hudTextSize, weight: .semibold, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(theme)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
-            .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20).stroke(theme.opacity(0.35), lineWidth: 1)
-            }
-            // Keep the black pill only as wide as its content. The outer frame centers it in the
-            // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
-            .frame(maxWidth: maxWidth)
-            .accessibilityLabel(([camera.captureMode.rawValue] + items).joined(separator: ", "))
+        CameraHUDContent(
+            snapshot: snapshot,
+            recordingClock: recordingClock,
+            showResolution: showResolution,
+            showFPS: showFPS,
+            showRemaining: showRemaining,
+            showWhiteBalance: showWhiteBalance,
+            showBattery: showBattery,
+            batteryLevel: batteryLevel,
+            showStorage: showStorage,
+            showThermal: showThermal,
+            thermalState: thermalState,
+            showDroppedFrames: showDroppedFrames,
+            textSize: hudTextSize,
+            maxWidth: maxWidth
+        )
+        .equatable()
             .task(id: showBattery) {
                 UIDevice.current.isBatteryMonitoringEnabled = showBattery
                 batteryLevel = showBattery ? UIDevice.current.batteryLevel : -1
@@ -291,19 +275,97 @@ struct CameraHUD: View {
                 thermalState = ProcessInfo.processInfo.thermalState
             }
     }
+}
 
-    private var displayText: String {
-        items.joined(separator: "  ·  ")
+private struct CameraHUDContent: View, Equatable {
+    @Environment(\.cameraTint) private var theme
+    let snapshot: CameraHUDSnapshot
+    let recordingClock: RecordingClockState
+    let showResolution: Bool
+    let showFPS: Bool
+    let showRemaining: Bool
+    let showWhiteBalance: Bool
+    let showBattery: Bool
+    let batteryLevel: Float
+    let showStorage: Bool
+    let showThermal: Bool
+    let thermalState: ProcessInfo.ThermalState
+    let showDroppedFrames: Bool
+    let textSize: Double
+    let maxWidth: CGFloat
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.snapshot == rhs.snapshot &&
+        lhs.showResolution == rhs.showResolution &&
+        lhs.showFPS == rhs.showFPS &&
+        lhs.showRemaining == rhs.showRemaining &&
+        lhs.showWhiteBalance == rhs.showWhiteBalance &&
+        lhs.showBattery == rhs.showBattery &&
+        lhs.batteryLevel == rhs.batteryLevel &&
+        lhs.showStorage == rhs.showStorage &&
+        lhs.showThermal == rhs.showThermal &&
+        lhs.thermalState.rawValue == rhs.thermalState.rawValue &&
+        lhs.showDroppedFrames == rhs.showDroppedFrames &&
+        lhs.textSize == rhs.textSize &&
+        lhs.maxWidth == rhs.maxWidth
+    }
+
+    var body: some View {
+        let hudItems = items
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
+                Circle().fill(snapshot.isRecording ? Color.red : theme).frame(width: 5, height: 5)
+                Text(snapshot.isRecording ? "REC" : snapshot.captureModeLabel)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme)
+                if snapshot.isRecording {
+                    RecordingClockText(clock: recordingClock)
+                }
+            }
+            if !hudItems.isEmpty {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(hudItems.enumerated()), id: \.offset) { _, item in
+                            Label(item, systemImage: symbol(for: item))
+                        }
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                        ForEach(Array(hudItems.enumerated()), id: \.offset) { _, item in
+                            Label(item, systemImage: symbol(for: item))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                    }
+                    .frame(maxWidth: maxWidth - 20)
+                }
+            }
+        }
+        .font(.system(size: textSize, weight: .semibold, design: .rounded))
+        .monospacedDigit()
+        .foregroundStyle(theme)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
+        .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20).stroke(theme.opacity(0.35), lineWidth: 1)
+        }
+        // Keep the black pill only as wide as its content. The outer frame centers it in the
+        // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
+        .frame(maxWidth: maxWidth)
+        .accessibilityLabel(([snapshot.captureModeLabel] + hudItems).joined(separator: ", "))
     }
 
     private var items: [String] {
         var result: [String] = []
-        if showResolution { result.append(camera.hudResolutionLabel) }
-        if showFPS, let fps = camera.hudFrameRateLabel { result.append("\(fps)fps") }
-        if showRemaining { result.append(camera.hudRemainingLabel) }
-        if showWhiteBalance { result.append(whiteBalanceShortLabel) }
+        if showResolution { result.append(snapshot.resolutionLabel) }
+        if showFPS, let fps = snapshot.frameRateLabel { result.append("\(fps)fps") }
+        if showRemaining { result.append(snapshot.remainingLabel) }
+        if showWhiteBalance { result.append(snapshot.whiteBalanceLabel) }
         if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
-        if showStorage { result.append(String(format: "%.1f GB", Double(camera.availableStorageBytes) / 1_000_000_000)) }
+        if showStorage { result.append(String(format: "%.1f GB", Double(snapshot.availableStorageBytes) / 1_000_000_000)) }
         if showThermal {
             switch thermalState {
             case .nominal: result.append("Cool")
@@ -313,20 +375,10 @@ struct CameraHUD: View {
             @unknown default: result.append("Temp —")
             }
         }
-        if showDroppedFrames, camera.captureMode != .photo {
-            result.append(camera.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
+        if showDroppedFrames, !snapshot.isPhotoMode {
+            result.append(snapshot.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
         }
         return result
-    }
-
-    private var whiteBalanceShortLabel: String {
-        switch camera.whiteBalancePreset {
-        case .auto: return "AWB"
-        case .daylight: return "Day"
-        case .cloudy: return "Cloud"
-        case .tungsten: return "Tung"
-        case .fluorescent: return "Fluor"
-        }
     }
 
     private func symbol(for item: String) -> String {
@@ -335,8 +387,8 @@ struct CameraHUD: View {
         if item.contains("GB") { return "internaldrive" }
         if item.hasPrefix("Gaps") { return "waveform.path" }
         if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
-        if item.hasPrefix("~") { return camera.captureMode == .photo ? "photo.on.rectangle" : "clock" }
-        if item == whiteBalanceShortLabel { return "sun.max" }
+        if item.hasPrefix("~") { return snapshot.isPhotoMode ? "photo.on.rectangle" : "clock" }
+        if item == snapshot.whiteBalanceLabel { return "sun.max" }
         return "viewfinder"
     }
 }

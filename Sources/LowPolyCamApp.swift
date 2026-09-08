@@ -6,6 +6,11 @@ struct LowPolyCamApp: App {
     private var accent = CameraAccent()
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
+    init() {
+        AppEventLog.beginNewSession()
+        AppEventLog.event("App initialized")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(permissionManager: permissionManager)

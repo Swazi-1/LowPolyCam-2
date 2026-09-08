@@ -233,6 +233,17 @@ struct CameraView: View {
     private var topControls: some View {
         GeometryReader { proxy in
             let hudMaxWidth = max(120, proxy.size.width - 112)
+            let hudSnapshot = CameraHUDSnapshot(
+                isRecording: camera.isRecording,
+                captureModeLabel: camera.captureMode.rawValue,
+                isPhotoMode: camera.captureMode == .photo,
+                resolutionLabel: camera.hudResolutionLabel,
+                frameRateLabel: camera.hudFrameRateLabel,
+                remainingLabel: camera.hudRemainingLabel,
+                whiteBalanceLabel: hudWhiteBalanceLabel,
+                availableStorageBytes: camera.availableStorageBytes,
+                lastFrameGaps: camera.lastFrameGaps
+            )
 
             ZStack {
                 HStack {
@@ -247,7 +258,8 @@ struct CameraView: View {
 
                 if isHUDEnabled {
                     CameraHUD(
-                        camera: camera,
+                        snapshot: hudSnapshot,
+                        recordingClock: camera.recordingClock,
                         showResolution: hudResolution,
                         showFPS: hudFPS,
                         showRemaining: hudRemaining,
@@ -353,6 +365,16 @@ struct CameraView: View {
     private func captureHaptic() {
         guard isHapticCaptureEnabled else { return }
         CameraHaptics.fire(captureOnly: true)
+    }
+
+    private var hudWhiteBalanceLabel: String {
+        switch camera.whiteBalancePreset {
+        case .auto: return "AWB"
+        case .daylight: return "Day"
+        case .cloudy: return "Cloud"
+        case .tungsten: return "Tung"
+        case .fluorescent: return "Fluor"
+        }
     }
 
     private func cancelCountdown() {

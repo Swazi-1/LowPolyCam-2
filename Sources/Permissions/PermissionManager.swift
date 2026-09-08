@@ -19,6 +19,7 @@ final class PermissionManager: ObservableObject {
         let cameraReady = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
         let photosReady = PHPhotoLibrary.authorizationStatus(for: .addOnly) == .authorized
         state = cameraReady && photosReady ? .ready : .checking
+        AppEventLog.event("Permissions initialized: camera=\(cameraReady), photos=\(photosReady)")
     }
 
     func requestRequiredPermissionsIfNeeded() async {
@@ -27,6 +28,7 @@ final class PermissionManager: ObservableObject {
 
         if allPermissionsGranted {
             state = .ready
+            AppEventLog.event("Permissions already granted")
             return
         }
 
@@ -50,6 +52,7 @@ final class PermissionManager: ObservableObject {
     func refreshAuthorizationState() {
         let missing = missingPermissionNames
         state = missing.isEmpty ? .ready : .denied(missing)
+        AppEventLog.event(missing.isEmpty ? "Permissions ready" : "Permissions missing: \(missing.joined(separator: ", "))")
     }
 
     private var allPermissionsGranted: Bool {

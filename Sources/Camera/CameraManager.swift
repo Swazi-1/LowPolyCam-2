@@ -538,6 +538,7 @@ final class CameraManager: NSObject, ObservableObject {
     func start() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            AppEventLog.event("Camera start requested")
             self.requestedZoom = 1
             // The active format still has to be ready before startRunning, but the full
             // settings-capability scan can happen after the first frame is unblocked.
@@ -547,6 +548,7 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
             self.session.startRunning()
+            AppEventLog.event("Camera session running")
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
             self.updateCapabilities()
@@ -561,6 +563,7 @@ final class CameraManager: NSObject, ObservableObject {
     func stop() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            AppEventLog.event("Camera stop requested")
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
@@ -574,12 +577,15 @@ final class CameraManager: NSObject, ObservableObject {
             }
             if self.session.isRunning {
                 self.session.stopRunning()
+                AppEventLog.event("Camera session stopped")
                 self.publish { self.isSessionRunning = false }
             }
         }
     }
 
     func appDidBecomeInactive() {
+        AppEventLog.event("App became inactive")
+        AppEventLog.flush()
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.stopLiveMetrics()
@@ -611,6 +617,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func appDidBecomeActive() {
+        AppEventLog.event("App became active")
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.configureSessionIfNeeded()
@@ -859,8 +866,7 @@ final class CameraManager: NSObject, ObservableObject {
                                     let actualZoom = self.displayedZoomFactor(for: device.videoZoomFactor, device: device)
                                     self.requestedZoom = actualZoom
                                     self.publish {
-                                        self.zoomFactor = actualZoom
-                                        self.zoomLabel = self.formattedZoomLabel(for: actualZoom)
+                                        self.applyPublishedZoomIfNeeded(actualZoom)
                                     }
                                 },
                                 onPreparationFailure: { [weak self] in
@@ -909,8 +915,7 @@ final class CameraManager: NSObject, ObservableObject {
                 guard self.zoomRequests.isLatest(requestID) else { return }
                 self.requestedZoom = factor
                 self.publish {
-                    self.zoomFactor = factor
-                    self.zoomLabel = self.formattedZoomLabel(for: factor)
+                    self.applyPublishedZoomIfNeeded(factor)
                 }
 
                 if self.lensTransitionCoordinator.isActive(requestID) {
@@ -938,8 +943,7 @@ final class CameraManager: NSObject, ObservableObject {
               zoomRequests.isLatest(request.id) else { return true }
         requestedZoom = factor
         publish {
-            self.zoomFactor = factor
-            self.zoomLabel = self.formattedZoomLabel(for: factor)
+            self.applyPublishedZoomIfNeeded(factor)
         }
         return true
     }
@@ -979,8 +983,7 @@ final class CameraManager: NSObject, ObservableObject {
         // range is already correct. Re-scanning every format on every lens after the blocking
         // hardware commit only extends the visible transition.
         publish {
-            self.zoomFactor = displayed
-            self.zoomLabel = self.formattedZoomLabel(for: displayed)
+            self.applyPublishedZoomIfNeeded(displayed)
             self.torchAvailable = prepared.device.hasTorch && prepared.device.isTorchAvailable
             self.isTorchOn = prepared.device.hasTorch && prepared.device.torchMode == .on
         }
@@ -1002,6 +1005,7 @@ final class CameraManager: NSObject, ObservableObject {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isLensTransitioning else { return }
         let previous = cameraPosition
         let target: CameraPosition = previous == .back ? .front : .back
+        AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")")
         let requestID = cameraSwitchRequests.next()
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
         _ = qualityRequests.next() // Do not apply an old quality request to the new input.
@@ -1031,6 +1035,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectCaptureMode(_ mode: CaptureMode) {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, !isLensTransitioning, captureMode != mode else { return }
         let previousMode = captureMode
+        AppEventLog.event("Capture mode requested: \(previousMode.rawValue) to \(mode.rawValue)")
         let requestID = modeChangeRequests.next()
         _ = zoomRequests.next() // A queued old-mode zoom must not reconfigure the new mode.
         _ = qualityRequests.next() // Drop quality work that belonged to the previous mode.
@@ -1336,6 +1341,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectResolution(_ resolution: VideoResolution) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedResolution != resolution else { return }
+        AppEventLog.event("Video resolution requested: \(selectedResolution.rawValue) to \(resolution.rawValue)")
         selectedResolution = resolution
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1374,6 +1380,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectFrameRate(_ frameRate: VideoFrameRate) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedFrameRate != frameRate else { return }
+        AppEventLog.event("Video frame rate requested: \(selectedFrameRate.rawValue) to \(frameRate.rawValue)")
         selectedFrameRate = frameRate
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1412,6 +1419,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectSlowMotionResolution(_ resolution: VideoResolution) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedSlowMotionResolution != resolution else { return }
+        AppEventLog.event("Slo-Mo resolution requested: \(selectedSlowMotionResolution.rawValue) to \(resolution.rawValue)")
         selectedSlowMotionResolution = resolution
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1448,6 +1456,7 @@ final class CameraManager: NSObject, ObservableObject {
     func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedSlowMotionFrameRate != frameRate else { return }
+        AppEventLog.event("Slo-Mo frame rate requested: \(selectedSlowMotionFrameRate.rawValue) to \(frameRate.rawValue)")
         selectedSlowMotionFrameRate = frameRate
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1510,6 +1519,7 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self, !self.recordingState.isFinalizing else { return }
 
             if self.recordingState.requestsRecording {
+                AppEventLog.event("Recording stop requested")
                 self.stopLiveMetrics()
                 self.segmentTimer?.cancel()
 
@@ -1526,6 +1536,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             guard !self.isCapturingPhoto, !self.lensTransitionCoordinator.hasActiveTransition else { return }
+            AppEventLog.event("Recording start requested: \(self.captureMode.rawValue) \(self.hudResolutionLabel) \(self.hudFrameRateLabel ?? "")fps")
             let splitDuration = Double(UserDefaults.standard.integer(forKey: "splitMinutes")) * 60
             self.transitionRecordingState(
                 to: .starting(splitDuration: splitDuration),
@@ -1588,6 +1599,8 @@ final class CameraManager: NSObject, ObservableObject {
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
             return
         }
+
+        AppEventLog.event("Configuring camera session\(forceRebuild ? " rebuild" : "")")
 
         lensTransitionCoordinator.cancel()
         _ = qualityRequests.next()
@@ -1663,6 +1676,7 @@ final class CameraManager: NSObject, ObservableObject {
             updateCapabilities()
             synchronizeTorchState()
         }
+        AppEventLog.event("Camera session configured")
     }
 
 
@@ -1837,8 +1851,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.isTorchOn = device.hasTorch && device.torchMode == .on
             self.minimumZoomFactor = minimumZoom
             self.maximumZoomFactor = maximumZoom
-            self.zoomFactor = displayedZoom
-            self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
+            self.applyPublishedZoomIfNeeded(displayedZoom)
             self.selectedResolution = selection.resolution
             self.selectedFrameRate = selection.frameRate
             self.supportedFrameRates = selection.supportedFrameRates
@@ -2250,8 +2263,7 @@ final class CameraManager: NSObject, ObservableObject {
         publish {
             self.minimumZoomFactor = minimum
             self.maximumZoomFactor = maximum
-            self.zoomFactor = displayedZoom
-            self.zoomLabel = self.formattedZoomLabel(for: displayedZoom)
+            self.applyPublishedZoomIfNeeded(displayedZoom)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
         }
@@ -2313,6 +2325,18 @@ final class CameraManager: NSObject, ObservableObject {
         abs(zoomFactor.rounded() - zoomFactor) < 0.01
             ? "\(Int(zoomFactor.rounded()))×"
             : String(format: "%.1f×", zoomFactor)
+    }
+
+    /// Runs on the main queue inside an existing publish block. Avoiding identical assignments
+    /// prevents ObservableObject redraws when a drag request resolves to the current zoom.
+    private func applyPublishedZoomIfNeeded(_ factor: CGFloat) {
+        if abs(zoomFactor - factor) >= 0.0005 {
+            zoomFactor = factor
+        }
+        let label = formattedZoomLabel(for: factor)
+        if zoomLabel != label {
+            zoomLabel = label
+        }
     }
 
 
@@ -2421,8 +2445,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             self.minimumZoomFactor = minZoom
             self.maximumZoomFactor = maxZoom
-            self.zoomFactor = displayed
-            self.zoomLabel = self.formattedZoomLabel(for: displayed)
+            self.applyPublishedZoomIfNeeded(displayed)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
         }
@@ -2557,8 +2580,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.suppressPreferencePersistence = wasSuppressing
             self.minimumZoomFactor = sloMoMinimumZoom
             self.maximumZoomFactor = sloMoMaximumZoom
-            self.zoomFactor = displayed
-            self.zoomLabel = self.formattedZoomLabel(for: displayed)
+            self.applyPublishedZoomIfNeeded(displayed)
             self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
             self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
         }
@@ -2701,6 +2723,7 @@ final class CameraManager: NSObject, ObservableObject {
         )
         activePhotoCaptureID = captureID
         activePhotoCaptureIsBurst = isBurst
+        AppEventLog.event("Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG")")
         refreshAvailableStorage()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -2783,6 +2806,7 @@ final class CameraManager: NSObject, ObservableObject {
         guard recordingState.requestsRecording else { return }
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        AppEventLog.event("Starting movie output: \(filename)")
         movieOutput.startRecording(to: url, recordingDelegate: self)
     }
 
@@ -2936,6 +2960,7 @@ final class CameraManager: NSObject, ObservableObject {
                             self.publish { self.lastFrameGaps = gaps }
                         }
                         self.postStatus(recoveryRetry ? "Recovered recording saved to Photos" : "Saved to Photos")
+                        AppEventLog.event("Video saved to Photos: \(fileURL.lastPathComponent)")
                     } else {
                         let preserved = CameraRecoveryStore.preserve(fileURL)
                         let detail = error?.localizedDescription ?? "Unknown Photos error"
@@ -2944,6 +2969,7 @@ final class CameraManager: NSObject, ObservableObject {
                         } else {
                             self.showError("Couldn’t save to Photos, and Recovery preservation could not be confirmed. \(detail)")
                         }
+                        AppEventLog.event("Video save failed: \(detail)")
                     }
 
                     self.inFlightVideoSaves.remove(sourceKey)
@@ -2984,6 +3010,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func showError(_ message: String) {
+        AppEventLog.event("ERROR: \(message)")
         postStatus(message)
     }
 }
@@ -2992,6 +3019,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+
+            AppEventLog.event("Recording started: \(fileURL.lastPathComponent)")
 
             if !self.recordingState.requestsRecording {
                 self.transitionRecordingToDiscard()
@@ -3024,6 +3053,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)")
             self.stopLiveMetrics()
             self.segmentTimer?.cancel()
 
@@ -3122,8 +3152,10 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
 
             if !success {
                 self.burstStopRequested = true
+                AppEventLog.event("Photo save failed: \(context.filename)")
             } else if !context.isBurst {
                 self.postStatus("Photo saved to Photos")
+                AppEventLog.event("Photo saved to Photos: \(context.filename)")
             } else if self.pendingPhotoSaves == 0,
                       self.activePhotoCaptureID == nil,
                       self.burstRemaining == 0 {
