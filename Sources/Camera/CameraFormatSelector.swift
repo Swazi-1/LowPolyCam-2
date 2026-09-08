@@ -10,6 +10,7 @@ struct CameraFormatSelector {
         let frameRate: VideoFrameRate
         let supportedFrameRates: [VideoFrameRate]
         let supportedDevices: [AVCaptureDevice]
+        let selectedFormatByDeviceID: [String: AVCaptureDevice.Format]
     }
 
     struct SlowMotionFormatSelection {
@@ -18,6 +19,9 @@ struct CameraFormatSelector {
         let frameRate: SlowMotionFrameRate
         let supportedFrameRates: [SlowMotionFrameRate]
         let supportedDevices: [AVCaptureDevice]
+        let selectedFormatByDeviceID: [String: AVCaptureDevice.Format]
+        let availableResolutionsByDeviceID: [String: [VideoResolution]]
+        let supportedFrameRatesByDeviceID: [String: [SlowMotionFrameRate]]
     }
 
     let selectedVideoCodec: String
@@ -67,26 +71,9 @@ struct CameraFormatSelector {
         return (best.format, best.photoDimensions)
     }
 
-    func photoResolutionLabel(for dimensions: CMVideoDimensions) -> String {
-        let megapixels = Double(dimensions.width) * Double(dimensions.height) / 1_000_000.0
-        let rounded = megapixels.rounded()
-        if abs(megapixels - rounded) < 0.35 {
-            return "\(Int(rounded)) MP"
-        }
-        return String(format: "%.1f MP", megapixels)
-    }
-
-    func availableResolutions(for devices: [AVCaptureDevice]) -> [VideoResolution] {
-        VideoResolution.allCases.filter { resolution in
-            devices.contains { device in
-                device.formats.contains { self.format($0, supports: resolution) && self.formatSupportsSelectedCodec($0) }
-            }
-        }
-    }
-
     /// Resolves the active Video selection with one local capability scan. The result keeps
-    /// the per-device rate map needed by CameraManager, so it does not rescan every format for
-    /// available resolutions, rates, and supported lenses as three separate queries.
+    /// the selected format for each supported device, so CameraManager does not rescan the
+    /// selected device after the capability pass.
     func videoFormatSelection(
         for devices: [AVCaptureDevice],
         requestedResolution: VideoResolution? = nil,
@@ -100,6 +87,10 @@ struct CameraFormatSelector {
             repeating: Array(repeating: [VideoFrameRate](), count: resolutions.count),
             count: devices.count
         )
+        var formatsByDeviceAndResolution = Array(
+            repeating: Array(repeating: [AVCaptureDevice.Format](), count: resolutions.count),
+            count: devices.count
+        )
 
         for (deviceIndex, device) in devices.enumerated() {
             for candidate in device.formats {
@@ -109,6 +100,7 @@ struct CameraFormatSelector {
                     $0.dimensions.width == dimensions.width && $0.dimensions.height == dimensions.height
                 }) else { continue }
                 hasFormatByResolution[resolutionIndex] = true
+                formatsByDeviceAndResolution[deviceIndex][resolutionIndex].append(candidate)
 
                 for frameRate in frameRates where format(candidate, supports: resolutions[resolutionIndex], at: frameRate) {
                     if !ratesByResolution[resolutionIndex].contains(frameRate) {
@@ -137,18 +129,30 @@ struct CameraFormatSelector {
         let supportedDevices = devices.enumerated().compactMap { index, device in
             ratesByDeviceAndResolution[index][resolutionIndex].contains(frameRate) ? device : nil
         }
+        var selectedFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
+        for (index, device) in devices.enumerated()
+            where ratesByDeviceAndResolution[index][resolutionIndex].contains(frameRate) {
+            let candidates = formatsByDeviceAndResolution[index][resolutionIndex].filter {
+                format($0, supports: resolution, at: frameRate)
+            }
+            if let selectedFormat = preferredRecordingFormat(from: candidates) {
+                selectedFormatByDeviceID[device.uniqueID] = selectedFormat
+            }
+        }
 
         return VideoFormatSelection(
             availableResolutions: availableResolutions,
             resolution: resolution,
             frameRate: frameRate,
             supportedFrameRates: supportedFrameRates,
-            supportedDevices: supportedDevices
+            supportedDevices: supportedDevices,
+            selectedFormatByDeviceID: selectedFormatByDeviceID
         )
     }
 
-    /// Resolves the active Slo-Mo selection with one local capability scan. This keeps the
-    /// active-mode calculation narrow without retaining a global cache of device formats.
+    /// Resolves the active Slo-Mo selection with one local capability scan. The result carries
+    /// the selected format and the chosen lens's capability lists so later configuration steps do
+    /// not rescan the same device formats.
     func slowMotionFormatSelection(
         for devices: [AVCaptureDevice],
         requestedResolution: VideoResolution? = nil,
@@ -161,6 +165,10 @@ struct CameraFormatSelector {
             repeating: Array(repeating: [SlowMotionFrameRate](), count: resolutions.count),
             count: devices.count
         )
+        var formatsByDeviceAndResolution = Array(
+            repeating: Array(repeating: [AVCaptureDevice.Format](), count: resolutions.count),
+            count: devices.count
+        )
 
         for (deviceIndex, device) in devices.enumerated() {
             for candidate in device.formats {
@@ -169,6 +177,7 @@ struct CameraFormatSelector {
                 guard let resolutionIndex = resolutions.firstIndex(where: {
                     $0.dimensions.width == dimensions.width && $0.dimensions.height == dimensions.height
                 }) else { continue }
+                formatsByDeviceAndResolution[deviceIndex][resolutionIndex].append(candidate)
 
                 for frameRate in frameRates {
                     let fps = Double(frameRate.rawValue)
@@ -201,32 +210,45 @@ struct CameraFormatSelector {
         let supportedDevices = devices.enumerated().compactMap { index, device in
             ratesByDeviceAndResolution[index][resolutionIndex].contains(frameRate) ? device : nil
         }
+        var selectedFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
+        var availableResolutionsByDeviceID: [String: [VideoResolution]] = [:]
+        var supportedFrameRatesByDeviceID: [String: [SlowMotionFrameRate]] = [:]
+        for (index, device) in devices.enumerated()
+            where ratesByDeviceAndResolution[index][resolutionIndex].contains(frameRate) {
+            let deviceRates = ratesByDeviceAndResolution[index]
+            availableResolutionsByDeviceID[device.uniqueID] = resolutions.enumerated().compactMap {
+                deviceRates[$0.offset].isEmpty ? nil : $0.element
+            }
+            supportedFrameRatesByDeviceID[device.uniqueID] = frameRates.filter {
+                deviceRates[resolutionIndex].contains($0)
+            }
+            if let selectedFormat = bestSlowMotionFormat(
+                from: formatsByDeviceAndResolution[index][resolutionIndex],
+                resolution: resolution,
+                frameRate: frameRate
+            ) {
+                selectedFormatByDeviceID[device.uniqueID] = selectedFormat
+            }
+        }
 
         return SlowMotionFormatSelection(
             availableResolutions: availableResolutions,
             resolution: resolution,
             frameRate: frameRate,
             supportedFrameRates: supportedFrameRates,
-            supportedDevices: supportedDevices
+            supportedDevices: supportedDevices,
+            selectedFormatByDeviceID: selectedFormatByDeviceID,
+            availableResolutionsByDeviceID: availableResolutionsByDeviceID,
+            supportedFrameRatesByDeviceID: supportedFrameRatesByDeviceID
         )
-    }
-
-    func validSelection(
-        for devices: [AVCaptureDevice],
-        availableResolutions: [VideoResolution],
-        requestedResolution: VideoResolution? = nil,
-        requestedFrameRate: VideoFrameRate? = nil
-    ) -> (resolution: VideoResolution, frameRate: VideoFrameRate, supportedFrameRates: [VideoFrameRate]) {
-        let wantedResolution = requestedResolution ?? selectedResolution
-        let wantedFrameRate = requestedFrameRate ?? selectedFrameRate
-        let resolution = availableResolutions.contains(wantedResolution) ? wantedResolution : (availableResolutions.first ?? .p1080)
-        let rates = frameRates(for: resolution, devices: devices)
-        let frameRate = rates.contains(wantedFrameRate) ? wantedFrameRate : (rates.first ?? .fps30)
-        return (resolution, frameRate, rates)
     }
 
     func preferredRecordingFormat(for device: AVCaptureDevice, resolution: VideoResolution, rate: VideoFrameRate) -> AVCaptureDevice.Format? {
         let formats = device.formats.filter { format($0, supports: resolution, at: rate) }
+        return preferredRecordingFormat(from: formats)
+    }
+
+    private func preferredRecordingFormat(from formats: [AVCaptureDevice.Format]) -> AVCaptureDevice.Format? {
         if selectedVideoCodec == "H264" {
             // H.264 needs an 8-bit source; a 10-bit/HDR first match can expose HEVC only.
             return formats.first {
@@ -247,14 +269,6 @@ struct CameraFormatSelector {
         }
     }
 
-    func slowMotionFrameRates(for devices: [AVCaptureDevice], resolution: VideoResolution) -> [SlowMotionFrameRate] {
-        SlowMotionFrameRate.allCases.filter { rate in
-            devices.contains { device in
-                device.formats.contains { supportsSlowMotion($0, resolution: resolution, frameRate: rate) }
-            }
-        }
-    }
-
     func supportsSlowMotion(
         _ candidate: AVCaptureDevice.Format,
         resolution: VideoResolution,
@@ -271,8 +285,16 @@ struct CameraFormatSelector {
     }
 
     func bestSlowMotionFormat(for device: AVCaptureDevice, resolution: VideoResolution, frameRate: SlowMotionFrameRate) -> AVCaptureDevice.Format? {
+        bestSlowMotionFormat(from: device.formats, resolution: resolution, frameRate: frameRate)
+    }
+
+    private func bestSlowMotionFormat(
+        from formats: [AVCaptureDevice.Format],
+        resolution: VideoResolution,
+        frameRate: SlowMotionFrameRate
+    ) -> AVCaptureDevice.Format? {
         let requestedFPS = Double(frameRate.rawValue)
-        let candidates = device.formats.filter {
+        let candidates = formats.filter {
             supportsSlowMotion($0, resolution: resolution, frameRate: frameRate)
         }
 
@@ -298,14 +320,6 @@ struct CameraFormatSelector {
         return format.videoSupportedFrameRateRanges.contains {
             let requestedRate = Double(frameRate.rawValue)
             return $0.minFrameRate <= requestedRate + 0.5 && $0.maxFrameRate >= requestedRate - 0.5
-        }
-    }
-
-    func frameRates(for resolution: VideoResolution, devices: [AVCaptureDevice]) -> [VideoFrameRate] {
-        VideoFrameRate.allCases.filter { rate in
-            devices.contains { device in
-                device.formats.contains { format($0, supports: resolution, at: rate) && formatSupportsSelectedCodec($0) }
-            }
         }
     }
 

@@ -159,26 +159,42 @@ final class CameraManager: NSObject, ObservableObject {
 
     @Published var selectedResolution: VideoResolution {
         didSet {
-            if selectedResolution != oldValue { _ = captureConfigurationGeneration.next() }
-            if !suppressPreferencePersistence { persistCameraPreferences() }
+            if selectedResolution != oldValue {
+                _ = captureConfigurationGeneration.next()
+                if !suppressPreferencePersistence {
+                    persistCameraPreference(Self.resolutionKey, value: selectedResolution.rawValue)
+                }
+            }
         }
     }
     @Published var selectedFrameRate: VideoFrameRate {
         didSet {
-            if selectedFrameRate != oldValue { _ = captureConfigurationGeneration.next() }
-            if !suppressPreferencePersistence { persistCameraPreferences() }
+            if selectedFrameRate != oldValue {
+                _ = captureConfigurationGeneration.next()
+                if !suppressPreferencePersistence {
+                    persistCameraPreference(Self.frameRateKey, value: selectedFrameRate.rawValue)
+                }
+            }
         }
     }
     @Published var selectedSlowMotionResolution: VideoResolution {
         didSet {
-            if selectedSlowMotionResolution != oldValue { _ = captureConfigurationGeneration.next() }
-            if !suppressPreferencePersistence { persistCameraPreferences() }
+            if selectedSlowMotionResolution != oldValue {
+                _ = captureConfigurationGeneration.next()
+                if !suppressPreferencePersistence {
+                    persistCameraPreference(Self.slowMotionResolutionKey, value: selectedSlowMotionResolution.rawValue)
+                }
+            }
         }
     }
     @Published var selectedSlowMotionFrameRate: SlowMotionFrameRate {
         didSet {
-            if selectedSlowMotionFrameRate != oldValue { _ = captureConfigurationGeneration.next() }
-            if !suppressPreferencePersistence { persistCameraPreferences() }
+            if selectedSlowMotionFrameRate != oldValue {
+                _ = captureConfigurationGeneration.next()
+                if !suppressPreferencePersistence {
+                    persistCameraPreference(Self.slowMotionFrameRateKey, value: selectedSlowMotionFrameRate.rawValue)
+                }
+            }
         }
     }
     @Published var isVideoStabilizationEnabled: Bool {
@@ -259,7 +275,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.publish { self.isLensTransitioning = transitioning }
         }
     )
-    private enum RecordingState {
+    private enum RecordingState: Equatable {
         case idle
         case starting(splitDuration: Double)
         case recording(splitDuration: Double)
@@ -327,8 +343,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private var isUsingSlowMotionPreview = false
-    private var isUsingVideoPreviewProxy = false
     private var recordingState: RecordingState = .idle
     private var segmentTimer: DispatchWorkItem?
     private var pendingVideoSaves = 0
@@ -549,7 +563,7 @@ final class CameraManager: NSObject, ObservableObject {
         let previousState = recordingState
         let previousFlags = recordingState.uiFlags
         recordingState = newState
-        if String(describing: previousState) != String(describing: newState) {
+        if previousState != newState {
             invalidatePendingVideoConfiguration()
             _ = qualityRequests.next()
             _ = captureConfigurationGeneration.next()
@@ -752,6 +766,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func preferenceKey(_ base: String, for position: CameraPosition) -> String {
         position == .back ? base : "\(base).front"
+    }
+
+    private func persistCameraPreference(_ base: String, value: Any) {
+        UserDefaults.standard.set(value, forKey: preferenceKey(base, for: cameraPosition))
     }
 
     private func persistCameraPreferences() {
@@ -1412,9 +1430,6 @@ final class CameraManager: NSObject, ObservableObject {
         if !movieOutputSettingsMatchCurrentConfiguration() {
             _ = configureMovieOutputSettings()
         }
-        isUsingVideoPreviewProxy = false
-        isUsingSlowMotionPreview = false
-
         // This handoff keeps the same mode, resolution and frame rate, so the published zoom
         // range is already correct. Re-scanning every format on every lens after the blocking
         // hardware commit only extends the visible transition.
@@ -1804,6 +1819,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.burstStopRequested = false
             self.burstAspect = UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
             self.burstMegapixels = self.selectedPhotoMegapixels
+            self.refreshAvailableStorage()
             self.beginPhotoCapture()
         }
     }
@@ -2421,35 +2437,6 @@ final class CameraManager: NSObject, ObservableObject {
         return CGFloat(min(max(factor, 1.5), 8))
     }
 
-    private func cameraSupportingCurrentQuality(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        capabilityDevices(for: position).first { device in
-            device.formats.contains { formatSelector.format($0, supports: selectedResolution, at: selectedFrameRate) }
-        }
-    }
-
-    private func cameraSupportingSlowMotion(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        let devices = capabilityDevices(for: position)
-        let resolutions = formatSelector.slowMotionResolutions(for: devices)
-        guard !resolutions.isEmpty else { return nil }
-        let resolution = resolutions.contains(selectedSlowMotionResolution)
-            ? selectedSlowMotionResolution
-            : (resolutions.contains(.p1080) ? .p1080 : resolutions[0])
-        let rates = formatSelector.slowMotionFrameRates(for: devices, resolution: resolution)
-        guard let rate = rates.contains(selectedSlowMotionFrameRate)
-            ? selectedSlowMotionFrameRate
-            : rates.last else { return nil }
-
-        let supported = devices.filter { device in
-            device.formats.contains { formatSelector.supportsSlowMotion($0, resolution: resolution, frameRate: rate) }
-        }
-        let desiredType: AVCaptureDevice.DeviceType = requestedZoom < 1
-            ? .builtInUltraWideCamera
-            : .builtInWideAngleCamera
-        return supported.first(where: { $0.deviceType == desiredType })
-            ?? supported.first(where: { !$0.isVirtualDevice })
-            ?? supported.first
-    }
-
     private func resetFocusAndExposureState() {
         pendingFocusLockWorkItem?.cancel()
         pendingFocusLockWorkItem = nil
@@ -2784,8 +2771,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         nativePhotoDimensions = photoChoice.dimensions
-        isUsingVideoPreviewProxy = false
-        isUsingSlowMotionPreview = false
         let minimum = minimumSupportedZoom(for: desiredDevice)
         let maximum = maximumSupportedZoom(for: desiredDevice)
         publish {
@@ -2931,7 +2916,6 @@ final class CameraManager: NSObject, ObservableObject {
     @discardableResult
     private func applySelectedFormat(
         preferVirtualCamera: Bool = true,
-        allowSmoothPreview: Bool = true,
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: VideoFrameRate? = nil,
         qualityRequestID: UInt64? = nil,
@@ -2988,7 +2972,6 @@ final class CameraManager: NSObject, ObservableObject {
         // this exact 4K60 + codec combination, keep that one input attached and let AVFoundation
         // switch its physical constituents while zooming. Manual WB still deliberately chooses a
         // physical input because locked custom gains are not equivalent on virtual cameras.
-        _ = allowSmoothPreview
         let isRear4K60 = targetPosition == .back &&
             selection.resolution == .p4k && selection.frameRate == .fps60
         let appleStyle4K60Device = isRear4K60 && preferVirtualCamera
@@ -3009,7 +2992,7 @@ final class CameraManager: NSObject, ObservableObject {
                 : (physical ?? supportedDevices.first(where: { !$0.isVirtualDevice }) ?? supportedDevices.first)
         }
         guard let desiredDevice,
-              let selectedFormat = formatSelector.preferredRecordingFormat(for: desiredDevice, resolution: selection.resolution, rate: selection.frameRate) else {
+              let selectedFormat = videoSelection.selectedFormatByDeviceID[desiredDevice.uniqueID] else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("This video quality isn’t available on this lens.")
             }
@@ -3027,8 +3010,6 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
-        isUsingVideoPreviewProxy = false
-        isUsingSlowMotionPreview = false
         _ = configureMovieOutputSettings()
         let zoomDevices = forcePhysical4K60 ? physicalSupportedDevices : [desiredDevice]
         let minZoom = zoomDevices.map { minimumSupportedZoom(for: $0) }.min() ?? minimumSupportedZoom(for: desiredDevice)
@@ -3088,7 +3069,6 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func applySlowMotionFormat(
-        allowPreview: Bool = true,
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: SlowMotionFrameRate? = nil,
         qualityRequestID: UInt64? = nil,
@@ -3137,7 +3117,6 @@ final class CameraManager: NSObject, ObservableObject {
         // Slo-Mo stays on the actual selected HFR physical format while idle. This moves the
         // expensive input/format work away from the Record button. The preview and recording now
         // use the same 120/240 fps configuration; physical lens changes are covered separately.
-        _ = allowPreview
         let physicalRecordingDevices = supportedDevices.filter { !$0.isVirtualDevice }
         let recordingDevices = physicalRecordingDevices.isEmpty ? supportedDevices : physicalRecordingDevices
         let sloMoMinimumZoom = recordingDevices.map { minimumSupportedZoom(for: $0) }.min() ?? 1
@@ -3152,7 +3131,7 @@ final class CameraManager: NSObject, ObservableObject {
             ?? recordingDevices.first(where: { !$0.isVirtualDevice })
             ?? recordingDevices.first
         guard let desiredDevice,
-              let hfrFormat = formatSelector.bestSlowMotionFormat(for: desiredDevice, resolution: resolution, frameRate: selectedRate) else {
+              let hfrFormat = slowMotionSelection.selectedFormatByDeviceID[desiredDevice.uniqueID] else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this lens.")
             }
@@ -3171,17 +3150,10 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
-        isUsingSlowMotionPreview = false
-        isUsingVideoPreviewProxy = false
         _ = configureMovieOutputSettings()
 
-        let lensSelection = formatSelector.slowMotionFormatSelection(
-            for: [desiredDevice],
-            requestedResolution: resolution,
-            requestedFrameRate: selectedRate
-        )
-        let lensResolutions = lensSelection.availableResolutions
-        let lensRates = lensSelection.supportedFrameRates
+        let lensResolutions = slowMotionSelection.availableResolutionsByDeviceID[desiredDevice.uniqueID] ?? []
+        let lensRates = slowMotionSelection.supportedFrameRatesByDeviceID[desiredDevice.uniqueID] ?? []
         publish {
             if let qualityRequestID {
                 guard self.qualityRequests.isLatest(qualityRequestID),
@@ -3264,13 +3236,20 @@ final class CameraManager: NSObject, ObservableObject {
 
         let shouldMirror = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
         if connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = shouldMirror
+            if connection.automaticallyAdjustsVideoMirroring {
+                connection.automaticallyAdjustsVideoMirroring = false
+            }
+            if connection.isVideoMirrored != shouldMirror {
+                connection.isVideoMirrored = shouldMirror
+            }
         }
 
         let shouldStabilize = captureMode == .video && isVideoStabilizationEnabled
         if connection.isVideoStabilizationSupported {
-            connection.preferredVideoStabilizationMode = shouldStabilize ? .auto : .off
+            let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
+            if connection.preferredVideoStabilizationMode != expected {
+                connection.preferredVideoStabilizationMode = expected
+            }
         }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
@@ -3279,7 +3258,11 @@ final class CameraManager: NSObject, ObservableObject {
         let message: String? = codecAvailable ? nil : (preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
             ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
             : "The selected codec is unavailable for this camera configuration.")
-        publish { self.codecAvailabilityMessage = message }
+        publish {
+            if self.codecAvailabilityMessage != message {
+                self.codecAvailabilityMessage = message
+            }
+        }
         guard codecAvailable else { return false }
 
         var settings: [String: Any] = [AVVideoCodecKey: preferred]
@@ -3297,7 +3280,11 @@ final class CameraManager: NSObject, ObservableObject {
             let message = preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
                 ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
                 : "The selected codec is unavailable for this camera configuration."
-            publish { self.codecAvailabilityMessage = message }
+            publish {
+                if self.codecAvailabilityMessage != message {
+                    self.codecAvailabilityMessage = message
+                }
+            }
             return false
         }
         if connection.isVideoMirroringSupported, connection.isVideoMirrored != shouldMirror { return false }
@@ -3403,7 +3390,9 @@ final class CameraManager: NSObject, ObservableObject {
             "Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG"), " +
             "aspect=\(aspect), mirrored=\(mirrored), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
         )
-        refreshAvailableStorage()
+        if !isBurst {
+            refreshAvailableStorage()
+        }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -3415,11 +3404,10 @@ final class CameraManager: NSObject, ObservableObject {
 
         var reconfiguredForRecording = false
         if captureMode == .video {
-            if isUsingVideoPreviewProxy || !activeVideoFormatMatchesSelection() {
+            if !activeVideoFormatMatchesSelection() {
                 reconfiguredForRecording = true
                 guard applySelectedFormat(
-                    preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
-                    allowSmoothPreview: false
+                    preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
                 ), activeVideoFormatMatchesSelection() else {
                     transitionRecordingState(to: .idle, resetClock: true)
                     showError("Couldn’t prepare the selected recording quality.")
@@ -3434,19 +3422,18 @@ final class CameraManager: NSObject, ObservableObject {
                         resolution: selectedSlowMotionResolution,
                         frameRate: selectedSlowMotionFrameRate
                     )
-                } == true && !isUsingSlowMotionPreview
+                } == true
 
             if !activeSloMoReady {
                 reconfiguredForRecording = true
-                guard applySlowMotionFormat(allowPreview: false),
+                guard applySlowMotionFormat(),
                       activeSlowMotionFormatMatchesSelection(),
                       let device = videoInput?.device,
                       formatSelector.supportsSlowMotion(
                           device.activeFormat,
                           resolution: selectedSlowMotionResolution,
                           frameRate: selectedSlowMotionFrameRate
-                      ),
-                      !isUsingSlowMotionPreview else {
+                      ) else {
                     transitionRecordingState(to: .idle, resetClock: true)
                     showError("Couldn’t start the selected Slo-Mo frame rate.")
                     return
@@ -3609,13 +3596,12 @@ final class CameraManager: NSObject, ObservableObject {
         case .video:
             if !activeVideoFormatMatchesSelection() {
                 _ = applySelectedFormat(
-                    preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
-                    allowSmoothPreview: true
+                    preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
                 )
             }
         case .sloMo:
             if !activeSlowMotionFormatMatchesSelection() {
-                _ = applySlowMotionFormat(allowPreview: true)
+                _ = applySlowMotionFormat()
             }
         case .photo:
             break

@@ -213,8 +213,8 @@ struct CameraView: View {
                 camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
             }
         }
-        .onChange(of: isShowingSettings) { _, showing in if showing { cancelCountdown() } }
         .onChange(of: isShowingSettings) { _, showing in
+            if showing { cancelCountdown() }
             AppEventLog.event("Camera UI: Settings sheet \(showing ? "opened" : "closed")")
         }
         .onChange(of: isShowingProTools) { _, showing in
