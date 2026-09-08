@@ -422,9 +422,15 @@ final class CameraManager: NSObject, ObservableObject {
     private func handleSessionRuntimeError(_ notification: Notification) {
         stopLiveMetrics()
         let nsError = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        AppEventLog.event(
+            "SESSION RUNTIME ERROR: domain=\(nsError?.domain ?? "unknown"), code=\(nsError?.code ?? -1), " +
+            "description=\(nsError?.localizedDescription ?? "unknown")"
+        )
         if nsError?.code == AVError.Code.mediaServicesWereReset.rawValue {
+            AppEventLog.event("Session recovery: media services reset; rebuilding camera session")
             rebuildSessionAfterMediaServicesReset()
         } else {
+            AppEventLog.event("Session recovery: forcing camera session rebuild")
             showError("Camera session error. Trying to recover…")
             configureSessionIfNeeded(forceRebuild: true)
             if !session.isRunning { session.startRunning() }
@@ -433,6 +439,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterrupted() {
+        AppEventLog.event("SESSION INTERRUPTED")
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
         burstRemaining = 0
@@ -452,6 +459,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterruptionEnded() {
+        AppEventLog.event("SESSION INTERRUPTION ENDED; restoring camera session")
         configureSessionIfNeeded()
         if !session.isRunning { session.startRunning() }
         synchronizeTorchState()
