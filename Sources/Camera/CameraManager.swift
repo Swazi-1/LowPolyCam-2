@@ -30,21 +30,31 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private struct VideoQualityRequest {
-        let id: UInt64
-        let resolution: VideoResolution
-        let frameRate: VideoFrameRate
-        let position: CameraPosition
-        let codec: String
-        let preferVirtualCamera: Bool
-    }
-
     private struct SlowMotionQualityRequest {
         let id: UInt64
         let resolution: VideoResolution
         let frameRate: SlowMotionFrameRate
         let position: CameraPosition
         let codec: String
+    }
+
+    private struct PendingVideoConfiguration {
+        let id: UInt64
+        let qualityRequestID: UInt64
+        let compressionRequestID: UInt64
+        let resolution: VideoResolution
+        let frameRate: VideoFrameRate
+        let slowMotionResolution: VideoResolution
+        let slowMotionFrameRate: SlowMotionFrameRate
+        let codec: String
+        let compression: VideoCompression
+        let position: CameraPosition
+        let mode: CaptureMode
+        let configurationGenerationID: UInt64
+        let whiteBalanceRequestID: UInt64
+        let preferVirtualCamera: Bool
+        let formatAffecting: Bool
+        let transitionID: UInt64?
     }
 
     enum WhiteBalancePreset: String, CaseIterable, Identifiable {
@@ -110,30 +120,14 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
-            let requestID = qualityRequests.next()
-            let configurationGenerationID = captureConfigurationGeneration.current()
-            let requestedPosition = cameraPosition
-            let requestedMode = captureMode
+            let qualityRequestID = qualityRequests.next()
             UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
-            guard !suppressAutomaticReconfiguration else { return }
-            sessionQueue.async { [weak self] in
-                guard let self,
-                      self.isCurrentCodecRequest(
-                          requestID,
-                          configurationGenerationID: configurationGenerationID,
-                          position: requestedPosition,
-                          mode: requestedMode
-                      ) else { return }
-                self.lensTransitionCoordinator.cancel()
-                self.updateCapabilities()
-                guard self.isCurrentCodecRequest(
-                    requestID,
-                    configurationGenerationID: configurationGenerationID,
-                    position: requestedPosition,
-                    mode: requestedMode
-                ) else { return }
-                _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
-            }
+            guard captureMode == .video, !suppressAutomaticReconfiguration else { return }
+            scheduleVideoConfiguration(
+                formatAffecting: true,
+                qualityRequestID: qualityRequestID,
+                compressionRequestID: compressionRequests.current()
+            )
         }
     }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
@@ -145,28 +139,14 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
         didSet {
             guard videoCompression != oldValue else { return }
-            let requestID = compressionRequests.next()
-            let qualityGenerationID = qualityRequests.current()
-            let configurationGenerationID = captureConfigurationGeneration.current()
-            let requestedCompression = videoCompression
-            let requestedCodec = selectedVideoCodec
-            let requestedPosition = cameraPosition
-            let requestedMode = captureMode
+            let compressionRequestID = compressionRequests.next()
             UserDefaults.standard.set(videoCompression.rawValue, forKey: "videoCompression")
-            guard !suppressAutomaticReconfiguration else { return }
-            sessionQueue.async { [weak self] in
-                guard let self,
-                      self.isCurrentCompressionRequest(
-                          requestID,
-                          qualityGenerationID: qualityGenerationID,
-                          configurationGenerationID: configurationGenerationID,
-                          compression: requestedCompression,
-                          codec: requestedCodec,
-                          position: requestedPosition,
-                          mode: requestedMode
-                      ) else { return }
-                _ = self.configureMovieOutputSettings()
-            }
+            guard captureMode == .video, !suppressAutomaticReconfiguration else { return }
+            scheduleVideoConfiguration(
+                formatAffecting: false,
+                qualityRequestID: qualityRequests.current(),
+                compressionRequestID: compressionRequestID
+            )
         }
     }
 
@@ -249,6 +229,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let qualityRequests = RequestToken()
     private let compressionRequests = RequestToken()
     private let captureConfigurationGeneration = RequestToken()
+    private let videoConfigurationRequests = RequestToken()
     private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
 
@@ -346,6 +327,9 @@ final class CameraManager: NSObject, ObservableObject {
     private var sessionObserverTokens: [NSObjectProtocol] = []
     private var suppressPreferencePersistence = false
     private var suppressAutomaticReconfiguration = false
+    // These are accessed only on sessionQueue. Property observers enqueue immutable snapshots.
+    private var pendingVideoConfiguration: PendingVideoConfiguration?
+    private var pendingVideoConfigurationWorkItem: DispatchWorkItem?
 
     private enum AppLifecyclePhase: String {
         case active
@@ -403,6 +387,7 @@ final class CameraManager: NSObject, ObservableObject {
         let previousFlags = recordingState.uiFlags
         recordingState = newState
         if String(describing: previousState) != String(describing: newState) {
+            invalidatePendingVideoConfiguration()
             _ = qualityRequests.next()
             _ = captureConfigurationGeneration.next()
             AppEventLog.event("Recording state: \(String(describing: previousState)) -> \(String(describing: newState))")
@@ -428,42 +413,163 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func isCurrentCodecRequest(
-        _ requestID: UInt64,
-        configurationGenerationID: UInt64,
-        position: CameraPosition,
-        mode: CaptureMode
-    ) -> Bool {
-        qualityRequests.isLatest(requestID) &&
-            captureConfigurationGeneration.isLatest(configurationGenerationID) &&
-            cameraPosition == position &&
-            captureMode == mode &&
+    private func scheduleVideoConfiguration(
+        formatAffecting: Bool,
+        qualityRequestID: UInt64,
+        compressionRequestID: UInt64,
+        transitionID: UInt64? = nil
+    ) {
+        let request = PendingVideoConfiguration(
+            id: videoConfigurationRequests.next(),
+            qualityRequestID: qualityRequestID,
+            compressionRequestID: compressionRequestID,
+            resolution: selectedResolution,
+            frameRate: selectedFrameRate,
+            slowMotionResolution: selectedSlowMotionResolution,
+            slowMotionFrameRate: selectedSlowMotionFrameRate,
+            codec: selectedVideoCodec,
+            compression: videoCompression,
+            position: cameraPosition,
+            mode: captureMode,
+            configurationGenerationID: captureConfigurationGeneration.current(),
+            whiteBalanceRequestID: whiteBalanceRequests.current(),
+            preferVirtualCamera: !requiresPhysicalWhiteBalanceInput,
+            formatAffecting: formatAffecting,
+            transitionID: transitionID
+        )
+        AppEventLog.event(
+            "VIDEO CONFIG REQUEST SCHEDULED: reason=\(formatAffecting ? "format" : "output"), " +
+            "resolution=\(request.resolution.rawValue), fps=\(request.frameRate.rawValue), " +
+            "codec=\(request.codec), compression=\(request.compression.rawValue)"
+        )
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if let pending = self.pendingVideoConfiguration {
+                self.pendingVideoConfiguration = PendingVideoConfiguration(
+                    id: request.id,
+                    qualityRequestID: request.qualityRequestID,
+                    compressionRequestID: request.compressionRequestID,
+                    resolution: request.resolution,
+                    frameRate: request.frameRate,
+                    slowMotionResolution: request.slowMotionResolution,
+                    slowMotionFrameRate: request.slowMotionFrameRate,
+                    codec: request.codec,
+                    compression: request.compression,
+                    position: request.position,
+                    mode: request.mode,
+                    configurationGenerationID: request.configurationGenerationID,
+                    whiteBalanceRequestID: request.whiteBalanceRequestID,
+                    preferVirtualCamera: request.preferVirtualCamera,
+                    formatAffecting: pending.formatAffecting || request.formatAffecting,
+                    transitionID: request.transitionID ?? pending.transitionID
+                )
+                AppEventLog.event(
+                    "VIDEO CONFIG REQUEST COALESCED: previous=\(pending.id), latest=\(request.id), " +
+                    "formatAffecting=\(pending.formatAffecting || request.formatAffecting)"
+                )
+            } else {
+                self.pendingVideoConfiguration = request
+            }
+
+            guard self.pendingVideoConfigurationWorkItem == nil else { return }
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.applyPendingVideoConfiguration()
+            }
+            self.pendingVideoConfigurationWorkItem = workItem
+            self.sessionQueue.asyncAfter(deadline: .now() + 0.07, execute: workItem)
+        }
+    }
+
+    /// Invalidates queued idle Video-setting work. This must run on sessionQueue so the pending
+    /// request and its timer cannot race an input/mode/recording transition.
+    private func invalidatePendingVideoConfiguration() {
+        _ = videoConfigurationRequests.next()
+        let pending = pendingVideoConfiguration
+        pendingVideoConfiguration = nil
+        pendingVideoConfigurationWorkItem?.cancel()
+        pendingVideoConfigurationWorkItem = nil
+        guard let pending else { return }
+        if pending.transitionID != nil {
+            _ = qualityPreviewTransitions.next()
+            publish { self.isPreviewTransitioning = false }
+        }
+        AppEventLog.event("VIDEO CONFIG REQUEST DROPPED: invalidated by camera state transition")
+    }
+
+    private func isCurrentVideoConfiguration(_ request: PendingVideoConfiguration) -> Bool {
+        videoConfigurationRequests.isLatest(request.id) &&
+            qualityRequests.isLatest(request.qualityRequestID) &&
+            compressionRequests.isLatest(request.compressionRequestID) &&
+            captureConfigurationGeneration.isLatest(request.configurationGenerationID) &&
+            whiteBalanceRequests.isLatest(request.whiteBalanceRequestID) &&
+            selectedResolution == request.resolution &&
+            selectedFrameRate == request.frameRate &&
+            selectedVideoCodec == request.codec &&
+            videoCompression == request.compression &&
+            cameraPosition == request.position &&
+            captureMode == request.mode &&
+            request.mode == .video &&
+            appLifecyclePhase == .active &&
             !suppressAutomaticReconfiguration &&
             recordingState.isIdle &&
             !movieOutput.isRecording &&
             session.isRunning
     }
 
-    private func isCurrentCompressionRequest(
-        _ requestID: UInt64,
-        qualityGenerationID: UInt64,
-        configurationGenerationID: UInt64,
-        compression: VideoCompression,
-        codec: String,
-        position: CameraPosition,
-        mode: CaptureMode
-    ) -> Bool {
-        compressionRequests.isLatest(requestID) &&
-            qualityRequests.isLatest(qualityGenerationID) &&
-            captureConfigurationGeneration.isLatest(configurationGenerationID) &&
-            videoCompression == compression &&
-            selectedVideoCodec == codec &&
-            cameraPosition == position &&
-            captureMode == mode &&
-            !suppressAutomaticReconfiguration &&
-            recordingState.isIdle &&
-            !movieOutput.isRecording &&
-            session.isRunning
+    private func applyPendingVideoConfiguration() {
+        let request = pendingVideoConfiguration
+        pendingVideoConfiguration = nil
+        pendingVideoConfigurationWorkItem = nil
+        guard let request else { return }
+
+        guard isCurrentVideoConfiguration(request) else {
+            AppEventLog.event(
+                "VIDEO CONFIG REQUEST DROPPED: stale or invalid state, " +
+                "resolution=\(request.resolution.rawValue), fps=\(request.frameRate.rawValue), " +
+                "codec=\(request.codec), compression=\(request.compression.rawValue)"
+            )
+            if let transitionID = request.transitionID {
+                finishQualityPreviewTransition(transitionID)
+            }
+            return
+        }
+
+        let success: Bool
+        if request.formatAffecting {
+            lensTransitionCoordinator.cancel()
+            switch request.mode {
+            case .video:
+                success = applySelectedFormat(
+                    preferVirtualCamera: request.preferVirtualCamera,
+                    requestedResolution: request.resolution,
+                    requestedFrameRate: request.frameRate,
+                    qualityRequestID: request.qualityRequestID,
+                    requestedPosition: request.position
+                )
+            case .sloMo:
+                success = applySlowMotionFormat(
+                    requestedResolution: request.slowMotionResolution,
+                    requestedFrameRate: request.slowMotionFrameRate,
+                    qualityRequestID: request.qualityRequestID,
+                    requestedPosition: request.position
+                )
+            case .photo:
+                success = applyBestPhotoFormat(preferVirtualCamera: request.preferVirtualCamera)
+            }
+        } else {
+            success = configureMovieOutputSettings()
+        }
+
+        AppEventLog.event(
+            "VIDEO CONFIG APPLY: formatApply=\(request.formatAffecting), " +
+            "outputOnly=\(!request.formatAffecting), resolution=\(request.resolution.rawValue), " +
+            "fps=\(request.frameRate.rawValue), codec=\(request.codec), " +
+            "compression=\(request.compression.rawValue), success=\(success)"
+        )
+        if let transitionID = request.transitionID {
+            finishQualityPreviewTransition(transitionID)
+        }
     }
 
     private func transitionRecordingToDiscard(resetClock: Bool = false) {
@@ -524,6 +630,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionRuntimeError(_ notification: Notification) {
+        invalidatePendingVideoConfiguration()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         stopLiveMetrics()
@@ -547,6 +654,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func handleSessionInterrupted(_ notification: Notification) {
         let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
         AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
+        invalidatePendingVideoConfiguration()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         stopLiveMetrics()
@@ -569,6 +677,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func handleSessionInterruptionEnded() {
         AppEventLog.event("SESSION INTERRUPTION ENDED; restoring camera session")
+        invalidatePendingVideoConfiguration()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         configureSessionIfNeeded()
@@ -660,9 +769,7 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self else { return }
             AppEventLog.event("Camera start requested")
             self.requestedZoom = 1
-            // The active format still has to be ready before startRunning, but the full
-            // settings-capability scan can happen after the first frame is unblocked.
-            self.configureSessionIfNeeded(finalizePublishedState: false)
+            self.configureSessionIfNeeded()
             guard self.session.isRunning == false else {
                 self.publish { self.isSessionRunning = true }
                 return
@@ -671,7 +778,6 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.event("Camera session running")
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
-            self.updateCapabilities()
             self.synchronizeTorchState()
             self.refreshAvailableStorage()
             self.storageQueue.async { [weak self] in
@@ -684,6 +790,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             AppEventLog.event("Camera stop requested")
+            self.invalidatePendingVideoConfiguration()
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
             self.stopLiveMetrics()
@@ -717,6 +824,7 @@ final class CameraManager: NSObject, ObservableObject {
             let previousPhase = self.appLifecyclePhase
             self.appLifecyclePhase = requestedPhase
             AppEventLog.event("App lifecycle transition: \(previousPhase.rawValue) -> \(requestedPhase.rawValue)")
+            self.invalidatePendingVideoConfiguration()
             // ACTIVE -> INACTIVE/BACKGROUND owns the cleanup. INACTIVE -> BACKGROUND is a
             // distinct lifecycle transition, but has no additional camera work today.
             guard previousPhase == .active else { return }
@@ -748,7 +856,9 @@ final class CameraManager: NSObject, ObservableObject {
                 self.transitionRecordingToDiscard(resetClock: true)
             }
 
-            self.publish { self.isTorchOn = false }
+            self.publish {
+                if self.isTorchOn { self.isTorchOn = false }
+            }
         }
     }
 
@@ -762,6 +872,7 @@ final class CameraManager: NSObject, ObservableObject {
             let previousPhase = self.appLifecyclePhase
             self.appLifecyclePhase = .active
             AppEventLog.event("App lifecycle transition: \(previousPhase.rawValue) -> active")
+            self.invalidatePendingVideoConfiguration()
             self.configureSessionIfNeeded()
             if !self.session.isRunning {
                 self.session.startRunning()
@@ -790,8 +901,8 @@ final class CameraManager: NSObject, ObservableObject {
     private func setTorchEnabledOnCurrentDevice(_ enabled: Bool, showErrorOnFailure: Bool = false) {
         guard let device = videoInput?.device, device.hasTorch else {
             publish {
-                self.torchAvailable = false
-                self.isTorchOn = false
+                if self.torchAvailable { self.torchAvailable = false }
+                if self.isTorchOn { self.isTorchOn = false }
             }
             return
         }
@@ -799,8 +910,8 @@ final class CameraManager: NSObject, ObservableObject {
         do {
             if enabled && !device.isTorchAvailable {
                 publish {
-                    self.torchAvailable = false
-                    self.isTorchOn = false
+                    if self.torchAvailable { self.torchAvailable = false }
+                    if self.isTorchOn { self.isTorchOn = false }
                 }
                 if showErrorOnFailure { showError("Torch is temporarily unavailable.") }
                 return
@@ -808,10 +919,15 @@ final class CameraManager: NSObject, ObservableObject {
             try device.lockForConfiguration()
             device.torchMode = enabled ? .on : .off
             let actualState = device.torchMode == .on
+            let torchAvailable = device.isTorchAvailable
             device.unlockForConfiguration()
             publish {
-                self.torchAvailable = device.isTorchAvailable
-                self.isTorchOn = actualState
+                if self.torchAvailable != torchAvailable {
+                    self.torchAvailable = torchAvailable
+                }
+                if self.isTorchOn != actualState {
+                    self.isTorchOn = actualState
+                }
             }
             AppEventLog.event("Torch applied: \(actualState ? "on" : "off") on \(device.localizedName)")
         } catch {
@@ -1139,10 +1255,16 @@ final class CameraManager: NSObject, ObservableObject {
         // This handoff keeps the same mode, resolution and frame rate, so the published zoom
         // range is already correct. Re-scanning every format on every lens after the blocking
         // hardware commit only extends the visible transition.
+        let torchAvailable = prepared.device.hasTorch && prepared.device.isTorchAvailable
+        let torchOn = prepared.device.hasTorch && prepared.device.torchMode == .on
         publish {
             self.applyPublishedZoomIfNeeded(displayed)
-            self.torchAvailable = prepared.device.hasTorch && prepared.device.isTorchAvailable
-            self.isTorchOn = prepared.device.hasTorch && prepared.device.torchMode == .on
+            if self.torchAvailable != torchAvailable {
+                self.torchAvailable = torchAvailable
+            }
+            if self.isTorchOn != torchOn {
+                self.isTorchOn = torchOn
+            }
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
@@ -1168,6 +1290,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
         _ = qualityRequests.next() // Do not apply an old quality request to the new input.
         _ = captureConfigurationGeneration.next() // Drop output work captured for the old input.
+        _ = videoConfigurationRequests.next() // Drop pending Video-setting work for the old input.
         _ = exposureRequests.next() // Do not apply a queued slider value to the new input.
 
         cameraPosition = target
@@ -1175,6 +1298,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self, self.cameraSwitchRequests.isLatest(requestID) else { return }
+            self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             guard self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput) else {
                 guard self.cameraSwitchRequests.isLatest(requestID) else { return }
@@ -1186,7 +1310,6 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
             guard self.cameraSwitchRequests.isLatest(requestID) else { return }
-            self.updateCapabilities()
             self.synchronizeTorchState()
             AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")")
         }
@@ -1200,11 +1323,13 @@ final class CameraManager: NSObject, ObservableObject {
         _ = zoomRequests.next() // A queued old-mode zoom must not reconfigure the new mode.
         _ = qualityRequests.next() // Drop quality work that belonged to the previous mode.
         _ = captureConfigurationGeneration.next() // Drop output work captured for the previous mode.
+        _ = videoConfigurationRequests.next() // Drop pending Video-setting work for the previous mode.
         _ = exposureRequests.next() // The new mode reapplies the current requested EV itself.
         isPreviewTransitioning = true
         captureMode = mode
         sessionQueue.async { [weak self] in
             guard let self, self.modeChangeRequests.isLatest(requestID) else { return }
+            self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
             if success { self.synchronizeTorchState() }
@@ -1409,6 +1534,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         AppEventLog.event("Longevity Mode requested: \(enabled)")
         let defaults = UserDefaults.standard
+        _ = videoConfigurationRequests.next()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         if enabled {
@@ -1433,6 +1559,7 @@ final class CameraManager: NSObject, ObservableObject {
         defaults.set(enabled, forKey: "longevityMode")
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
             AppEventLog.event("Longevity Mode \(success ? "applied" : "failed"): enabled=\(enabled)")
@@ -1601,36 +1728,12 @@ final class CameraManager: NSObject, ObservableObject {
         selectedResolution = resolution
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
-        let request = VideoQualityRequest(
-            id: qualityRequests.next(),
-            resolution: selectedResolution,
-            frameRate: selectedFrameRate,
-            position: cameraPosition,
-            codec: selectedVideoCodec,
-            preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
+        scheduleVideoConfiguration(
+            formatAffecting: true,
+            qualityRequestID: qualityRequests.next(),
+            compressionRequestID: compressionRequests.current(),
+            transitionID: transitionID
         )
-        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-            guard let self else { return }
-            guard self.qualityRequests.isLatest(request.id),
-                  self.captureMode == .video,
-                  self.cameraPosition == request.position,
-                  self.selectedVideoCodec == request.codec,
-                  !self.recordingState.requestsRecording,
-                  !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else {
-                self.finishQualityPreviewTransition(transitionID)
-                return
-            }
-            self.lensTransitionCoordinator.cancel()
-            _ = self.applySelectedFormat(
-                preferVirtualCamera: request.preferVirtualCamera,
-                requestedResolution: request.resolution,
-                requestedFrameRate: request.frameRate,
-                qualityRequestID: request.id,
-                requestedPosition: request.position
-            )
-            self.finishQualityPreviewTransition(transitionID)
-        }
     }
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
@@ -1640,36 +1743,12 @@ final class CameraManager: NSObject, ObservableObject {
         selectedFrameRate = frameRate
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
-        let request = VideoQualityRequest(
-            id: qualityRequests.next(),
-            resolution: selectedResolution,
-            frameRate: selectedFrameRate,
-            position: cameraPosition,
-            codec: selectedVideoCodec,
-            preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
+        scheduleVideoConfiguration(
+            formatAffecting: true,
+            qualityRequestID: qualityRequests.next(),
+            compressionRequestID: compressionRequests.current(),
+            transitionID: transitionID
         )
-        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
-            guard let self else { return }
-            guard self.qualityRequests.isLatest(request.id),
-                  self.captureMode == .video,
-                  self.cameraPosition == request.position,
-                  self.selectedVideoCodec == request.codec,
-                  !self.recordingState.requestsRecording,
-                  !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else {
-                self.finishQualityPreviewTransition(transitionID)
-                return
-            }
-            self.lensTransitionCoordinator.cancel()
-            _ = self.applySelectedFormat(
-                preferVirtualCamera: request.preferVirtualCamera,
-                requestedResolution: request.resolution,
-                requestedFrameRate: request.frameRate,
-                qualityRequestID: request.id,
-                requestedPosition: request.position
-            )
-            self.finishQualityPreviewTransition(transitionID)
-        }
     }
 
     func selectSlowMotionResolution(_ resolution: VideoResolution) {
@@ -1818,6 +1897,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             let devices = self.capabilityDevices(for: self.cameraPosition.avPosition)
             let presetSelector = CameraFormatSelector(
@@ -1870,10 +1950,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func configureSessionIfNeeded(
-        forceRebuild: Bool = false,
-        finalizePublishedState: Bool = true
-    ) {
+    private func configureSessionIfNeeded(forceRebuild: Bool = false) {
         let hasVideo = videoInput.map { current in
             session.inputs.contains(where: { $0 === current })
         } ?? false
@@ -1885,6 +1962,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         AppEventLog.event("Configuring camera session\(forceRebuild ? " rebuild" : "")")
 
+        invalidatePendingVideoConfiguration()
         lensTransitionCoordinator.cancel()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
@@ -1956,10 +2034,7 @@ final class CameraManager: NSObject, ObservableObject {
         session.commitConfiguration()
 
         _ = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
-        if finalizePublishedState {
-            updateCapabilities()
-            synchronizeTorchState()
-        }
+        synchronizeTorchState()
         AppEventLog.event("Camera session configured")
         logSessionSnapshot("after session configuration")
     }
@@ -2080,69 +2155,6 @@ final class CameraManager: NSObject, ObservableObject {
 
 
 
-
-    private func updateCapabilities() {
-        guard let device = videoInput?.device else { return }
-        let devices = capabilityDevices(for: device.position)
-        let supported = formatSelector.availableResolutions(for: devices)
-        let selection = formatSelector.validSelection(for: devices, availableResolutions: supported)
-        let slowMotionResolutions = formatSelector.slowMotionResolutions(for: devices)
-        let slowMotionResolution = slowMotionResolutions.contains(selectedSlowMotionResolution)
-            ? selectedSlowMotionResolution
-            : (slowMotionResolutions.contains(.p1080) ? .p1080 : (slowMotionResolutions.first ?? .p1080))
-        let slowMotionRates = formatSelector.slowMotionFrameRates(for: devices, resolution: slowMotionResolution)
-        let slowMotionSelection = slowMotionRates.contains(selectedSlowMotionFrameRate)
-            ? selectedSlowMotionFrameRate
-            : (slowMotionRates.last ?? .fps120)
-
-        let zoomDevices: [AVCaptureDevice]
-        if device.position == .back, captureMode == .video,
-           selection.resolution == .p4k, selection.frameRate == .fps60 {
-            if lensTransitionCoordinator.isRearVirtualLensSystem(device),
-               formatSelector.format(device.activeFormat, supports: selection.resolution, at: selection.frameRate),
-               formatSelector.formatSupportsSelectedCodec(device.activeFormat) {
-                zoomDevices = [device]
-            } else {
-                let physical = devices.filter { candidate in
-                    !candidate.isVirtualDevice && candidate.formats.contains {
-                        self.formatSelector.format($0, supports: selection.resolution, at: selection.frameRate) && self.formatSelector.formatSupportsSelectedCodec($0)
-                    }
-                }
-                zoomDevices = physical.isEmpty ? [device] : physical
-            }
-        } else if device.position == .back, captureMode == .sloMo {
-            let physical = devices.filter { candidate in
-                !candidate.isVirtualDevice && candidate.formats.contains {
-                    self.formatSelector.supportsSlowMotion($0, resolution: slowMotionResolution, frameRate: slowMotionSelection)
-                }
-            }
-            zoomDevices = physical.isEmpty ? [device] : physical
-        } else {
-            zoomDevices = [device]
-        }
-        let minimumZoom = zoomDevices.map { minimumSupportedZoom(for: $0) }.min() ?? minimumSupportedZoom(for: device)
-        let maximumZoom = zoomDevices.map { maximumSupportedZoom(for: $0) }.max() ?? maximumSupportedZoom(for: device)
-        let displayedZoom = displayedZoomFactor(for: device.videoZoomFactor, device: device)
-
-        publish {
-            let wasSuppressing = self.suppressPreferencePersistence
-            self.suppressPreferencePersistence = true
-            self.supportedResolutions = supported
-            self.torchAvailable = device.hasTorch && device.isTorchAvailable
-            self.isTorchOn = device.hasTorch && device.torchMode == .on
-            self.minimumZoomFactor = minimumZoom
-            self.maximumZoomFactor = maximumZoom
-            self.applyPublishedZoomIfNeeded(displayedZoom)
-            self.selectedResolution = selection.resolution
-            self.selectedFrameRate = selection.frameRate
-            self.supportedFrameRates = selection.supportedFrameRates
-            self.supportedSlowMotionResolutions = slowMotionResolutions
-            self.selectedSlowMotionResolution = slowMotionResolution
-            self.supportedSlowMotionFrameRates = slowMotionRates
-            self.selectedSlowMotionFrameRate = slowMotionSelection
-            self.suppressPreferencePersistence = wasSuppressing
-        }
-    }
 
     private func preferredCamera(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         let deviceTypes: [AVCaptureDevice.DeviceType] = position == .front
@@ -2506,10 +2518,20 @@ final class CameraManager: NSObject, ObservableObject {
         let options = photoMegapixelOptions(for: dimensions, aspect: aspect)
         let effective = options.contains(preferredPhotoMegapixels) ? preferredPhotoMegapixels : (options.first ?? 1)
         publish {
-            self.supportedPhotoMegapixels = options
-            self.selectedPhotoMegapixels = effective
-            self.currentPhotoResolutionLabel = "\(effective) MP"
-            self.currentPhotoPixelCount = Int64(effective) * 1_000_000
+            if self.supportedPhotoMegapixels != options {
+                self.supportedPhotoMegapixels = options
+            }
+            if self.selectedPhotoMegapixels != effective {
+                self.selectedPhotoMegapixels = effective
+            }
+            let label = "\(effective) MP"
+            if self.currentPhotoResolutionLabel != label {
+                self.currentPhotoResolutionLabel = label
+            }
+            let pixelCount = Int64(effective) * 1_000_000
+            if self.currentPhotoPixelCount != pixelCount {
+                self.currentPhotoPixelCount = pixelCount
+            }
         }
     }
 
@@ -2552,11 +2574,21 @@ final class CameraManager: NSObject, ObservableObject {
         let minimum = minimumSupportedZoom(for: desiredDevice)
         let maximum = maximumSupportedZoom(for: desiredDevice)
         publish {
-            self.minimumZoomFactor = minimum
-            self.maximumZoomFactor = maximum
+            if abs(self.minimumZoomFactor - minimum) >= 0.0005 {
+                self.minimumZoomFactor = minimum
+            }
+            if abs(self.maximumZoomFactor - maximum) >= 0.0005 {
+                self.maximumZoomFactor = maximum
+            }
             self.applyPublishedZoomIfNeeded(displayedZoom)
-            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
-            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            let torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            let torchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            if self.torchAvailable != torchAvailable {
+                self.torchAvailable = torchAvailable
+            }
+            if self.isTorchOn != torchOn {
+                self.isTorchOn = torchOn
+            }
         }
         updatePhotoMegapixelAvailability(
             for: photoChoice.dimensions,
@@ -2693,24 +2725,20 @@ final class CameraManager: NSObject, ObservableObject {
         if let qualityRequestID, !qualityRequests.isLatest(qualityRequestID) { return false }
         let targetPosition = requestedPosition ?? cameraPosition
         let devices = capabilityDevices(for: targetPosition.avPosition)
-        let available = formatSelector.availableResolutions(for: devices)
+        let videoSelection = formatSelector.videoFormatSelection(
+            for: devices,
+            requestedResolution: requestedResolution,
+            requestedFrameRate: requestedFrameRate
+        )
+        let available = videoSelection.availableResolutions
         guard !available.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("Video isn’t available on this camera with the selected codec.")
             }
             return false
         }
-        let selection = formatSelector.validSelection(
-            for: devices,
-            availableResolutions: available,
-            requestedResolution: requestedResolution,
-            requestedFrameRate: requestedFrameRate
-        )
-        let supportedDevices = devices.filter { device in
-            device.formats.contains {
-                self.formatSelector.format($0, supports: selection.resolution, at: selection.frameRate) && self.formatSelector.formatSupportsSelectedCodec($0)
-            }
-        }
+        let selection = videoSelection
+        let supportedDevices = selection.supportedDevices
 
         publish {
             if let qualityRequestID {
@@ -2720,10 +2748,18 @@ final class CameraManager: NSObject, ObservableObject {
             }
             let wasSuppressing = self.suppressPreferencePersistence
             self.suppressPreferencePersistence = true
-            self.selectedResolution = selection.resolution
-            self.selectedFrameRate = selection.frameRate
-            self.supportedResolutions = available
-            self.supportedFrameRates = selection.supportedFrameRates
+            if self.selectedResolution != selection.resolution {
+                self.selectedResolution = selection.resolution
+            }
+            if self.selectedFrameRate != selection.frameRate {
+                self.selectedFrameRate = selection.frameRate
+            }
+            if self.supportedResolutions != available {
+                self.supportedResolutions = available
+            }
+            if self.supportedFrameRates != selection.supportedFrameRates {
+                self.supportedFrameRates = selection.supportedFrameRates
+            }
             self.suppressPreferencePersistence = wasSuppressing
         }
 
@@ -2783,11 +2819,21 @@ final class CameraManager: NSObject, ObservableObject {
                       self.captureMode == .video,
                       self.cameraPosition == targetPosition else { return }
             }
-            self.minimumZoomFactor = minZoom
-            self.maximumZoomFactor = maxZoom
+            if abs(self.minimumZoomFactor - minZoom) >= 0.0005 {
+                self.minimumZoomFactor = minZoom
+            }
+            if abs(self.maximumZoomFactor - maxZoom) >= 0.0005 {
+                self.maximumZoomFactor = maxZoom
+            }
             self.applyPublishedZoomIfNeeded(displayed)
-            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
-            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            let torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            let torchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            if self.torchAvailable != torchAvailable {
+                self.torchAvailable = torchAvailable
+            }
+            if self.isTorchOn != torchOn {
+                self.isTorchOn = torchOn
+            }
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
@@ -2803,7 +2849,9 @@ final class CameraManager: NSObject, ObservableObject {
 
         let requestedRate = Double(selectedFrameRate.rawValue)
         let duration = device.activeVideoMinFrameDuration.seconds
-        return duration > 0 && abs(1 / duration - requestedRate) < 0.5
+        return duration > 0 &&
+            abs(1 / duration - requestedRate) < 0.5 &&
+            formatSelector.formatSupportsSelectedCodec(device.activeFormat)
     }
 
     private func activeSlowMotionFormatMatchesSelection() -> Bool {
@@ -2829,7 +2877,12 @@ final class CameraManager: NSObject, ObservableObject {
         if let qualityRequestID, !qualityRequests.isLatest(qualityRequestID) { return false }
         let targetPosition = requestedPosition ?? cameraPosition
         let devices = capabilityDevices(for: targetPosition.avPosition)
-        let allResolutions = formatSelector.slowMotionResolutions(for: devices)
+        let slowMotionSelection = formatSelector.slowMotionFormatSelection(
+            for: devices,
+            requestedResolution: requestedResolution ?? selectedSlowMotionResolution,
+            requestedFrameRate: requestedFrameRate ?? selectedSlowMotionFrameRate
+        )
+        let allResolutions = slowMotionSelection.availableResolutions
         guard !allResolutions.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("Slo-Mo isn’t available on this camera with the selected codec.")
@@ -2837,25 +2890,17 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
-        let wantedResolution = requestedResolution ?? selectedSlowMotionResolution
-        let resolution = allResolutions.contains(wantedResolution)
-            ? wantedResolution
-            : (allResolutions.contains(.p1080) ? .p1080 : allResolutions[0])
-        let allRates = formatSelector.slowMotionFrameRates(for: devices, resolution: resolution)
+        let resolution = slowMotionSelection.resolution
+        let allRates = slowMotionSelection.supportedFrameRates
         guard !allRates.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("Slo-Mo isn’t available at this resolution.")
             }
             return false
         }
-        let wantedFrameRate = requestedFrameRate ?? selectedSlowMotionFrameRate
-        let selectedRate = allRates.contains(wantedFrameRate)
-            ? wantedFrameRate
-            : (allRates.last ?? .fps120)
+        let selectedRate = slowMotionSelection.frameRate
 
-        let supportedDevices = devices.filter { device in
-            device.formats.contains { formatSelector.supportsSlowMotion($0, resolution: resolution, frameRate: selectedRate) }
-        }
+        let supportedDevices = slowMotionSelection.supportedDevices
         guard !supportedDevices.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("\(selectedRate.rawValue) fps Slo-Mo isn’t available on this camera.")
@@ -2904,8 +2949,13 @@ final class CameraManager: NSObject, ObservableObject {
         isUsingVideoPreviewProxy = false
         _ = configureMovieOutputSettings()
 
-        let lensResolutions = formatSelector.slowMotionResolutions(for: [desiredDevice])
-        let lensRates = formatSelector.slowMotionFrameRates(for: [desiredDevice], resolution: resolution)
+        let lensSelection = formatSelector.slowMotionFormatSelection(
+            for: [desiredDevice],
+            requestedResolution: resolution,
+            requestedFrameRate: selectedRate
+        )
+        let lensResolutions = lensSelection.availableResolutions
+        let lensRates = lensSelection.supportedFrameRates
         publish {
             if let qualityRequestID {
                 guard self.qualityRequests.isLatest(qualityRequestID),
@@ -2914,16 +2964,36 @@ final class CameraManager: NSObject, ObservableObject {
             }
             let wasSuppressing = self.suppressPreferencePersistence
             self.suppressPreferencePersistence = true
-            self.supportedSlowMotionResolutions = lensResolutions.isEmpty ? allResolutions : lensResolutions
-            self.selectedSlowMotionResolution = resolution
-            self.supportedSlowMotionFrameRates = lensRates.isEmpty ? allRates : lensRates
-            self.selectedSlowMotionFrameRate = selectedRate
+            let resolvedResolutions = lensResolutions.isEmpty ? allResolutions : lensResolutions
+            let resolvedRates = lensRates.isEmpty ? allRates : lensRates
+            if self.supportedSlowMotionResolutions != resolvedResolutions {
+                self.supportedSlowMotionResolutions = resolvedResolutions
+            }
+            if self.selectedSlowMotionResolution != resolution {
+                self.selectedSlowMotionResolution = resolution
+            }
+            if self.supportedSlowMotionFrameRates != resolvedRates {
+                self.supportedSlowMotionFrameRates = resolvedRates
+            }
+            if self.selectedSlowMotionFrameRate != selectedRate {
+                self.selectedSlowMotionFrameRate = selectedRate
+            }
             self.suppressPreferencePersistence = wasSuppressing
-            self.minimumZoomFactor = sloMoMinimumZoom
-            self.maximumZoomFactor = sloMoMaximumZoom
+            if abs(self.minimumZoomFactor - sloMoMinimumZoom) >= 0.0005 {
+                self.minimumZoomFactor = sloMoMinimumZoom
+            }
+            if abs(self.maximumZoomFactor - sloMoMaximumZoom) >= 0.0005 {
+                self.maximumZoomFactor = sloMoMaximumZoom
+            }
             self.applyPublishedZoomIfNeeded(displayed)
-            self.torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
-            self.isTorchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            let torchAvailable = desiredDevice.hasTorch && desiredDevice.isTorchAvailable
+            let torchOn = desiredDevice.hasTorch && desiredDevice.torchMode == .on
+            if self.torchAvailable != torchAvailable {
+                self.torchAvailable = torchAvailable
+            }
+            if self.isTorchOn != torchOn {
+                self.isTorchOn = torchOn
+            }
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
@@ -2954,6 +3024,10 @@ final class CameraManager: NSObject, ObservableObject {
                   let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber else { return false }
             let expected = estimatedVideoBitsPerSecond
             if abs(bitrate.doubleValue - expected) > max(expected * 0.20, 1_000_000) { return false }
+        } else if applied[AVVideoCompressionPropertiesKey] != nil {
+            // High means the system/default compression path. A previous custom bitrate must
+            // not be mistaken for the current setting when Record reconciles pending work.
+            return false
         }
         return true
     }
@@ -3214,14 +3288,20 @@ final class CameraManager: NSObject, ObservableObject {
     private func synchronizeTorchState() {
         guard let device = videoInput?.device else {
             publish {
-                self.torchAvailable = false
-                self.isTorchOn = false
+                if self.torchAvailable { self.torchAvailable = false }
+                if self.isTorchOn { self.isTorchOn = false }
             }
             return
         }
+        let torchAvailable = device.hasTorch && device.isTorchAvailable
+        let torchOn = device.hasTorch && device.torchMode == .on
         publish {
-            self.torchAvailable = device.hasTorch && device.isTorchAvailable
-            self.isTorchOn = device.hasTorch && device.torchMode == .on
+            if self.torchAvailable != torchAvailable {
+                self.torchAvailable = torchAvailable
+            }
+            if self.isTorchOn != torchOn {
+                self.isTorchOn = torchOn
+            }
         }
     }
 
