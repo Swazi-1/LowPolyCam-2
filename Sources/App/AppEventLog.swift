@@ -42,8 +42,15 @@ enum AppEventLog {
         try? handle?.close()
         handle = nil
         try? manager.removeItem(at: url)
-        manager.createFile(atPath: url.path, contents: nil)
-        handle = try? FileHandle(forWritingTo: url)
+        guard manager.createFile(atPath: url.path, contents: nil) else {
+            NSLog("LowPolyCam could not create its session log.")
+            return
+        }
+        do {
+            handle = try FileHandle(forWritingTo: url)
+        } catch {
+            NSLog("LowPolyCam could not open its session log: %@", error.localizedDescription)
+        }
         appendLocked("LowPolyCam session started")
     }
 

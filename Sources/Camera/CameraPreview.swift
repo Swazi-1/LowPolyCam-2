@@ -9,6 +9,7 @@ struct CameraPreview: UIViewRepresentable {
     let isFocusExposureLocked: Bool
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
+    let reservesTopHUDSpace: Bool
     var fitsPhoto = false
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
@@ -28,6 +29,7 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     private func configure(_ view: PreviewView) {
+        view.setReservesTopHUDSpace(reservesTopHUDSpace)
         view.setPreviewTransitioning(isPreviewTransitioning)
         guard !isPreviewTransitioning else { return }
         let gravity: AVLayerVideoGravity = fitsPhoto ? .resizeAspect : .resizeAspectFill
@@ -52,6 +54,7 @@ final class PreviewView: UIView {
     private let lockLabel = UILabel()
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
+    private var reservesTopHUDSpace = false
     private var stabilizationEnabled = true
     private var transitionSnapshot: UIView?
     private var transitionBlurView: UIVisualEffectView?
@@ -89,9 +92,12 @@ final class PreviewView: UIView {
         transitionDimView?.frame = bounds
 
         lockLabel.sizeToFit()
+        // The SwiftUI HUD is above this UIKit preview. Reserve enough room for its largest
+        // two-line layout so the fixed AE/AF lock pill never sits underneath it.
+        let lockLabelTop = safeAreaInsets.top + (reservesTopHUDSpace ? 82 : 54)
         lockLabel.frame = CGRect(
             x: (bounds.width - lockLabel.bounds.width - 24) / 2,
-            y: max(safeAreaInsets.top + 54, 70),
+            y: max(lockLabelTop, 70),
             width: lockLabel.bounds.width + 24,
             height: 30
         )
@@ -131,6 +137,12 @@ final class PreviewView: UIView {
     func setStabilizationEnabled(_ enabled: Bool) {
         stabilizationEnabled = enabled
         enableStabilizationIfAvailable()
+    }
+
+    func setReservesTopHUDSpace(_ reservesSpace: Bool) {
+        guard reservesTopHUDSpace != reservesSpace else { return }
+        reservesTopHUDSpace = reservesSpace
+        setNeedsLayout()
     }
 
     func setPreviewTransitioning(_ transitioning: Bool) {

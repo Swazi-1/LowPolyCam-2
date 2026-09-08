@@ -58,6 +58,7 @@ struct CameraView: View {
                 isFocusExposureLocked: camera.isFocusExposureLocked,
                 stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
                 isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
+                reservesTopHUDSpace: isHUDEnabled,
                 fitsPhoto: camera.captureMode == .photo,
                 onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
                 onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }

@@ -58,6 +58,18 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             clean build
 
+      - name: Verify Files integration
+        run: |
+          set -euo pipefail
+          APP_INFO="build/DerivedData/Build/Products/Release-iphoneos/LowPolyCam.app/Info.plist"
+          for KEY in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+            VALUE=$(/usr/libexec/PlistBuddy -c "Print :$KEY" "$APP_INFO")
+            if [ "$VALUE" != "true" ]; then
+              echo "$KEY must be true in the built app Info.plist, got: $VALUE" >&2
+              exit 1
+            fi
+          done
+
       - name: Package unsigned IPA
         run: |
           mkdir -p build/Payload
