@@ -203,7 +203,7 @@ struct CameraView: View {
                     UIScreen.main.brightness = brightness
                     restoreBrightness = nil
                 }
-                camera.appDidBecomeInactive()
+                camera.appDidBecomeInactive(isBackground: phase == .background)
             }
         }
         .onDisappear {

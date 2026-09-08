@@ -17,6 +17,12 @@ final class RequestToken {
         return id == latest
     }
 
+    func current() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest
+    }
+
     func isCurrent(_ id: UInt64?) -> Bool {
         guard let id else { return true }
         return isLatest(id)
