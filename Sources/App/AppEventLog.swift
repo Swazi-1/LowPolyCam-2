@@ -11,6 +11,9 @@ enum AppEventLog {
     private static var hasStartedSession = false
     private static var defaultsObserver: NSObjectProtocol?
     private static var settingsSnapshot: [String: String] = [:]
+    private static var settingsLogGeneration: UInt64 = 0
+    private static var settingsLogScheduled = false
+    private static let settingsLogDebounceNanoseconds: UInt64 = 100_000_000
 
     // Keep this list explicit. Dumping all of UserDefaults would include unrelated iOS
     // framework values, while this records every preference that can affect LowPolyCam.
@@ -85,6 +88,7 @@ enum AppEventLog {
     static func flush() {
         queue.async {
             beginNewSessionLocked()
+            flushPendingSettingsLogLocked()
             try? handle?.synchronize()
         }
     }
@@ -136,10 +140,34 @@ enum AppEventLog {
             queue: nil
         ) { _ in
             queue.async {
-                beginNewSessionLocked()
-                logChangedSettingsLocked()
+                scheduleSettingsLogLocked()
             }
         }
+    }
+
+    /// UserDefaults can emit a notification for every intermediate value while a slider or
+    /// color picker is being dragged. Coalesce that burst so diagnostics still capture the
+    /// final state without repeatedly scanning every tracked preference and writing to disk.
+    private static func scheduleSettingsLogLocked() {
+        settingsLogGeneration &+= 1
+        let generation = settingsLogGeneration
+        settingsLogScheduled = true
+
+        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(settingsLogDebounceNanoseconds))) {
+            guard generation == settingsLogGeneration else { return }
+            settingsLogScheduled = false
+            beginNewSessionLocked()
+            logChangedSettingsLocked()
+        }
+    }
+
+    /// Flush is called when the app is backgrounded. Do not leave a pending settings burst out
+    /// of the session log just because its debounce window has not elapsed yet.
+    private static func flushPendingSettingsLogLocked() {
+        guard settingsLogScheduled else { return }
+        settingsLogGeneration &+= 1
+        settingsLogScheduled = false
+        logChangedSettingsLocked()
     }
 
     private static func logChangedSettingsLocked() {
