@@ -111,6 +111,7 @@ struct CameraView: View {
             VStack {
                 topControls
                 Spacer()
+                statusToast
                 bottomControls
             }
             .padding(.horizontal, 22)
@@ -134,24 +135,6 @@ struct CameraView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
             }
 
-            if let message = camera.statusMessage {
-                VStack {
-                    Spacer()
-                    Text(message)
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 11)
-                        .background(.black.opacity(0.75), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(.bottom, 176)
-                }
-                .transition(.opacity)
-                .task(id: camera.statusMessageID) {
-                    let id = camera.statusMessageID
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    camera.clearStatus(id: id)
-                }
-            }
         }
         .overlay {
             if editingStats || (liveStats && camera.isRecording) {
@@ -299,11 +282,12 @@ struct CameraView: View {
                 .gesture(zoomGesture)
                 .allowsHitTesting(!(camera.isRecording && recordingLock))
 
-                CaptureModeSelector(
-                    selectedMode: camera.captureMode,
-                    isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0,
-                    onSelect: { camera.selectCaptureMode($0) }
-                )
+            CaptureModeSelector(
+                selectedMode: camera.captureMode,
+                isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0,
+                unavailableModes: CameraManager.CaptureMode.allCases.filter { !camera.isCaptureModeSupported($0) },
+                onSelect: { camera.selectCaptureMode($0) }
+            )
                 .padding(.bottom, 8)
 
             HStack {
@@ -349,6 +333,32 @@ struct CameraView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var statusToast: some View {
+        if let message = camera.statusMessage {
+            HStack {
+                Spacer(minLength: 0)
+                Text(message)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background(.black.opacity(0.75), in: Capsule())
+                    .foregroundStyle(.white)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+            .transition(.opacity)
+            .task(id: camera.statusMessageID) {
+                let id = camera.statusMessageID
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                camera.clearStatus(id: id)
+            }
+        }
     }
 
     private var zoomGesture: some Gesture {

@@ -122,19 +122,43 @@ struct CaptureModeSelector: View {
     @Environment(\.cameraTint) private var theme
     let selectedMode: CameraManager.CaptureMode
     let isEnabled: Bool
+    let unavailableModes: [CameraManager.CaptureMode]
     let onSelect: (CameraManager.CaptureMode) -> Void
+
+    init(
+        selectedMode: CameraManager.CaptureMode,
+        isEnabled: Bool,
+        unavailableModes: [CameraManager.CaptureMode] = [],
+        onSelect: @escaping (CameraManager.CaptureMode) -> Void
+    ) {
+        self.selectedMode = selectedMode
+        self.isEnabled = isEnabled
+        self.unavailableModes = unavailableModes
+        self.onSelect = onSelect
+    }
 
     var body: some View {
         HStack(spacing: 22) {
             ForEach(CameraManager.CaptureMode.allCases) { mode in
+                let modeSupported = !unavailableModes.contains { $0 == mode }
+                let modeEnabled = isEnabled && modeSupported
                 Button {
+                    guard modeEnabled else { return }
                     onSelect(mode)
                 } label: {
-                    Text(mode.rawValue)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(selectedMode == mode ? theme : .white.opacity(0.65))
+                    HStack(spacing: 4) {
+                        Text(mode.rawValue)
+                        if !modeSupported {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                    }
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(selectedMode == mode ? theme : .white.opacity(modeSupported ? 0.65 : 0.35))
                 }
-                .disabled(!isEnabled)
+                .disabled(!modeEnabled)
+                .accessibilityLabel(modeSupported ? mode.rawValue : "\(mode.rawValue), locked")
+                .accessibilityHint(modeSupported ? "" : "Unavailable for the current camera format.")
             }
         }
         .padding(.horizontal, 18)

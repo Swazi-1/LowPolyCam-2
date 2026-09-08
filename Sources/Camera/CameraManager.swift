@@ -103,8 +103,12 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var supportedPhotoMegapixels = Array((1...12).reversed())
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
+    @Published private(set) var isVideoAvailabilityKnown = false
+    @Published private(set) var isVideoAvailable = true
     @Published private(set) var supportedSlowMotionResolutions: [VideoResolution] = []
     @Published private(set) var supportedSlowMotionFrameRates: [SlowMotionFrameRate] = []
+    @Published private(set) var isSlowMotionAvailabilityKnown = false
+    @Published private(set) var isSlowMotionAvailable = true
     @Published private(set) var cameraPosition: CameraPosition = .back
     @Published private(set) var torchAvailable = false
     @Published private(set) var isTorchOn = false
@@ -121,6 +125,9 @@ final class CameraManager: NSObject, ObservableObject {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
             let qualityRequestID = qualityRequests.next()
+            codecAvailabilityMessage = nil
+            isVideoAvailabilityKnown = false
+            isVideoAvailable = true
             UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
             guard captureMode == .video, !suppressAutomaticReconfiguration else { return }
             scheduleVideoConfiguration(
@@ -330,6 +337,7 @@ final class CameraManager: NSObject, ObservableObject {
     // These are accessed only on sessionQueue. Property observers enqueue immutable snapshots.
     private var pendingVideoConfiguration: PendingVideoConfiguration?
     private var pendingVideoConfigurationWorkItem: DispatchWorkItem?
+    private var slowMotionAvailabilityKey: String?
 
     private enum AppLifecyclePhase: String {
         case active
@@ -375,6 +383,95 @@ final class CameraManager: NSObject, ObservableObject {
             let task = backgroundSaveTask
             DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(task) }
         }
+    }
+
+    func isVideoResolutionSupported(_ resolution: VideoResolution) -> Bool {
+        supportedResolutions.contains(resolution)
+    }
+
+    func isVideoFrameRateSupported(_ frameRate: VideoFrameRate) -> Bool {
+        guard supportedFrameRates.contains(frameRate) else { return false }
+        if codecAvailabilityMessage != nil,
+           selectedVideoCodec == "H264",
+           selectedFrameRate == frameRate {
+            return false
+        }
+        return true
+    }
+
+    func isVideoCodecSupported(_ codec: String) -> Bool {
+        guard codec == "HEVC" || codec == "H264" else { return false }
+        if codec == selectedVideoCodec {
+            return codecAvailabilityMessage == nil &&
+                isVideoResolutionSupported(selectedResolution) &&
+                isVideoFrameRateSupported(selectedFrameRate)
+        }
+
+        let selector = CameraFormatSelector(
+            selectedVideoCodec: codec,
+            selectedResolution: selectedResolution,
+            selectedFrameRate: selectedFrameRate
+        )
+        return capabilityDevices(for: cameraPosition.avPosition).contains { device in
+            device.formats.contains {
+                selector.format($0, supports: selectedResolution, at: selectedFrameRate) &&
+                    selector.formatSupportsSelectedCodec($0)
+            }
+        }
+    }
+
+    func isSlowMotionResolutionSupported(_ resolution: VideoResolution) -> Bool {
+        supportedSlowMotionResolutions.contains(resolution)
+    }
+
+    func isSlowMotionFrameRateSupported(_ frameRate: SlowMotionFrameRate) -> Bool {
+        supportedSlowMotionFrameRates.contains(frameRate)
+    }
+
+    func isCaptureModeSupported(_ mode: CaptureMode) -> Bool {
+        switch mode {
+        case .photo:
+            return true
+        case .video:
+            return !isVideoAvailabilityKnown || isVideoAvailable
+        case .sloMo:
+            return !isSlowMotionAvailabilityKnown || isSlowMotionAvailable
+        }
+    }
+
+    private func publishVideoAvailability(_ available: Bool) {
+        publish {
+            if self.isVideoAvailabilityKnown != true {
+                self.isVideoAvailabilityKnown = true
+            }
+            if self.isVideoAvailable != available {
+                self.isVideoAvailable = available
+            }
+        }
+    }
+
+    private func publishSlowMotionAvailability(_ available: Bool) {
+        publish {
+            if self.isSlowMotionAvailabilityKnown != true {
+                self.isSlowMotionAvailabilityKnown = true
+            }
+            if self.isSlowMotionAvailable != available {
+                self.isSlowMotionAvailable = available
+            }
+        }
+    }
+
+    private func updateSlowMotionAvailability(for devices: [AVCaptureDevice]) {
+        let key = [
+            cameraPosition == .back ? "back" : "front",
+            selectedVideoCodec,
+            devices.map(\.uniqueID).joined(separator: ",")
+        ].joined(separator: "|")
+        guard slowMotionAvailabilityKey != key else { return }
+        slowMotionAvailabilityKey = key
+        publishSlowMotionAvailability(
+            !formatSelector.slowMotionResolutions(for: devices).isEmpty
+        )
     }
 
     private func transitionRecordingState(
@@ -1286,6 +1383,9 @@ final class CameraManager: NSObject, ObservableObject {
         let previous = cameraPosition
         let target: CameraPosition = previous == .back ? .front : .back
         AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")")
+        codecAvailabilityMessage = nil
+        isVideoAvailabilityKnown = false
+        isVideoAvailable = true
         let requestID = cameraSwitchRequests.next()
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
         _ = qualityRequests.next() // Do not apply an old quality request to the new input.
@@ -1317,8 +1417,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectCaptureMode(_ mode: CaptureMode) {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, !isLensTransitioning, captureMode != mode else { return }
+        guard isCaptureModeSupported(mode) else { return }
         let previousMode = captureMode
         AppEventLog.event("Capture mode requested: \(previousMode.rawValue) to \(mode.rawValue)")
+        codecAvailabilityMessage = nil
         let requestID = modeChangeRequests.next()
         _ = zoomRequests.next() // A queued old-mode zoom must not reconfigure the new mode.
         _ = qualityRequests.next() // Drop quality work that belonged to the previous mode.
@@ -1723,8 +1825,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectResolution(_ resolution: VideoResolution) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
+        guard isVideoResolutionSupported(resolution) else { return }
         guard selectedResolution != resolution else { return }
         AppEventLog.event("Video resolution requested: \(selectedResolution.rawValue) to \(resolution.rawValue)")
+        codecAvailabilityMessage = nil
         selectedResolution = resolution
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1738,8 +1842,10 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
+        guard isVideoFrameRateSupported(frameRate) else { return }
         guard selectedFrameRate != frameRate else { return }
         AppEventLog.event("Video frame rate requested: \(selectedFrameRate.rawValue) to \(frameRate.rawValue)")
+        codecAvailabilityMessage = nil
         selectedFrameRate = frameRate
         let transitionID = qualityPreviewTransitions.next()
         isPreviewTransitioning = true
@@ -1753,6 +1859,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectSlowMotionResolution(_ resolution: VideoResolution) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
+        guard isSlowMotionResolutionSupported(resolution) else { return }
         guard selectedSlowMotionResolution != resolution else { return }
         AppEventLog.event("Slo-Mo resolution requested: \(selectedSlowMotionResolution.rawValue) to \(resolution.rawValue)")
         selectedSlowMotionResolution = resolution
@@ -1790,6 +1897,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
+        guard isSlowMotionFrameRateSupported(frameRate) else { return }
         guard selectedSlowMotionFrameRate != frameRate else { return }
         AppEventLog.event("Slo-Mo frame rate requested: \(selectedSlowMotionFrameRate.rawValue) to \(frameRate.rawValue)")
         selectedSlowMotionFrameRate = frameRate
@@ -2538,6 +2646,7 @@ final class CameraManager: NSObject, ObservableObject {
     @discardableResult
     private func applyBestPhotoFormat(preferVirtualCamera: Bool = true) -> Bool {
         let devices = capabilityDevices(for: cameraPosition.avPosition)
+        updateSlowMotionAvailability(for: devices)
         guard !devices.isEmpty else {
             showError("Photo capture is unavailable on this camera.")
             return false
@@ -2730,6 +2839,11 @@ final class CameraManager: NSObject, ObservableObject {
             requestedResolution: requestedResolution,
             requestedFrameRate: requestedFrameRate
         )
+        publishVideoAvailability(
+            !videoSelection.availableResolutions.isEmpty &&
+                !videoSelection.supportedFrameRates.isEmpty
+        )
+        updateSlowMotionAvailability(for: devices)
         let available = videoSelection.availableResolutions
         guard !available.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
@@ -2883,6 +2997,12 @@ final class CameraManager: NSObject, ObservableObject {
             requestedFrameRate: requestedFrameRate ?? selectedSlowMotionFrameRate
         )
         let allResolutions = slowMotionSelection.availableResolutions
+        slowMotionAvailabilityKey = [
+            cameraPosition == .back ? "back" : "front",
+            selectedVideoCodec,
+            devices.map(\.uniqueID).joined(separator: ",")
+        ].joined(separator: "|")
+        publishSlowMotionAvailability(!allResolutions.isEmpty)
         guard !allResolutions.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("Slo-Mo isn’t available on this camera with the selected codec.")
@@ -3067,7 +3187,13 @@ final class CameraManager: NSObject, ObservableObject {
         movieOutput.setOutputSettings(settings, for: connection)
 
         let applied = movieOutput.outputSettings(for: connection)
-        guard (applied[AVVideoCodecKey] as? String) == preferred.rawValue else { return false }
+        guard (applied[AVVideoCodecKey] as? String) == preferred.rawValue else {
+            let message = preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
+                ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
+                : "The selected codec is unavailable for this camera configuration."
+            publish { self.codecAvailabilityMessage = message }
+            return false
+        }
         if connection.isVideoMirroringSupported, connection.isVideoMirrored != shouldMirror { return false }
         if connection.isVideoStabilizationSupported {
             let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off

@@ -159,18 +159,20 @@ struct VideoSettingsView: View {
                     symbol: "aspectratio",
                     title: "Resolution",
                     subtitle: "Video size",
-                    options: camera.supportedResolutions,
+                    options: VideoResolution.allCases,
                     selection: camera.selectedResolution,
                     label: { $0.rawValue },
+                    isEnabled: camera.isVideoResolutionSupported,
                     onSelect: camera.selectResolution
                 )
                 SettingsOptionCard(
                     symbol: "speedometer",
                     title: "Frame Rate",
                     subtitle: "Frames per second",
-                    options: camera.supportedFrameRates,
+                    options: VideoFrameRate.allCases,
                     selection: camera.selectedFrameRate,
                     label: { $0.label },
+                    isEnabled: camera.isVideoFrameRateSupported,
                     onSelect: camera.selectFrameRate
                 )
                 SettingsOptionCard(
@@ -189,6 +191,7 @@ struct VideoSettingsView: View {
                     options: ["HEVC", "H264"],
                     selection: camera.selectedVideoCodec,
                     label: { $0 == "HEVC" ? "HEVC" : "H.264" },
+                    isEnabled: camera.isVideoCodecSupported,
                     onSelect: { camera.selectedVideoCodec = $0 }
                 )
             }
@@ -218,18 +221,20 @@ struct VideoSettingsView: View {
                         symbol: "aspectratio",
                         title: "Resolution",
                         subtitle: "Video size",
-                        options: camera.supportedSlowMotionResolutions,
+                        options: VideoResolution.allCases,
                         selection: camera.selectedSlowMotionResolution,
                         label: { $0.rawValue },
+                        isEnabled: camera.isSlowMotionResolutionSupported,
                         onSelect: camera.selectSlowMotionResolution
                     )
                     SettingsOptionCard(
                         symbol: "speedometer",
                         title: "Frame Rate",
                         subtitle: "Frames per second",
-                        options: camera.supportedSlowMotionFrameRates,
+                        options: CameraManager.SlowMotionFrameRate.allCases,
                         selection: camera.selectedSlowMotionFrameRate,
                         label: { $0.label },
+                        isEnabled: camera.isSlowMotionFrameRateSupported,
                         onSelect: camera.selectSlowMotionFrameRate
                     )
                 }

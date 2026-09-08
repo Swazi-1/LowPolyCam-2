@@ -189,6 +189,7 @@ struct SettingsOptionCard: View {
     let subtitle: String
     let options: [(id: AnyHashable, label: String)]
     let selectedID: AnyHashable
+    let isOptionEnabled: (AnyHashable) -> Bool
     let onSelect: (AnyHashable) -> Void
     @Environment(\.cameraTint) private var theme
 
@@ -210,23 +211,39 @@ struct SettingsOptionCard: View {
             }
             HStack(spacing: 4) {
                 ForEach(options, id: \.id) { option in
+                    let enabled = isOptionEnabled(option.id)
                     Button {
+                        guard enabled else { return }
                         onSelect(option.id)
                     } label: {
-                        Text(option.label)
-                            .font(.system(size: option.label.count > 8 ? 11 : 12, weight: .bold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.68)
-                            .allowsTightening(true)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(
-                                option.id == selectedID ? theme : Color.primary.opacity(0.07),
-                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            )
-                            .foregroundStyle(option.id == selectedID ? Color.black : Color.primary)
+                        HStack(spacing: 4) {
+                            Text(option.label)
+                                .font(.system(size: option.label.count > 8 ? 11 : 12, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.68)
+                                .allowsTightening(true)
+                            if !enabled {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            option.id == selectedID ? theme : Color.primary.opacity(0.07),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        )
+                        .foregroundStyle(
+                            enabled
+                                ? (option.id == selectedID ? Color.black : Color.primary)
+                                : Color.secondary
+                        )
                     }
                     .buttonStyle(.plain)
+                    .disabled(!enabled)
+                    .accessibilityLabel(enabled ? option.label : "\(option.label), locked")
+                    .accessibilityHint(enabled ? "" : "Unavailable for the current camera format.")
                 }
             }
         }
@@ -246,6 +263,7 @@ extension SettingsOptionCard {
         options: [Option],
         selection: Option,
         label: (Option) -> String,
+        isEnabled: @escaping (Option) -> Bool = { _ in true },
         onSelect: @escaping (Option) -> Void
     ) {
         self.symbol = symbol
@@ -253,6 +271,10 @@ extension SettingsOptionCard {
         self.subtitle = subtitle
         self.options = options.map { (AnyHashable($0), label($0)) }
         self.selectedID = AnyHashable(selection)
+        self.isOptionEnabled = { anyValue in
+            guard let value = anyValue.base as? Option else { return false }
+            return isEnabled(value)
+        }
         self.onSelect = { anyValue in
             if let value = anyValue.base as? Option {
                 onSelect(value)
