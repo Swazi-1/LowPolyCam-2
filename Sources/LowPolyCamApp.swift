@@ -4,6 +4,7 @@ import SwiftUI
 struct LowPolyCamApp: App {
     @StateObject private var permissionManager = PermissionManager()
     private var accent = CameraAccent()
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some Scene {
         WindowGroup {
@@ -11,6 +12,7 @@ struct LowPolyCamApp: App {
                 .environment(\.cameraTint, accent.color)
                 .tint(accent.color)
                 .accentColor(accent.color)
+                .preferredColorScheme(resolvedColorScheme(appColorScheme))
         }
     }
 }

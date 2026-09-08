@@ -6,6 +6,7 @@ struct AppearanceSettingsView: View {
     @AppStorage("iconCustomRed") private var red = 0.55
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
     private var accent = CameraAccent()
     private let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
@@ -62,6 +63,7 @@ struct AppearanceSettingsView: View {
             }
         }
         .tint(accent.color).accentColor(accent.color)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .navigationTitle("Appearance").navigationBarTitleDisplayMode(.inline)
     }
 
@@ -81,6 +83,7 @@ struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.cameraTint) private var theme
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @State private var preview: VideoQuickPreset = .balanced
     var body: some View {
         SettingsPage {
@@ -143,6 +146,7 @@ struct VideoPresetsView: View {
                 camera.selectedVideoCodec == "HEVC"
             } ?? .balanced
         }
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .navigationTitle("Video Presets").navigationBarTitleDisplayMode(.inline)
     }
 }
