@@ -323,7 +323,6 @@ final class CameraManager: NSObject, ObservableObject {
            let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
            let mode = CaptureMode(rawValue: saved) { captureMode = mode }
         installSessionObservers()
-        recoverableRecordingCount = CameraRecoveryStore.recordingCount()
     }
 
     deinit {
@@ -540,8 +539,9 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.requestedZoom = 1
-            self.configureSessionIfNeeded()
-            self.refreshAvailableStorage()
+            // The active format still has to be ready before startRunning, but the full
+            // settings-capability scan can happen after the first frame is unblocked.
+            self.configureSessionIfNeeded(finalizePublishedState: false)
             guard self.session.isRunning == false else {
                 self.publish { self.isSessionRunning = true }
                 return
@@ -549,6 +549,12 @@ final class CameraManager: NSObject, ObservableObject {
             self.session.startRunning()
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
+            self.updateCapabilities()
+            self.synchronizeTorchState()
+            self.refreshAvailableStorage()
+            self.storageQueue.async { [weak self] in
+                self?.refreshRecoveryCount()
+            }
         }
     }
 
@@ -1580,7 +1586,10 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func configureSessionIfNeeded(forceRebuild: Bool = false) {
+    private func configureSessionIfNeeded(
+        forceRebuild: Bool = false,
+        finalizePublishedState: Bool = true
+    ) {
         let hasVideo = videoInput.map { current in
             session.inputs.contains(where: { $0 === current })
         } ?? false
@@ -1654,11 +1663,16 @@ final class CameraManager: NSObject, ObservableObject {
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
         session.addOutput(photoOutput)
+        if photoOutput.isResponsiveCaptureSupported {
+            photoOutput.isResponsiveCaptureEnabled = true
+        }
         session.commitConfiguration()
 
-        updateCapabilities()
         _ = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
-        synchronizeTorchState()
+        if finalizePublishedState {
+            updateCapabilities()
+            synchronizeTorchState()
+        }
     }
 
 
@@ -3081,6 +3095,9 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
         sessionQueue.async { [weak self] in
             guard let self, let context = self.photoCaptureContexts[captureID] else { return }
             self.pendingPhotoSaves += 1
+            if !context.isBurst {
+                self.postStatus("Photo captured · saving…")
+            }
 
             self.storageQueue.async {
                 guard let result = PhotoAspectProcessor.process(

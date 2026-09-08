@@ -10,8 +10,16 @@ final class PermissionManager: ObservableObject {
         case denied([String])
     }
 
-    @Published private(set) var state: State = .checking
+    @Published private(set) var state: State
     private var hasRequestedThisLaunch = false
+
+    init() {
+        // Returning users already granted these permissions. Enter the camera immediately
+        // instead of rendering the permission gate for one task cycle on every cold launch.
+        let cameraReady = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+        let photosReady = PHPhotoLibrary.authorizationStatus(for: .addOnly) == .authorized
+        state = cameraReady && photosReady ? .ready : .checking
+    }
 
     func requestRequiredPermissionsIfNeeded() async {
         guard !hasRequestedThisLaunch else { return }
