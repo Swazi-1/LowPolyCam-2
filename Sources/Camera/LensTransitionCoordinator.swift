@@ -217,7 +217,7 @@ final class LensTransitionCoordinator {
         // Let the blur cover become visible first, then move the virtual device's zoom directly to
         // the requested value. AVFoundation keeps the same input/session and performs the constituent
         // camera handoff internally, which is the fast path used by its virtual camera architecture.
-        sessionQueue.asyncAfter(deadline: .now() + 0.070) { [weak self, weak device] in
+        sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self, weak device] in
             guard let self, let device,
                   self.isActive(request.id),
                   self.zoomRequests.isLatest(request.id),
@@ -234,7 +234,7 @@ final class LensTransitionCoordinator {
 
             // Keep the blur over the short optical/ISP constituent change. No format/input rebuild
             // happens here, so this stays close to the system camera's fast switch behavior.
-            self.finish(request.id, revealDelay: 0.10)
+            self.finish(request.id, revealDelay: 0.04)
         }
     }
 
@@ -274,7 +274,7 @@ final class LensTransitionCoordinator {
 
         // The PreviewView blur animates in during this short lead-in. Unlike the old generic path,
         // expensive capability scans/input creation have already finished before the cover appears.
-        sessionQueue.asyncAfter(deadline: .now() + 0.070) { [weak self] in
+        sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self] in
             guard let self,
                   self.isActive(request.id),
                   self.zoomRequests.isLatest(request.id) else { return }
@@ -307,7 +307,7 @@ final class LensTransitionCoordinator {
             // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
             // can remain true across an input rebuild, so a tiny post-commit hold prevents the cover
             // from disappearing on a stale pre-switch preview state.
-            self.finish(request.id, revealDelay: 0.10)
+            self.finish(request.id, revealDelay: 0.04)
         }
     }
 

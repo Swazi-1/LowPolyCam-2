@@ -975,20 +975,10 @@ final class CameraManager: NSObject, ObservableObject {
         isUsingVideoPreviewProxy = false
         isUsingSlowMotionPreview = false
 
-        let zoomDevices = lensTransitionCoordinator.supportedPhysicalLensDevices(
-            from: capabilityDevices(for: cameraPosition.avPosition),
-            captureMode: captureMode,
-            selectedResolution: selectedResolution,
-            selectedFrameRate: selectedFrameRate,
-            selectedSlowMotionResolution: selectedSlowMotionResolution,
-            selectedSlowMotionFrameRate: selectedSlowMotionFrameRate,
-            formatSelector: formatSelector
-        )
-        let minZoom = zoomDevices.map { minimumSupportedZoom(for: $0) }.min() ?? minimumSupportedZoom(for: prepared.device)
-        let maxZoom = zoomDevices.map { maximumSupportedZoom(for: $0) }.max() ?? maximumSupportedZoom(for: prepared.device)
+        // This handoff keeps the same mode, resolution and frame rate, so the published zoom
+        // range is already correct. Re-scanning every format on every lens after the blocking
+        // hardware commit only extends the visible transition.
         publish {
-            self.minimumZoomFactor = minZoom
-            self.maximumZoomFactor = maxZoom
             self.zoomFactor = displayed
             self.zoomLabel = self.formattedZoomLabel(for: displayed)
             self.torchAvailable = prepared.device.hasTorch && prepared.device.isTorchAvailable
