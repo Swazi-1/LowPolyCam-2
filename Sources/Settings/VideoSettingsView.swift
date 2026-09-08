@@ -207,6 +207,9 @@ struct VideoSettingsView: View {
     private var slowMotionSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsSectionHeader(title: "Slo-Mo Settings")
+            Text("HEVC / H.265 is used automatically for reliable high-frame-rate recording.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if camera.cameraPosition == .back && camera.minimumZoomFactor >= 1 {
                 Text("0.5× is available only when the Ultra Wide lens supports this Slo-Mo quality and frame rate.")
                     .font(.caption).foregroundStyle(.secondary)

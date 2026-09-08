@@ -240,9 +240,13 @@ final class CameraManager: NSObject, ObservableObject {
     private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
 
+    private var activeVideoCodec: String {
+        captureMode == .sloMo ? "HEVC" : selectedVideoCodec
+    }
+
     private var formatSelector: CameraFormatSelector {
         CameraFormatSelector(
-            selectedVideoCodec: selectedVideoCodec,
+            selectedVideoCodec: activeVideoCodec,
             selectedResolution: selectedResolution,
             selectedFrameRate: selectedFrameRate
         )
@@ -390,6 +394,13 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func isVideoFrameRateSupported(_ frameRate: VideoFrameRate) -> Bool {
+        if isKnownUnsupportedH264VideoSelection(
+            codec: selectedVideoCodec,
+            resolution: selectedResolution,
+            frameRate: frameRate
+        ) {
+            return false
+        }
         guard supportedFrameRates.contains(frameRate) else { return false }
         if codecAvailabilityMessage != nil,
            selectedVideoCodec == "H264",
@@ -401,6 +412,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     func isVideoCodecSupported(_ codec: String) -> Bool {
         guard codec == "HEVC" || codec == "H264" else { return false }
+        if isKnownUnsupportedH264VideoSelection(
+            codec: codec,
+            resolution: selectedResolution,
+            frameRate: selectedFrameRate
+        ) {
+            return false
+        }
         if codec == selectedVideoCodec {
             return codecAvailabilityMessage == nil &&
                 isVideoResolutionSupported(selectedResolution) &&
@@ -418,6 +436,20 @@ final class CameraManager: NSObject, ObservableObject {
                     selector.formatSupportsSelectedCodec($0)
             }
         }
+    }
+
+    private func isKnownUnsupportedH264VideoSelection(
+        codec: String,
+        resolution: VideoResolution,
+        frameRate: VideoFrameRate
+    ) -> Bool {
+        // On the supported iPhone 11 rear capture path, AVCaptureMovieFileOutput falls back to
+        // HEVC for 4K60 when H.264 is requested. Keep the controls locked before the user taps;
+        // configureMovieOutputSettings remains the final readback guard for other combinations.
+        codec == "H264" &&
+            cameraPosition == .back &&
+            resolution == .p4k &&
+            frameRate == .fps60
     }
 
     func isSlowMotionResolutionSupported(_ resolution: VideoResolution) -> Bool {
@@ -464,7 +496,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func updateSlowMotionAvailability(for devices: [AVCaptureDevice]) {
         let key = [
             cameraPosition == .back ? "back" : "front",
-            selectedVideoCodec,
+            activeVideoCodec,
             devices.map(\.uniqueID).joined(separator: ",")
         ].joined(separator: "|")
         guard slowMotionAvailabilityKey != key else { return }
@@ -851,7 +883,7 @@ final class CameraManager: NSObject, ObservableObject {
             ? Double(selectedSlowMotionFrameRate.rawValue)
             : Double(selectedFrameRate.rawValue)
         let pixels = Double(resolution.dimensions.width) * Double(resolution.dimensions.height)
-        let codecFactor = selectedVideoCodec == "H264" ? 1.0 : 0.72
+        let codecFactor = activeVideoCodec == "H264" ? 1.0 : 0.72
         return max(pixels * fps * videoCompression.bitsPerPixel * codecFactor, 2_000_000)
     }
 
@@ -2210,8 +2242,8 @@ final class CameraManager: NSObject, ObservableObject {
                 defer { desiredDevice.unlockForConfiguration() }
 
                 desiredDevice.activeFormat = format
-                desiredDevice.automaticallyAdjustsVideoHDREnabled = selectedVideoCodec != "H264"
-                if selectedVideoCodec == "H264", desiredDevice.isVideoHDREnabled {
+                desiredDevice.automaticallyAdjustsVideoHDREnabled = activeVideoCodec != "H264"
+                if activeVideoCodec == "H264", desiredDevice.isVideoHDREnabled {
                     desiredDevice.isVideoHDREnabled = false
                 }
                 if desiredDevice.isGeometricDistortionCorrectionSupported {
@@ -2999,7 +3031,7 @@ final class CameraManager: NSObject, ObservableObject {
         let allResolutions = slowMotionSelection.availableResolutions
         slowMotionAvailabilityKey = [
             cameraPosition == .back ? "back" : "front",
-            selectedVideoCodec,
+            activeVideoCodec,
             devices.map(\.uniqueID).joined(separator: ",")
         ].joined(separator: "|")
         publishSlowMotionAvailability(!allResolutions.isEmpty)
@@ -3127,7 +3159,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func movieOutputSettingsMatchCurrentConfiguration() -> Bool {
         guard let connection = movieOutput.connection(with: .video) else { return false }
-        let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
+        let preferred: AVVideoCodecType = activeVideoCodec == "H264" ? .h264 : .hevc
         let applied = movieOutput.outputSettings(for: connection)
         guard (applied[AVVideoCodecKey] as? String) == preferred.rawValue else { return false }
 
@@ -3168,7 +3200,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
-        let preferred: AVVideoCodecType = selectedVideoCodec == "H264" ? .h264 : .hevc
+        let preferred: AVVideoCodecType = activeVideoCodec == "H264" ? .h264 : .hevc
         let codecAvailable = movieOutputSupportsCodec(preferred, on: connection, supportedKeys: supportedKeys)
         let message: String? = codecAvailable ? nil : (preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
             ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
@@ -3350,7 +3382,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         guard movieOutputSettingsMatchCurrentConfiguration() || configureMovieOutputSettings() else {
             transitionRecordingState(to: .idle, resetClock: true)
-            showError("\(selectedVideoCodec == "H264" ? "H.264" : "HEVC") isn’t available at this resolution/FPS on this lens.")
+            showError("\(activeVideoCodec == "H264" ? "H.264" : "HEVC") isn’t available at this resolution/FPS on this lens.")
             return
         }
 
