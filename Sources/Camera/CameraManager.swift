@@ -235,6 +235,14 @@ final class CameraManager: NSObject, ObservableObject {
     private var requestedZoom: CGFloat = 1
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
+    private struct DeferredWhiteBalanceRequest {
+        let id: UInt64
+        let preset: WhiteBalancePreset
+        let previousPreset: WhiteBalancePreset
+    }
+    // Accessed only on sessionQueue. WB changes must wait for an interrupted/stopped
+    // AVCaptureSession instead of trying to swap inputs while the video device is unavailable.
+    private var deferredWhiteBalanceRequest: DeferredWhiteBalanceRequest?
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingFocusReturnWorkItem: DispatchWorkItem?
     private struct ZoomSubmission {
@@ -691,6 +699,7 @@ final class CameraManager: NSObject, ObservableObject {
             !suppressAutomaticReconfiguration &&
             recordingState.isIdle &&
             !movieOutput.isRecording &&
+            !session.isInterrupted &&
             session.isRunning
     }
 
@@ -838,11 +847,24 @@ final class CameraManager: NSObject, ObservableObject {
         invalidatePendingVideoConfiguration()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
+        let currentWhiteBalanceRequestID = whiteBalanceRequests.current()
+        if deferredWhiteBalanceRequest == nil ||
+            !whiteBalanceRequests.isLatest(deferredWhiteBalanceRequest?.id ?? 0) {
+            deferredWhiteBalanceRequest = DeferredWhiteBalanceRequest(
+                id: currentWhiteBalanceRequestID,
+                preset: requestedWhiteBalancePreset,
+                previousPreset: requestedWhiteBalancePreset
+            )
+        }
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
         burstRemaining = 0
         burstStopRequested = true
         synchronizeTorchState()
+        let sessionAvailable = session.isRunning && !session.isInterrupted
+        publish {
+            self.isSessionRunning = sessionAvailable
+        }
         guard recordingState.requestsRecording || movieOutput.isRecording else { return }
 
         segmentTimer?.cancel()
@@ -863,6 +885,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = captureConfigurationGeneration.next()
         configureSessionIfNeeded()
         if !session.isRunning { session.startRunning() }
+        applyDeferredWhiteBalanceIfPossible()
         synchronizeTorchState()
         publish { self.isSessionRunning = self.session.isRunning }
         logSessionSnapshot("after interruption recovery")
@@ -953,12 +976,14 @@ final class CameraManager: NSObject, ObservableObject {
             self.configureSessionIfNeeded()
             guard self.session.isRunning == false else {
                 self.publish { self.isSessionRunning = true }
+                self.applyDeferredWhiteBalanceIfPossible()
                 return
             }
             self.session.startRunning()
             AppEventLog.event("Camera session running")
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
+            self.applyDeferredWhiteBalanceIfPossible()
             self.synchronizeTorchState()
             self.refreshAvailableStorage()
             self.storageQueue.async { [weak self] in
@@ -1060,6 +1085,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = self.session.isRunning }
+            self.applyDeferredWhiteBalanceIfPossible()
             self.synchronizeTorchState()
         }
     }
@@ -1872,68 +1898,140 @@ final class CameraManager: NSObject, ObservableObject {
                   !self.lensTransitionCoordinator.hasActiveTransition else { return }
 
             let previousPreset = self.requestedWhiteBalancePreset
-            let currentDevice = self.videoInput?.device
-            // Slo-Mo always uses a physical HFR camera. Rear 4K60 may use Apple's
-            // Dual-Wide/Triple virtual camera while WB is Auto, but manual WB must move to a
-            // physical constituent so locked temperature/tint is applied to the real capture input.
-            let modeRequiresPhysicalInput = self.cameraPosition == .back && self.captureMode == .sloMo
-            let needsInputSwap = self.cameraPosition == .back && !modeRequiresPhysicalInput && (
-                (preset != .auto && currentDevice?.isVirtualDevice == true) ||
-                (preset == .auto && currentDevice?.isVirtualDevice == false)
-            )
-
             self.requestedWhiteBalancePreset = preset
 
-            // Manual-to-manual (or any front-camera WB change) only needs a device WB update.
-            // Do not rebuild/reapply the whole capture format for a color-temperature change.
-            if !needsInputSwap {
-                guard self.whiteBalanceRequests.isLatest(requestID) else { return }
-                if self.applyWhiteBalancePresetToCurrentCamera(preset) {
-                    self.publish {
-                        self.whiteBalancePreset = preset
-                        self.isPreviewTransitioning = false
-                    }
-                    AppEventLog.event("White balance applied: \(preset.rawValue)")
-                } else {
-                    self.requestedWhiteBalancePreset = previousPreset
-                    _ = self.applyWhiteBalancePresetToCurrentCamera(previousPreset)
-                    self.publish {
-                        self.whiteBalancePreset = previousPreset
-                        self.isPreviewTransitioning = false
-                    }
-                    self.showError(preset == .auto
-                        ? "Couldn’t enable Auto white balance."
-                        : "Manual white balance isn’t available on this lens.")
-                }
+            guard self.session.isRunning, !self.session.isInterrupted else {
+                self.deferWhiteBalanceRequest(
+                    id: requestID,
+                    preset: preset,
+                    previousPreset: previousPreset
+                )
                 return
             }
 
-            // Rear Auto <-> manual requires a virtual/physical input handoff. Freeze the
-            // current preview first, then perform exactly one atomic input+format change.
-            self.publish { self.isPreviewTransitioning = true }
-            self.sessionQueue.asyncAfter(deadline: .now() + 0.045) { [weak self] in
-                guard let self, self.whiteBalanceRequests.isLatest(requestID) else { return }
+            self.applyWhiteBalanceRequest(
+                preset,
+                previousPreset: previousPreset,
+                requestID: requestID
+            )
+        }
+    }
 
-                let configured = self.applyActiveModeFormat(
-                    preferVirtualCamera: preset == .auto
-                )
-                guard self.whiteBalanceRequests.isLatest(requestID) else { return }
+    private func deferWhiteBalanceRequest(
+        id: UInt64,
+        preset: WhiteBalancePreset,
+        previousPreset: WhiteBalancePreset
+    ) {
+        guard whiteBalanceRequests.isLatest(id) else { return }
+        deferredWhiteBalanceRequest = DeferredWhiteBalanceRequest(
+            id: id,
+            preset: preset,
+            previousPreset: previousPreset
+        )
+        let state = session.isInterrupted ? "interrupted" : "not running"
+        AppEventLog.event("White balance deferred: camera session is \(state)")
+    }
 
-                if !configured || self.requestedWhiteBalancePreset != preset {
-                    self.requestedWhiteBalancePreset = previousPreset
-                    _ = self.applyActiveModeFormat(preferVirtualCamera: previousPreset == .auto)
-                    self.publish { self.whiteBalancePreset = previousPreset }
-                    self.showError(preset == .auto
-                        ? "Couldn’t enable Auto white balance."
-                        : "Manual white balance isn’t available on this lens.")
-                } else {
-                    AppEventLog.event("White balance applied after camera handoff: \(preset.rawValue)")
-                }
+    private func applyDeferredWhiteBalanceIfPossible() {
+        guard let deferred = deferredWhiteBalanceRequest else { return }
+        guard whiteBalanceRequests.isLatest(deferred.id) else {
+            deferredWhiteBalanceRequest = nil
+            return
+        }
+        guard session.isRunning, !session.isInterrupted else { return }
+        deferredWhiteBalanceRequest = nil
+        applyWhiteBalanceRequest(
+            deferred.preset,
+            previousPreset: deferred.previousPreset,
+            requestID: deferred.id
+        )
+    }
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                    guard let self, self.whiteBalanceRequests.isLatest(requestID) else { return }
+    private func applyWhiteBalanceRequest(
+        _ preset: WhiteBalancePreset,
+        previousPreset: WhiteBalancePreset,
+        requestID: UInt64
+    ) {
+        guard whiteBalanceRequests.isLatest(requestID),
+              !movieOutput.isRecording, !recordingState.requestsRecording,
+              !lensTransitionCoordinator.hasActiveTransition else { return }
+        guard session.isRunning, !session.isInterrupted else {
+            deferWhiteBalanceRequest(
+                id: requestID,
+                preset: preset,
+                previousPreset: previousPreset
+            )
+            return
+        }
+
+        deferredWhiteBalanceRequest = nil
+        requestedWhiteBalancePreset = preset
+        let currentDevice = videoInput?.device
+        // Slo-Mo always uses a physical HFR camera. Rear 4K60 may use Apple's
+        // Dual-Wide/Triple virtual camera while WB is Auto, but manual WB must move to a
+        // physical constituent so locked temperature/tint is applied to the real capture input.
+        let modeRequiresPhysicalInput = cameraPosition == .back && captureMode == .sloMo
+        let needsInputSwap = cameraPosition == .back && !modeRequiresPhysicalInput && (
+            (preset != .auto && currentDevice?.isVirtualDevice == true) ||
+            (preset == .auto && currentDevice?.isVirtualDevice == false)
+        )
+
+        // Manual-to-manual (or any front-camera WB change) only needs a device WB update.
+        // Do not rebuild/reapply the whole capture format for a color-temperature change.
+        if !needsInputSwap {
+            if applyWhiteBalancePresetToCurrentCamera(preset) {
+                publish {
+                    self.whiteBalancePreset = preset
                     self.isPreviewTransitioning = false
                 }
+                AppEventLog.event("White balance applied: \(preset.rawValue)")
+            } else {
+                requestedWhiteBalancePreset = previousPreset
+                _ = applyWhiteBalancePresetToCurrentCamera(previousPreset)
+                publish {
+                    self.whiteBalancePreset = previousPreset
+                    self.isPreviewTransitioning = false
+                }
+                showError(preset == .auto
+                    ? "Couldn’t enable Auto white balance."
+                    : "Manual white balance isn’t available on this lens.")
+            }
+            return
+        }
+
+        // Rear Auto <-> manual requires a virtual/physical input handoff. Freeze the
+        // current preview first, then perform exactly one atomic input+format change.
+        publish { self.isPreviewTransitioning = true }
+        sessionQueue.asyncAfter(deadline: .now() + 0.045) { [weak self] in
+            guard let self, self.whiteBalanceRequests.isLatest(requestID) else { return }
+            guard self.session.isRunning, !self.session.isInterrupted else {
+                self.deferWhiteBalanceRequest(
+                    id: requestID,
+                    preset: preset,
+                    previousPreset: previousPreset
+                )
+                return
+            }
+
+            let configured = self.applyActiveModeFormat(
+                preferVirtualCamera: preset == .auto
+            )
+            guard self.whiteBalanceRequests.isLatest(requestID) else { return }
+
+            if !configured || self.requestedWhiteBalancePreset != preset {
+                self.requestedWhiteBalancePreset = previousPreset
+                _ = self.applyActiveModeFormat(preferVirtualCamera: previousPreset == .auto)
+                self.publish { self.whiteBalancePreset = previousPreset }
+                self.showError(preset == .auto
+                    ? "Couldn’t enable Auto white balance."
+                    : "Manual white balance isn’t available on this lens.")
+            } else {
+                AppEventLog.event("White balance applied after camera handoff: \(preset.rawValue)")
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                guard let self, self.whiteBalanceRequests.isLatest(requestID) else { return }
+                self.isPreviewTransitioning = false
             }
         }
     }
@@ -2263,7 +2361,10 @@ final class CameraManager: NSObject, ObservableObject {
         }
         session.commitConfiguration()
 
-        _ = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
+        let formatApplied = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
+        if formatApplied {
+            deferredWhiteBalanceRequest = nil
+        }
         synchronizeTorchState()
         AppEventLog.event("Camera session configured")
         logSessionSnapshot("after session configuration")
@@ -2551,16 +2652,15 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             guard let temperature = preset.temperature,
-                  device.isWhiteBalanceModeSupported(.locked) else {
+                  device.isWhiteBalanceModeSupported(.locked),
+                  device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else {
                 return false
             }
 
+            // Convert to device gains and clamp before applying. The temperature/tint setter can
+            // raise an Objective-C range exception for values a particular lens rejects; Swift
+            // do/catch cannot recover from that exception. iPhone 11 supports custom gains.
             let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: preset.tint)
-            if #available(iOS 26.0, *) {
-                device.setWhiteBalanceModeLocked(whiteBalanceTemperatureAndTintValues: values, handler: nil)
-                return true
-            }
-            guard device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else { return false }
             var gains = device.deviceWhiteBalanceGains(for: values)
             let maximum = device.maxWhiteBalanceGain
             gains.redGain = min(max(gains.redGain, 1), maximum)
@@ -2888,7 +2988,7 @@ final class CameraManager: NSObject, ObservableObject {
         AppEventLog.event(
             "\(label) [\(context)]: \(cameraPosition == .back ? "back" : "front") \(lensKind) \(device.localizedName), " +
             "\(dimensions.width)x\(dimensions.height) @ \(String(format: "%.1f", frameRate)) fps, " +
-            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(for: requestedZoom)), WB=\(whiteBalancePreset.rawValue)"
+            "codec=\(codec), \(bitRateText), zoom=\(formattedZoomLabel(for: requestedZoom)), WB=\(requestedWhiteBalancePreset.rawValue)"
         )
     }
 
