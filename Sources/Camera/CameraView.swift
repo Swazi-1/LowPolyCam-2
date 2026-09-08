@@ -2,6 +2,21 @@ import SwiftUI
 import UIKit
 
 struct CameraView: View {
+    private enum StoragePollingState: Hashable {
+        case inactive
+        case covered
+        case idle
+        case recording
+
+        var intervalNanoseconds: UInt64? {
+            switch self {
+            case .idle: return 30_000_000_000
+            case .recording: return 5_000_000_000
+            case .inactive, .covered: return nil
+            }
+        }
+    }
+
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
@@ -89,7 +104,7 @@ struct CameraView: View {
                 }.foregroundStyle(.white).zIndex(10)
             }
 
-            CameraLevelMeterHost(enabled: isLevelMeterEnabled)
+            CameraLevelMeterHost(enabled: isLevelMeterEnabled && !isShowingSettings)
 
             VStack {
                 topControls
@@ -156,15 +171,15 @@ struct CameraView: View {
             camera.start()
             updateIdleTimer(for: scenePhase)
         }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
+        .task(id: storagePollingState) {
+            guard let interval = storagePollingState.intervalNanoseconds else { return }
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                    try await Task.sleep(nanoseconds: interval)
                 } catch {
                     return
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, storagePollingState.intervalNanoseconds == interval else { return }
                 camera.refreshAvailableStorage()
             }
         }
@@ -369,5 +384,11 @@ struct CameraView: View {
 
     private func updateIdleTimer(for phase: ScenePhase) {
         UIApplication.shared.isIdleTimerDisabled = keepScreenAwakeEnabled && phase == .active
+    }
+
+    private var storagePollingState: StoragePollingState {
+        guard scenePhase == .active else { return .inactive }
+        guard !isShowingSettings else { return .covered }
+        return camera.isRecording ? .recording : .idle
     }
 }

@@ -108,6 +108,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var recoverableRecordingCount = 0
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
+            guard selectedVideoCodec != oldValue else { return }
             _ = qualityRequests.next()
             UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
             guard !suppressAutomaticReconfiguration else { return }
@@ -120,10 +121,14 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
-        didSet { UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat") }
+        didSet {
+            guard photoFileFormat != oldValue else { return }
+            UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat")
+        }
     }
     @Published var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
         didSet {
+            guard videoCompression != oldValue else { return }
             UserDefaults.standard.set(videoCompression.rawValue, forKey: "videoCompression")
             guard !suppressAutomaticReconfiguration else { return }
             sessionQueue.async { [weak self] in
@@ -597,8 +602,8 @@ final class CameraManager: NSObject, ObservableObject {
             self.configureSessionIfNeeded()
             if !self.session.isRunning {
                 self.session.startRunning()
-                try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             }
+            try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = self.session.isRunning }
             self.synchronizeTorchState()
         }
@@ -1017,8 +1022,11 @@ final class CameraManager: NSObject, ObservableObject {
     func refreshLiveMetrics() {
         sessionQueue.async { [weak self] in
             guard let self, !self.recordingState.requestsRecording, !self.movieOutput.isRecording,
-                  !self.lensTransitionCoordinator.hasActiveTransition else { return }
-            _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+                  !self.lensTransitionCoordinator.hasActiveTransition,
+                  self.videoInput != nil else { return }
+            self.session.beginConfiguration()
+            self.configureLiveMetrics()
+            self.session.commitConfiguration()
         }
     }
 
@@ -1038,7 +1046,11 @@ final class CameraManager: NSObject, ObservableObject {
         if available && !movieOutput.isRecording {
             setLiveMetricsConnectionEnabled(false)
         }
-        publish { self.liveMetricsAvailable = available }
+        publish {
+            if self.liveMetricsAvailable != available {
+                self.liveMetricsAvailable = available
+            }
+        }
     }
 
     private func setLiveMetricsConnectionEnabled(_ enabled: Bool) {
@@ -1129,7 +1141,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectPhotoMegapixels(_ megapixels: Int) {
-        guard supportedPhotoMegapixels.contains(megapixels) else { return }
+        guard supportedPhotoMegapixels.contains(megapixels), selectedPhotoMegapixels != megapixels else { return }
         preferredPhotoMegapixels = megapixels
         UserDefaults.standard.set(megapixels, forKey: Self.photoMegapixelsKey)
         selectedPhotoMegapixels = megapixels
@@ -1275,7 +1287,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectResolution(_ resolution: VideoResolution) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
-        if selectedResolution != resolution { selectedResolution = resolution }
+        guard selectedResolution != resolution else { return }
+        selectedResolution = resolution
         let request = VideoQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedResolution,
@@ -1306,7 +1319,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectFrameRate(_ frameRate: VideoFrameRate) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
-        if selectedFrameRate != frameRate { selectedFrameRate = frameRate }
+        guard selectedFrameRate != frameRate else { return }
+        selectedFrameRate = frameRate
         let request = VideoQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedResolution,
@@ -1337,7 +1351,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectSlowMotionResolution(_ resolution: VideoResolution) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
-        if selectedSlowMotionResolution != resolution { selectedSlowMotionResolution = resolution }
+        guard selectedSlowMotionResolution != resolution else { return }
+        selectedSlowMotionResolution = resolution
         let request = SlowMotionQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedSlowMotionResolution,
@@ -1366,7 +1381,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     func selectSlowMotionFrameRate(_ frameRate: SlowMotionFrameRate) {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
-        if selectedSlowMotionFrameRate != frameRate { selectedSlowMotionFrameRate = frameRate }
+        guard selectedSlowMotionFrameRate != frameRate else { return }
+        selectedSlowMotionFrameRate = frameRate
         let request = SlowMotionQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedSlowMotionResolution,
@@ -1394,6 +1410,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func setVideoStabilizationEnabled(_ enabled: Bool) {
+        guard isVideoStabilizationEnabled != enabled else { return }
         isVideoStabilizationEnabled = enabled
         guard captureMode == .video else { return }
         sessionQueue.async { [weak self] in self?.configureMovieOutputSettings() }
@@ -3067,4 +3084,3 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
         }
     }
 }
-

@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import AVFoundation
 
 private struct CameraTintKey: EnvironmentKey {
     static let defaultValue = Color(red: 0.65, green: 0.88, blue: 1)
@@ -43,7 +42,6 @@ enum CameraHaptics {
         let defaults = UserDefaults.standard
         if captureOnly, !(defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true) { return }
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
-        try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
         generator.prepare()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
