@@ -202,6 +202,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let whiteBalanceRequests = RequestToken()
     private let modeChangeRequests = RequestToken()
     private let qualityRequests = RequestToken()
+    private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
 
     private var formatSelector: CameraFormatSelector {
@@ -1340,6 +1341,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedResolution != resolution else { return }
         selectedResolution = resolution
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
         let request = VideoQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedResolution,
@@ -1348,15 +1351,18 @@ final class CameraManager: NSObject, ObservableObject {
             codec: selectedVideoCodec,
             preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
         )
-        sessionQueue.async { [weak self] in
-            guard let self,
-                  self.qualityRequests.isLatest(request.id),
+        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            guard let self else { return }
+            guard self.qualityRequests.isLatest(request.id),
                   self.captureMode == .video,
                   self.cameraPosition == request.position,
                   self.selectedVideoCodec == request.codec,
                   !self.recordingState.requestsRecording,
                   !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else { return }
+                  !self.movieOutput.isRecording else {
+                self.finishQualityPreviewTransition(transitionID)
+                return
+            }
             self.lensTransitionCoordinator.cancel()
             _ = self.applySelectedFormat(
                 preferVirtualCamera: request.preferVirtualCamera,
@@ -1365,6 +1371,7 @@ final class CameraManager: NSObject, ObservableObject {
                 qualityRequestID: request.id,
                 requestedPosition: request.position
             )
+            self.finishQualityPreviewTransition(transitionID)
         }
     }
 
@@ -1372,6 +1379,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedFrameRate != frameRate else { return }
         selectedFrameRate = frameRate
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
         let request = VideoQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedResolution,
@@ -1380,15 +1389,18 @@ final class CameraManager: NSObject, ObservableObject {
             codec: selectedVideoCodec,
             preferVirtualCamera: !requiresPhysicalWhiteBalanceInput
         )
-        sessionQueue.async { [weak self] in
-            guard let self,
-                  self.qualityRequests.isLatest(request.id),
+        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            guard let self else { return }
+            guard self.qualityRequests.isLatest(request.id),
                   self.captureMode == .video,
                   self.cameraPosition == request.position,
                   self.selectedVideoCodec == request.codec,
                   !self.recordingState.requestsRecording,
                   !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else { return }
+                  !self.movieOutput.isRecording else {
+                self.finishQualityPreviewTransition(transitionID)
+                return
+            }
             self.lensTransitionCoordinator.cancel()
             _ = self.applySelectedFormat(
                 preferVirtualCamera: request.preferVirtualCamera,
@@ -1397,6 +1409,7 @@ final class CameraManager: NSObject, ObservableObject {
                 qualityRequestID: request.id,
                 requestedPosition: request.position
             )
+            self.finishQualityPreviewTransition(transitionID)
         }
     }
 
@@ -1404,6 +1417,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedSlowMotionResolution != resolution else { return }
         selectedSlowMotionResolution = resolution
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
         let request = SlowMotionQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedSlowMotionResolution,
@@ -1411,15 +1426,18 @@ final class CameraManager: NSObject, ObservableObject {
             position: cameraPosition,
             codec: selectedVideoCodec
         )
-        sessionQueue.async { [weak self] in
-            guard let self,
-                  self.qualityRequests.isLatest(request.id),
+        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            guard let self else { return }
+            guard self.qualityRequests.isLatest(request.id),
                   self.captureMode == .sloMo,
                   self.cameraPosition == request.position,
                   self.selectedVideoCodec == request.codec,
                   !self.recordingState.requestsRecording,
                   !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else { return }
+                  !self.movieOutput.isRecording else {
+                self.finishQualityPreviewTransition(transitionID)
+                return
+            }
             self.lensTransitionCoordinator.cancel()
             _ = self.applySlowMotionFormat(
                 requestedResolution: request.resolution,
@@ -1427,6 +1445,7 @@ final class CameraManager: NSObject, ObservableObject {
                 qualityRequestID: request.id,
                 requestedPosition: request.position
             )
+            self.finishQualityPreviewTransition(transitionID)
         }
     }
 
@@ -1434,6 +1453,8 @@ final class CameraManager: NSObject, ObservableObject {
         guard captureMode == .sloMo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard selectedSlowMotionFrameRate != frameRate else { return }
         selectedSlowMotionFrameRate = frameRate
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
         let request = SlowMotionQualityRequest(
             id: qualityRequests.next(),
             resolution: selectedSlowMotionResolution,
@@ -1441,15 +1462,18 @@ final class CameraManager: NSObject, ObservableObject {
             position: cameraPosition,
             codec: selectedVideoCodec
         )
-        sessionQueue.async { [weak self] in
-            guard let self,
-                  self.qualityRequests.isLatest(request.id),
+        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            guard let self else { return }
+            guard self.qualityRequests.isLatest(request.id),
                   self.captureMode == .sloMo,
                   self.cameraPosition == request.position,
                   self.selectedVideoCodec == request.codec,
                   !self.recordingState.requestsRecording,
                   !self.recordingState.isFinalizing,
-                  !self.movieOutput.isRecording else { return }
+                  !self.movieOutput.isRecording else {
+                self.finishQualityPreviewTransition(transitionID)
+                return
+            }
             self.lensTransitionCoordinator.cancel()
             _ = self.applySlowMotionFormat(
                 requestedResolution: request.resolution,
@@ -1457,6 +1481,16 @@ final class CameraManager: NSObject, ObservableObject {
                 qualityRequestID: request.id,
                 requestedPosition: request.position
             )
+            self.finishQualityPreviewTransition(transitionID)
+        }
+    }
+
+    private func finishQualityPreviewTransition(_ transitionID: UInt64) {
+        // The iPhone 11 test stream needed roughly 0.32-0.37 seconds to produce a bright frame
+        // after a resolution/FPS commit. Keep the existing frozen cover through that reset window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) { [weak self] in
+            guard let self, self.qualityPreviewTransitions.isLatest(transitionID) else { return }
+            self.isPreviewTransitioning = false
         }
     }
 
