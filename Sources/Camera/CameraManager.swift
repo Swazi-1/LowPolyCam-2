@@ -13,6 +13,24 @@ final class CameraManager: NSObject, ObservableObject {
         var id: String { rawValue }
     }
 
+    enum PhotoFlashMode: String, CaseIterable, Identifiable {
+        case off = "Off"
+        case auto = "Auto"
+        case on = "On"
+
+        var id: String { rawValue }
+
+        var avMode: AVCaptureDevice.FlashMode {
+            switch self {
+            case .off: return .off
+            case .auto: return .auto
+            case .on: return .on
+            }
+        }
+
+        var accessibilityLabel: String { "Photo Flash \(rawValue)" }
+    }
+
     enum SlowMotionFrameRate: Int, CaseIterable, Identifiable {
         case fps120 = 120
         case fps240 = 240
@@ -211,6 +229,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var cameraPosition: CameraPosition = .back
     @Published private(set) var torchAvailable = false
     @Published private(set) var isTorchOn = false
+    @Published private(set) var photoFlashAvailable = false
     @Published private(set) var minimumZoomFactor: CGFloat = 1
     @Published private(set) var maximumZoomFactor: CGFloat = 1
     @Published private(set) var zoomFactor: CGFloat = 1
@@ -235,6 +254,13 @@ final class CameraManager: NSObject, ObservableObject {
                 qualityRequestID: qualityRequestID,
                 compressionRequestID: compressionRequests.current()
             )
+        }
+    }
+    @Published var photoFlashMode = PhotoFlashMode(rawValue: UserDefaults.standard.string(forKey: "photoFlashMode") ?? "") ?? .auto {
+        didSet {
+            guard photoFlashMode != oldValue else { return }
+            UserDefaults.standard.set(photoFlashMode.rawValue, forKey: "photoFlashMode")
+            AppEventLog.event("Photo flash preference changed: \(oldValue.rawValue) -> \(photoFlashMode.rawValue)")
         }
     }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
@@ -306,6 +332,7 @@ final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.swazi.lowpolycam.camera")
     private let storageQueue = DispatchQueue(label: "com.swazi.lowpolycam.storage", qos: .utility)
+    private let storageGuard = StorageGuard()
     private let movieOutput = AVCaptureMovieFileOutput()
     // Owned only on sessionQueue. The epoch is separate from desired-request and recording-state
     // generations so a normal Record transition cannot invalidate settled hardware proof.
@@ -324,6 +351,8 @@ final class CameraManager: NSObject, ObservableObject {
         let megapixels: Int
         let filename: String
         let isBurst: Bool
+        let requestedFlash: String
+        let appliedFlash: String
     }
 
     private var burstRemaining = 0
@@ -338,6 +367,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingPhotoSaves = 0
 
     private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
     private var requestedZoom: CGFloat = 1
     private var requestedExposureBias: Float = 0
     private var requestedWhiteBalancePreset: WhiteBalancePreset = .auto
@@ -370,6 +400,9 @@ final class CameraManager: NSObject, ObservableObject {
     private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
     private let torchRequests = RequestToken()
+    private let recordingStartRequests = RequestToken()
+    private let microphonePermissionRequests = RequestToken()
+    private let mediaSaveTaskRequests = RequestToken()
     private let codecSupportCacheLock = NSLock()
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
@@ -466,6 +499,10 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingVideoSaves = 0
     private var inFlightVideoSaves: Set<URL> = []
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
+    private var awaitingMicrophonePermission = false
+    private var storageProtectionStopIssued = false
+    private var storageWarningEpisodeActive = false
+    private var activeCriticalStorageReserveBytes = StorageGuard.minimumCriticalReserveBytes
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var sessionObserverTokens: [NSObjectProtocol] = []
     private var suppressPreferencePersistence = false
@@ -522,6 +559,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     deinit {
         sessionObserverTokens.forEach(NotificationCenter.default.removeObserver)
+        storageGuard.stopMonitoring()
         if backgroundSaveTask != .invalid {
             let task = backgroundSaveTask
             DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(task) }
@@ -747,6 +785,9 @@ final class CameraManager: NSObject, ObservableObject {
         let previousState = recordingState
         let previousFlags = recordingState.uiFlags
         recordingState = newState
+        if newState.isIdle {
+            storageGuard.stopMonitoring()
+        }
         if previousState != newState {
             invalidatePendingVideoConfiguration()
             _ = qualityRequests.next()
@@ -1008,6 +1049,10 @@ final class CameraManager: NSObject, ObservableObject {
     private func handleSessionRuntimeError(_ notification: Notification) {
         invalidateVerifiedHighOutputProvenance()
         invalidatePendingVideoConfiguration()
+        storageGuard.stopMonitoring()
+        _ = recordingStartRequests.next()
+        _ = microphonePermissionRequests.next()
+        awaitingMicrophonePermission = false
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         stopLiveMetrics()
@@ -1031,6 +1076,10 @@ final class CameraManager: NSObject, ObservableObject {
     private func handleSessionInterrupted(_ notification: Notification) {
         invalidateVerifiedHighOutputProvenance()
         _ = torchRequests.next()
+        storageGuard.stopMonitoring()
+        _ = recordingStartRequests.next()
+        _ = microphonePermissionRequests.next()
+        awaitingMicrophonePermission = false
         let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
         AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         invalidatePendingVideoConfiguration()
@@ -1125,19 +1174,76 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func refreshAvailableStorage() {
-        storageQueue.async { [weak self] in
-            guard let self else { return }
-            let homeURL = URL(fileURLWithPath: NSHomeDirectory())
-            guard let values = try? homeURL.resourceValues(
-                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
-            ), let available = values.volumeAvailableCapacityForImportantUsage else { return }
-            let bytes = max(available, 0)
-            self.publish {
-                if self.availableStorageBytes != bytes {
-                    self.availableStorageBytes = bytes
-                }
+        storageGuard.checkNow(criticalReserveBytes: criticalStorageReserveBytes) { [weak self] snapshot in
+            guard let self, let snapshot else { return }
+            self.sessionQueue.async {
+                self.applyStorageSnapshot(snapshot, source: "refresh")
             }
         }
+    }
+
+    private var criticalStorageReserveBytes: Int64 {
+        StorageGuard.criticalReserveBytes(forVideoBitrate: estimatedVideoBitsPerSecond)
+    }
+
+    /// Called on sessionQueue for both the idle HUD refresh and the active recording monitor.
+    private func applyStorageSnapshot(_ snapshot: StorageSnapshot, source: String) {
+        publish {
+            if self.availableStorageBytes != snapshot.availableBytes {
+                self.availableStorageBytes = snapshot.availableBytes
+            }
+        }
+
+        if snapshot.availableBytes > StorageGuard.warningThresholdBytes {
+            storageWarningEpisodeActive = false
+        } else if snapshot.isWarning, !storageWarningEpisodeActive {
+            storageWarningEpisodeActive = true
+            if UserDefaults.standard.bool(forKey: "lowStorageWarning") {
+                postStatus("Storage is below 1 GB. Long recordings may stop early.")
+            }
+            AppEventLog.event("Storage warning threshold crossed: available=\(snapshot.availableBytes), source=\(source)")
+        }
+
+        guard snapshot.isCritical,
+              recordingState.requestsRecording || movieOutput.isRecording else { return }
+        issueStorageProtectionStop(snapshot: snapshot, source: source)
+    }
+
+    private func issueStorageProtectionStop(snapshot: StorageSnapshot, source: String) {
+        guard !storageProtectionStopIssued else { return }
+        storageProtectionStopIssued = true
+        recordingStartRequests.next()
+        microphonePermissionRequests.next()
+        awaitingMicrophonePermission = false
+        segmentTimer?.cancel()
+        storageGuard.stopMonitoring()
+        AppEventLog.event(
+            "STORAGE CRITICAL: available=\(snapshot.availableBytes), reserve=\(activeCriticalStorageReserveBytes), " +
+            "bitrate=\(Int(estimatedVideoBitsPerSecond)), source=\(source), stopReason=low-storage protection"
+        )
+
+        if movieOutput.isRecording {
+            transitionRecordingToFinalizing(resetClock: true)
+            postStatus("Recording stopped to protect the file because storage is critically low.")
+            movieOutput.stopRecording()
+        } else if recordingState.requestsRecording {
+            transitionRecordingState(to: .idle, resetClock: true)
+            restoreIdleCaptureConfigurationAfterRecording()
+            postStatus("Not enough free storage to safely start recording.")
+        }
+    }
+
+    private func rejectRecordingStartForStorage(snapshot: StorageSnapshot) {
+        storageProtectionStopIssued = true
+        recordingStartRequests.next()
+        storageGuard.stopMonitoring()
+        AppEventLog.event(
+            "Recording start rejected: critically low storage, available=\(snapshot.availableBytes), " +
+            "reserve=\(activeCriticalStorageReserveBytes), bitrate=\(Int(estimatedVideoBitsPerSecond))"
+        )
+        transitionRecordingState(to: .idle, resetClock: true)
+        restoreIdleCaptureConfigurationAfterRecording()
+        showError("Not enough free storage to safely start recording.")
     }
 
 
@@ -1201,6 +1307,10 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.event("Camera stop requested")
             self.invalidateVerifiedHighOutputProvenance()
             _ = self.torchRequests.next()
+            _ = self.recordingStartRequests.next()
+            _ = self.microphonePermissionRequests.next()
+            self.awaitingMicrophonePermission = false
+            self.storageGuard.stopMonitoring()
             self.invalidatePendingVideoConfiguration()
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
@@ -1213,7 +1323,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.transitionRecordingToFinalizing(resetClock: true)
                 self.movieOutput.stopRecording()
             } else if self.recordingState.requestsRecording {
-                self.transitionRecordingToDiscard(resetClock: true)
+                self.transitionRecordingState(to: .idle, resetClock: true)
             }
             if self.session.isRunning {
                 self.session.stopRunning()
@@ -1236,6 +1346,10 @@ final class CameraManager: NSObject, ObservableObject {
             self.appLifecyclePhase = requestedPhase
             AppEventLog.event("App lifecycle transition: \(previousPhase.rawValue) -> \(requestedPhase.rawValue)")
             self.invalidatePendingVideoConfiguration()
+            _ = self.recordingStartRequests.next()
+            _ = self.microphonePermissionRequests.next()
+            self.awaitingMicrophonePermission = false
+            self.storageGuard.stopMonitoring()
             // ACTIVE -> INACTIVE/BACKGROUND owns the cleanup. INACTIVE -> BACKGROUND is a
             // distinct lifecycle transition, but has no additional camera work today.
             guard previousPhase == .active else { return }
@@ -1266,7 +1380,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.transitionRecordingToFinalizing(resetClock: true)
                 self.movieOutput.stopRecording()
             } else if self.recordingState.requestsRecording {
-                self.transitionRecordingToDiscard(resetClock: true)
+                self.transitionRecordingState(to: .idle, resetClock: true)
             }
 
             self.publish {
@@ -1300,6 +1414,7 @@ final class CameraManager: NSObject, ObservableObject {
     func toggleTorch() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            guard self.captureMode != .photo else { return }
             _ = self.torchRequests.next()
             guard let device = self.videoInput?.device, device.hasTorch else { return }
             if device.torchMode != .on && !device.isTorchAvailable {
@@ -1308,6 +1423,24 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
             self.setTorchEnabledOnCurrentDevice(device.torchMode != .on, showErrorOnFailure: true)
+        }
+    }
+
+    func cyclePhotoFlashMode() {
+        guard captureMode == .photo, photoFlashAvailable else { return }
+        sessionQueue.async { [weak self] in
+            guard let self, self.captureMode == .photo, self.photoFlashAvailable else { return }
+            let next: PhotoFlashMode
+            switch self.photoFlashMode {
+            case .off: next = .auto
+            case .auto: next = .on
+            case .on: next = .off
+            }
+            self.publish {
+                guard self.captureMode == .photo else { return }
+                self.photoFlashMode = next
+            }
+            AppEventLog.event("Photo flash mode selected: \(next.rawValue)")
         }
     }
 
@@ -1788,7 +1921,12 @@ final class CameraManager: NSObject, ObservableObject {
             self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
-            if success { self.synchronizeTorchState() }
+            if success {
+                if mode == .photo {
+                    self.setTorchEnabledOnCurrentDevice(false)
+                }
+                self.synchronizeTorchState()
+            }
             AppEventLog.event("Capture mode \(success ? "applied" : "failed"): \(mode.rawValue)")
 
             self.publish {
@@ -2437,6 +2575,59 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func prepareMicrophoneAndBeginRecording() {
+        guard recordingState.requestsRecording else { return }
+        let requestID = microphonePermissionRequests.next()
+        let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
+
+        if authorization == .notDetermined {
+            awaitingMicrophonePermission = true
+            AppEventLog.event("Microphone permission requested lazily before recording")
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                self?.sessionQueue.async { [weak self] in
+                    self?.finishMicrophonePermission(
+                        granted: granted,
+                        requestID: requestID
+                    )
+                }
+            }
+            return
+        }
+
+        let attached = authorization == .authorized && attachAudioInputIfAuthorized()
+        AppEventLog.event(
+            "Microphone authorization before recording: state=\(authorization.rawValue), attached=\(attached)"
+        )
+        if authorization != .authorized {
+            postStatus("Recording without audio · microphone access is off")
+        } else if !attached {
+            postStatus("Microphone unavailable · recording without audio")
+        }
+        beginRecording()
+    }
+
+    private func finishMicrophonePermission(granted: Bool, requestID: UInt64) {
+        guard microphonePermissionRequests.isLatest(requestID),
+              awaitingMicrophonePermission,
+              recordingState.requestsRecording,
+              appLifecyclePhase == .active,
+              session.isRunning,
+              captureMode == .video || captureMode == .sloMo else {
+            AppEventLog.event("Stale microphone permission completion dropped: granted=\(granted)")
+            return
+        }
+
+        awaitingMicrophonePermission = false
+        let attached = granted && attachAudioInputIfAuthorized()
+        AppEventLog.event("Microphone permission result: granted=\(granted), audioInputAttached=\(attached)")
+        if !granted {
+            postStatus("Microphone access denied · recording without audio")
+        } else if !attached {
+            postStatus("Microphone unavailable · recording without audio")
+        }
+        beginRecording()
+    }
+
     func startOrStopRecording() {
         guard captureMode == .video || captureMode == .sloMo else { return }
         sessionQueue.async { [weak self] in
@@ -2444,6 +2635,11 @@ final class CameraManager: NSObject, ObservableObject {
 
             if self.recordingState.requestsRecording {
                 AppEventLog.event("Recording stop requested")
+                let wasWaitingForMicrophone = self.awaitingMicrophonePermission
+                _ = self.recordingStartRequests.next()
+                _ = self.microphonePermissionRequests.next()
+                self.awaitingMicrophonePermission = false
+                self.storageGuard.stopMonitoring()
                 self.stopLiveMetrics()
                 self.segmentTimer?.cancel()
 
@@ -2451,6 +2647,8 @@ final class CameraManager: NSObject, ObservableObject {
                     self.transitionRecordingState(to: .finalizing, resetClock: true)
                     self.postStatus("Saving to Photos…")
                     self.movieOutput.stopRecording()
+                } else if wasWaitingForMicrophone {
+                    self.transitionRecordingState(to: .idle, resetClock: true)
                 } else {
                     // A second tap arrived while AVCaptureMovieFileOutput was still starting.
                     // If didStart arrives later, stop and discard that canceled startup clip.
@@ -2462,12 +2660,13 @@ final class CameraManager: NSObject, ObservableObject {
             guard !self.isCapturingPhoto, !self.lensTransitionCoordinator.hasActiveTransition else { return }
             AppEventLog.event("Recording start requested: \(self.captureMode.rawValue) \(self.hudResolutionLabel) \(self.hudFrameRateLabel ?? "")fps")
             let splitDuration = Double(UserDefaults.standard.integer(forKey: "splitMinutes")) * 60
+            self.storageProtectionStopIssued = false
             self.transitionRecordingState(
                 to: .starting(splitDuration: splitDuration),
                 resetClock: true,
                 clearLastFrameGaps: true
             )
-            self.beginRecording()
+            self.prepareMicrophoneAndBeginRecording()
         }
     }
 
@@ -2535,6 +2734,33 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    private func makeAuthorizedAudioInput() -> AVCaptureDeviceInput? {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+              let audioDevice = AVCaptureDevice.default(for: .audio) else { return nil }
+        return try? AVCaptureDeviceInput(device: audioDevice)
+    }
+
+    /// Called only on sessionQueue. Lazy microphone permission can grant audio after the initial
+    /// camera session has already been built, so the input can be attached in a small transaction.
+    @discardableResult
+    private func attachAudioInputIfAuthorized() -> Bool {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return false }
+        if let existingAudioInput = audioInput,
+           session.inputs.contains(where: { $0 === existingAudioInput }) {
+            return true
+        }
+        guard let newInput = makeAuthorizedAudioInput(), session.canAddInput(newInput) else {
+            AppEventLog.event("Microphone audio input attach failed: unavailable or session rejected input")
+            return false
+        }
+        session.beginConfiguration()
+        session.addInput(newInput)
+        session.commitConfiguration()
+        audioInput = newInput
+        AppEventLog.event("Microphone audio input attached: \(newInput.device.localizedName)")
+        return true
+    }
+
     private func configureSessionIfNeeded(forceRebuild: Bool = false) {
         let hasVideo = videoInput.map { current in
             session.inputs.contains(where: { $0 === current })
@@ -2566,6 +2792,7 @@ final class CameraManager: NSObject, ObservableObject {
             session.removeOutput(output)
         }
         videoInput = nil
+        audioInput = nil
 
         guard let device = preferredCamera(for: cameraPosition.avPosition) else {
             session.commitConfiguration()
@@ -2589,11 +2816,12 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         // Microphone is optional so Photo mode still works when microphone permission is denied.
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
-           let audioDevice = AVCaptureDevice.default(for: .audio),
-           let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
-           session.canAddInput(audioInput) {
-            session.addInput(audioInput)
+        if let input = makeAuthorizedAudioInput(), session.canAddInput(input) {
+            session.addInput(input)
+            audioInput = input
+            AppEventLog.event("Microphone audio input attached during session configuration")
+        } else {
+            AppEventLog.event("Microphone audio input not attached during session configuration: authorization=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
         }
 
         guard session.canAddOutput(movieOutput) else {
@@ -3311,7 +3539,9 @@ final class CameraManager: NSObject, ObservableObject {
             codec: codec,
             bitRate: bitRate,
             zoomFactor: Double(requestedZoom),
-            whiteBalance: requestedWhiteBalancePreset.rawValue
+            whiteBalance: requestedWhiteBalancePreset.rawValue,
+            torchOn: device.hasTorch && device.torchMode == .on,
+            photoFlashMode: photoFlashMode.rawValue
         )
     }
 
@@ -3338,6 +3568,7 @@ final class CameraManager: NSObject, ObservableObject {
             return String(describing: type(of: input))
         }
         let outputNames = session.outputs.map { String(describing: type(of: $0)) }
+        let torchOn = videoInput.map { $0.device.hasTorch && $0.device.torchMode == .on } ?? false
         return AppEventLog.SessionLogSnapshot(
             context: context,
             isRunning: session.isRunning,
@@ -3348,7 +3579,20 @@ final class CameraManager: NSObject, ObservableObject {
             inputNames: inputNames,
             outputNames: outputNames,
             photoResponsive: photoOutput.isResponsiveCaptureEnabled,
-            liveMetricsAttached: session.outputs.contains { $0 === liveMetrics.output }
+            liveMetricsAttached: session.outputs.contains { $0 === liveMetrics.output },
+            availableStorageBytes: availableStorageBytes,
+            requestedResolution: hudResolutionLabel,
+            requestedFrameRate: Int(hudFrameRateLabel ?? "0") ?? 0,
+            selectedCodec: activeVideoCodec,
+            compression: videoCompression.rawValue,
+            torchOn: torchOn,
+            photoFlashMode: photoFlashMode.rawValue,
+            zoomFactor: Double(requestedZoom),
+            exposureBias: requestedExposureBias,
+            whiteBalance: requestedWhiteBalancePreset.rawValue,
+            focusExposureLocked: isFocusExposureLocked,
+            microphoneAuthorized: String(AVCaptureDevice.authorizationStatus(for: .audio).rawValue),
+            microphoneAttached: audioInput != nil
         )
     }
 
@@ -4071,6 +4315,14 @@ final class CameraManager: NSObject, ObservableObject {
         connection.videoRotationAngle = angle
     }
 
+    private func resolvedPhotoFlashMode() -> AVCaptureDevice.FlashMode {
+        guard let device = videoInput?.device,
+              device.hasFlash else { return .off }
+        let supportedModes = photoOutput.supportedFlashModes
+        guard supportedModes.contains(photoFlashMode.avMode) else { return .off }
+        return photoFlashMode.avMode
+    }
+
     private func beginPhotoCapture() {
         guard activePhotoCaptureID == nil else { return }
         guard session.isRunning else {
@@ -4098,6 +4350,10 @@ final class CameraManager: NSObject, ObservableObject {
             ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
             : AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
 
+        let requestedFlash = photoFlashMode
+        let appliedFlash = resolvedPhotoFlashMode()
+        settings.flashMode = appliedFlash
+
         // Balanced is AVFoundation's default speed/quality tradeoff. It avoids the extra
         // shot-to-shot latency of .quality while keeping more quality than .speed.
         settings.photoQualityPrioritization = .balanced
@@ -4111,13 +4367,16 @@ final class CameraManager: NSObject, ObservableObject {
             aspect: aspect,
             megapixels: megapixels,
             filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
-            isBurst: isBurst
+            isBurst: isBurst,
+            requestedFlash: requestedFlash.rawValue,
+            appliedFlash: appliedFlash.rawValue
         )
         activePhotoCaptureID = captureID
         activePhotoCaptureIsBurst = isBurst
         AppEventLog.event(
             "Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG"), " +
-            "aspect=\(aspect), mirrored=\(mirrored), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
+            "aspect=\(aspect), mirrored=\(mirrored), flashRequested=\(requestedFlash.rawValue), " +
+            "flashApplied=\(appliedFlash.rawValue), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
         )
         if !isBurst {
             refreshAvailableStorage()
@@ -4179,50 +4438,89 @@ final class CameraManager: NSObject, ObservableObject {
 
         applyCaptureRotation(to: movieOutput.connection(with: .video))
         movieOutput.metadata = CameraMovieMetadata.items(isSlowMotion: captureMode == .sloMo)
-        refreshAvailableStorage()
 
         // When the idle preview is already the exact recording configuration (the normal case for
         // rear 4K60 and Slo-Mo now), start immediately instead of imposing the old AF/AE wait. Only
         // keep the settle window for the recovery path that actually had to reconfigure hardware.
         let readinessDeadline = reconfiguredForRecording ? Date().addingTimeInterval(1.0) : Date()
-        let preparationCaptureSnapshot = captureConfigurationLogSnapshot(
-            "before start",
-            label: "RECORDING PREPARATION READBACK"
-        )
-        let preparationSessionSnapshot = captureSessionLogSnapshot("recording preparation")
-        let enqueuePreparationDiagnostics: () -> Void = { [weak self] in
+        let storageStartRequestID = recordingStartRequests.next()
+        let reserve = criticalStorageReserveBytes
+        activeCriticalStorageReserveBytes = reserve
+        AppEventLog.event("Recording storage check requested: reserve=\(reserve), bitrate=\(Int(estimatedVideoBitsPerSecond))")
+        storageGuard.checkNow(criticalReserveBytes: reserve) { [weak self] snapshot in
             guard let self else { return }
-            self.enqueueCaptureConfigurationLog(
-                preparationCaptureSnapshot,
-                context: "before start",
-                label: "RECORDING PREPARATION READBACK"
-            )
-            AppEventLog.event(preparationSessionSnapshot)
+            self.sessionQueue.async {
+                guard self.recordingStartRequests.isLatest(storageStartRequestID),
+                      self.recordingState.requestsRecording,
+                      self.appLifecyclePhase == .active,
+                      self.session.isRunning else {
+                    AppEventLog.event("Stale recording storage check dropped")
+                    return
+                }
+                guard let snapshot else {
+                    self.transitionRecordingState(to: .idle, resetClock: true)
+                    self.showError("Couldn’t check free storage before recording.")
+                    return
+                }
+
+                self.applyStorageSnapshot(snapshot, source: "recording start")
+                guard self.recordingStartRequests.isLatest(storageStartRequestID),
+                      self.recordingState.requestsRecording,
+                      !snapshot.isCritical else { return }
+
+                let preparationCaptureSnapshot = self.captureConfigurationLogSnapshot(
+                    "before start",
+                    label: "RECORDING PREPARATION READBACK"
+                )
+                let preparationSessionSnapshot = self.captureSessionLogSnapshot("recording preparation")
+                let enqueuePreparationDiagnostics: () -> Void = { [weak self] in
+                    guard let self else { return }
+                    self.enqueueCaptureConfigurationLog(
+                        preparationCaptureSnapshot,
+                        context: "before start",
+                        label: "RECORDING PREPARATION READBACK"
+                    )
+                    AppEventLog.event(preparationSessionSnapshot)
+                }
+                self.startMovieOutputWhenReady(
+                    deadline: readinessDeadline,
+                    storageStartRequestID: storageStartRequestID,
+                    afterStart: enqueuePreparationDiagnostics
+                )
+            }
         }
-        startMovieOutputWhenReady(
-            deadline: readinessDeadline,
-            afterStart: enqueuePreparationDiagnostics
-        )
     }
 
     private func startMovieOutputWhenReady(
         deadline: Date,
+        storageStartRequestID: UInt64,
         afterStart: @escaping () -> Void = {}
     ) {
-        guard recordingState.requestsRecording, !movieOutput.isRecording else { return }
+        guard recordingStartRequests.isLatest(storageStartRequestID),
+              recordingState.requestsRecording,
+              !movieOutput.isRecording else { return }
         if let device = videoInput?.device,
            (device.isAdjustingFocus || device.isAdjustingExposure),
-           Date() < deadline {
+            Date() < deadline {
             sessionQueue.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-                self?.startMovieOutputWhenReady(deadline: deadline, afterStart: afterStart)
+                self?.startMovieOutputWhenReady(
+                    deadline: deadline,
+                    storageStartRequestID: storageStartRequestID,
+                    afterStart: afterStart
+                )
             }
             return
         }
 
-        guard recordingState.requestsRecording else { return }
+        guard recordingStartRequests.isLatest(storageStartRequestID), recordingState.requestsRecording else { return }
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         AppEventLog.event("Starting movie output: \(filename)")
+        storageGuard.startMonitoring(criticalReserveBytes: activeCriticalStorageReserveBytes) { [weak self] snapshot in
+            self?.sessionQueue.async { [weak self] in
+                self?.applyStorageSnapshot(snapshot, source: "recording monitor")
+            }
+        }
         movieOutput.startRecording(to: url, recordingDelegate: self)
         afterStart()
     }
@@ -4255,17 +4553,33 @@ final class CameraManager: NSObject, ObservableObject {
             publish {
                 if self.torchAvailable { self.torchAvailable = false }
                 if self.isTorchOn { self.isTorchOn = false }
+                if self.photoFlashAvailable { self.photoFlashAvailable = false }
             }
             return
         }
+        var torchOn = device.hasTorch && device.torchMode == .on
+        if captureMode == .photo, torchOn {
+            do {
+                try device.lockForConfiguration()
+                device.torchMode = .off
+                device.unlockForConfiguration()
+                torchOn = false
+                AppEventLog.event("Torch forced off while Photo mode became active")
+            } catch {
+                AppEventLog.log(error: error, prefix: "Torch could not be disabled for Photo mode")
+            }
+        }
         let torchAvailable = device.hasTorch && device.isTorchAvailable
-        let torchOn = device.hasTorch && device.torchMode == .on
+        let flashAvailable = device.hasFlash && !photoOutput.supportedFlashModes.isEmpty
         publish {
             if self.torchAvailable != torchAvailable {
                 self.torchAvailable = torchAvailable
             }
             if self.isTorchOn != torchOn {
                 self.isTorchOn = torchOn
+            }
+            if self.photoFlashAvailable != flashAvailable {
+                self.photoFlashAvailable = flashAvailable
             }
         }
     }
@@ -4307,33 +4621,53 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func beginBackgroundSaveIfNeeded() {
-        guard backgroundSaveTask == .invalid else { return }
-        DispatchQueue.main.async {
-            guard self.backgroundSaveTask == .invalid else { return }
-            self.backgroundSaveTask = UIApplication.shared.beginBackgroundTask(withName: "Finish camera save") { [weak self] in
-                guard let self else { return }
-                if self.backgroundSaveTask != .invalid {
-                    UIApplication.shared.endBackgroundTask(self.backgroundSaveTask)
-                    self.backgroundSaveTask = .invalid
+    private var hasPendingMediaSaves: Bool {
+        pendingVideoSaves > 0 || pendingPhotoSaves > 0
+    }
+
+    private func beginBackgroundMediaSaveIfNeeded() {
+        guard hasPendingMediaSaves else { return }
+        let requestID = mediaSaveTaskRequests.next()
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.mediaSaveTaskRequests.isLatest(requestID),
+                  self.backgroundSaveTask == .invalid else { return }
+            self.backgroundSaveTask = UIApplication.shared.beginBackgroundTask(withName: "Finish camera media save") { [weak self] in
+                guard let self, self.backgroundSaveTask != .invalid else { return }
+                let task = self.backgroundSaveTask
+                self.backgroundSaveTask = .invalid
+                self.mediaSaveTaskRequests.next()
+                UIApplication.shared.endBackgroundTask(task)
+                self.sessionQueue.async {
+                    AppEventLog.event(
+                        "Background media-save task expired: pendingVideoSaves=\(self.pendingVideoSaves), " +
+                        "pendingPhotoSaves=\(self.pendingPhotoSaves)"
+                    )
                 }
             }
+            AppEventLog.event("Background media-save task started")
         }
     }
 
-    private func endBackgroundSaveIfPossible() {
-        guard pendingVideoSaves == 0 else { return }
-        DispatchQueue.main.async {
-            guard self.backgroundSaveTask != .invalid else { return }
-            UIApplication.shared.endBackgroundTask(self.backgroundSaveTask)
+    private func endBackgroundMediaSaveIfPossible() {
+        guard !hasPendingMediaSaves else { return }
+        let requestID = mediaSaveTaskRequests.next()
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.mediaSaveTaskRequests.isLatest(requestID),
+                  self.backgroundSaveTask != .invalid else { return }
+            let task = self.backgroundSaveTask
             self.backgroundSaveTask = .invalid
+            UIApplication.shared.endBackgroundTask(task)
+            AppEventLog.event("Background media-save task ended")
         }
     }
 
     private func finishFinalizingIfPossible() {
         guard pendingVideoSaves == 0 else { return }
         transitionRecordingState(to: .idle, resetClock: true)
-        endBackgroundSaveIfPossible()
+        storageProtectionStopIssued = false
+        endBackgroundMediaSaveIfPossible()
     }
 
     private func restoreIdleCaptureConfigurationAfterRecording() {
@@ -4364,7 +4698,7 @@ final class CameraManager: NSObject, ObservableObject {
         guard inFlightVideoSaves.insert(sourceKey).inserted else { return false }
 
         pendingVideoSaves += 1
-        beginBackgroundSaveIfNeeded()
+        beginBackgroundMediaSaveIfNeeded()
 
         let performSave: (Int?) -> Void = { [weak self] gaps in
             guard let self else { return }
@@ -4401,7 +4735,7 @@ final class CameraManager: NSObject, ObservableObject {
                     if self.recordingState.isFinalizing {
                         self.finishFinalizingIfPossible()
                     } else {
-                        self.endBackgroundSaveIfPossible()
+                        self.endBackgroundMediaSaveIfPossible()
                     }
                 }
             }
@@ -4450,6 +4784,10 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             }
 
             self.startLiveMetrics()
+            AppEventLog.event(
+                "Recording start callback: microphoneAuthorized=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue), " +
+                "audioInputAttached=\(self.audioInput != nil)"
+            )
             self.segmentTimer?.cancel()
             let splitDuration = self.recordingState.splitDuration
             if splitDuration > 0 {
@@ -4486,11 +4824,13 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             let errorDetail = error.map { " error=\($0.localizedDescription)" } ?? ""
             AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)\(errorDetail)")
             self.stopLiveMetrics()
+            self.storageGuard.stopMonitoring()
             self.segmentTimer?.cancel()
 
             if self.recordingState.shouldDiscardWhenFinished {
                 try? FileManager.default.removeItem(at: outputFileURL)
                 self.transitionRecordingState(to: .idle, resetClock: true)
+                self.storageProtectionStopIssued = false
                 self.restoreIdleCaptureConfigurationAfterRecording()
                 return
             }
@@ -4505,6 +4845,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 let retained = CameraRecoveryStore.preserve(outputFileURL)
                 self.refreshRecoveryCount()
                 self.transitionRecordingState(to: .idle, resetClock: true)
+                self.storageProtectionStopIssued = false
                 self.restoreIdleCaptureConfigurationAfterRecording()
                 let suffix = retained == nil ? "" : " It is kept in Recovery."
                 self.showError("Recording stopped: \(error?.localizedDescription ?? "Unknown error").\(suffix)")
@@ -4546,6 +4887,12 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
         sessionQueue.async { [weak self] in
             guard let self, let context = self.photoCaptureContexts[captureID] else { return }
             self.pendingPhotoSaves += 1
+            self.beginBackgroundMediaSaveIfNeeded()
+            AppEventLog.event(
+                "Photo processing started: captureID=\(captureID), filename=\(context.filename), " +
+                "flashRequested=\(context.requestedFlash), flashApplied=\(context.appliedFlash), " +
+                "pendingPhotoSaves=\(self.pendingPhotoSaves)"
+            )
             if !context.isBurst {
                 self.postStatus("Photo captured · saving…")
             }
@@ -4596,6 +4943,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             if self.pendingPhotoSaves == 0 {
                 self.refreshAvailableStorage()
             }
+            self.endBackgroundMediaSaveIfPossible()
         }
     }
 

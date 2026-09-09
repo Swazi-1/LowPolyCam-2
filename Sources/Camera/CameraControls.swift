@@ -24,10 +24,41 @@ struct CameraIconButton: View {
     private var accessibilityLabel: String {
         switch symbol {
         case "bolt.fill": return "Torch"
+        case "bolt.slash.fill": return "Photo Flash Off"
         case "gearshape.fill": return "Settings"
         case "ellipsis": return "Pro Tools"
         default: return "Switch camera"
         }
+    }
+}
+
+struct PhotoFlashButton: View {
+    let mode: CameraManager.PhotoFlashMode
+    let isEnabled: Bool
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: { CameraHaptics.fire(); action() }) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: mode == .off ? "bolt.slash.fill" : "bolt.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 48, height: 48)
+                    .background(.black.opacity(0.28), in: Circle())
+                if mode == .auto {
+                    Text("A")
+                        .font(.system(size: 9, weight: .black, design: .rounded))
+                        .foregroundStyle(.black)
+                        .frame(width: 15, height: 15)
+                        .background(color, in: Circle())
+                        .offset(x: 2, y: -2)
+                }
+            }
+        }
+        .foregroundStyle(isEnabled ? color : .white.opacity(0.35))
+        .disabled(!isEnabled)
+        .accessibilityLabel(mode.accessibilityLabel)
+        .accessibilityHint("Cycles between Off, Auto and On")
     }
 }
 

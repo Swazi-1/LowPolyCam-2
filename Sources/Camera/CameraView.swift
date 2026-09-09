@@ -2,21 +2,6 @@ import SwiftUI
 import UIKit
 
 struct CameraView: View {
-    private enum StoragePollingState: Hashable {
-        case inactive
-        case covered
-        case idle
-        case recording
-
-        var intervalNanoseconds: UInt64? {
-            switch self {
-            case .idle: return 30_000_000_000
-            case .recording: return 5_000_000_000
-            case .inactive, .covered: return nil
-            }
-        }
-    }
-
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
@@ -39,11 +24,9 @@ struct CameraView: View {
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
     @AppStorage("tapZoomReset") private var tapZoomReset = true
     @AppStorage("recordingLock") private var recordingLock = false
-    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
-    @State private var warnedAboutStorage = false
     @AppStorage("liveRecordingStats") private var liveStats = false
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("longevityMode") private var longevity = false
@@ -157,18 +140,6 @@ struct CameraView: View {
             camera.start()
             updateIdleTimer(for: scenePhase)
         }
-        .task(id: storagePollingState) {
-            guard let interval = storagePollingState.intervalNanoseconds else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: interval)
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled, storagePollingState.intervalNanoseconds == interval else { return }
-                camera.refreshAvailableStorage()
-            }
-        }
         .onChange(of: keepScreenAwakeEnabled) { _, _ in
             updateIdleTimer(for: scenePhase)
         }
@@ -206,13 +177,6 @@ struct CameraView: View {
                 .presentationDragIndicator(.visible)
         }
         .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
-        .onChange(of: camera.availableStorageBytes) { _, bytes in
-            if bytes > 1_000_000_000 { warnedAboutStorage = false }
-            if lowStorageWarning, bytes > 0, bytes < 1_000_000_000, !warnedAboutStorage {
-                warnedAboutStorage = true
-                camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
-            }
-        }
         .onChange(of: isShowingSettings) { _, showing in
             if showing { cancelCountdown() }
             AppEventLog.event("Camera UI: Settings sheet \(showing ? "opened" : "closed")")
@@ -239,8 +203,17 @@ struct CameraView: View {
 
             ZStack {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !camera.isLensTransitioning && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
-                        camera.toggleTorch()
+                    if camera.captureMode == .photo {
+                        PhotoFlashButton(
+                            mode: camera.photoFlashMode,
+                            isEnabled: camera.photoFlashAvailable && !camera.isLensTransitioning,
+                            color: camera.photoFlashMode == .off ? accent.color.opacity(0.65) : accent.color,
+                            action: { camera.cyclePhotoFlashMode() }
+                        )
+                    } else {
+                        CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !camera.isLensTransitioning && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
+                            camera.toggleTorch()
+                        }
                     }
                     Spacer()
                     CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning, color: accent.color) {
@@ -442,9 +415,4 @@ struct CameraView: View {
         UIApplication.shared.isIdleTimerDisabled = keepScreenAwakeEnabled && phase == .active
     }
 
-    private var storagePollingState: StoragePollingState {
-        guard scenePhase == .active else { return .inactive }
-        guard !isShowingSettings else { return .covered }
-        return camera.isRecording ? .recording : .idle
-    }
 }

@@ -139,6 +139,13 @@ struct VideoSettingsView: View {
                 }
                 .buttonStyle(.plain)
 
+                NavigationLink {
+                    DiagnosticsSettingsView()
+                } label: {
+                    SettingsGridNavRow(symbol: "doc.text.magnifyingglass", title: "Diagnostics", subtitle: "Opt-in logs for bug reports")
+                }
+                .buttonStyle(.plain)
+
                 if camera.captureMode != .photo {
                     NavigationLink {
                         AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)

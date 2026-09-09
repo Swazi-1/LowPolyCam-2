@@ -185,7 +185,7 @@ private struct ZoomRecordingSettingsView: View {
                 }
                 SettingsToggleRow(
                     title: "Low Storage Warning",
-                    subtitle: "Warn before storage gets too low",
+                    subtitle: "Warn below 1 GB; critical protection is always on",
                     isOn: $lowStorageWarning
                 )
             }
