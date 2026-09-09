@@ -20,6 +20,9 @@ final class StorageGuard {
     private var isMonitoring = false
     private var criticalReserveBytes = StorageGuard.minimumCriticalReserveBytes
     private var monitorCallback: ((StorageSnapshot) -> Void)?
+    private var monitorTick: UInt64 = 0
+    private var lastLoggedWarning: Bool?
+    private var lastLoggedCritical: Bool?
 
     /// Keeps enough room for movie finalization and Photos/recovery metadata. The absolute floor
     /// prevents a recording from running the volume down to an unsafe near-zero amount.
@@ -36,9 +39,22 @@ final class StorageGuard {
         criticalReserveBytes: Int64,
         completion: @escaping (StorageSnapshot?) -> Void
     ) {
+        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("STORAGE-CHECK") : nil
+        let scheduledAt = ProcessInfo.processInfo.systemUptime
+        AppEventLog.deepEvent("STORAGE CHECK QUEUED", category: .storage, traceID: traceID,
+                              fields: ["criticalReserveBytes": String(criticalReserveBytes)])
         queue.async { [weak self] in
             guard let self else { return }
-            completion(self.readSnapshot(criticalReserveBytes: criticalReserveBytes))
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let snapshot = self.readSnapshot(criticalReserveBytes: criticalReserveBytes)
+            AppEventLog.deepEvent("STORAGE CHECK COMPLETE", category: .storage, traceID: traceID, fields: [
+                "queueWaitMs": String(format: "%.2f", (startedAt - scheduledAt) * 1000),
+                "workMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000),
+                "availableBytes": snapshot.map { String($0.availableBytes) } ?? "unavailable",
+                "warning": snapshot.map { String($0.isWarning) } ?? "unknown",
+                "critical": snapshot.map { String($0.isCritical) } ?? "unknown"
+            ])
+            completion(snapshot)
         }
     }
 
@@ -55,6 +71,13 @@ final class StorageGuard {
             self.monitorCallback = onSnapshot
             self.monitorTimer?.cancel()
             self.isMonitoring = true
+            self.monitorTick = 0
+            self.lastLoggedWarning = nil
+            self.lastLoggedCritical = nil
+            AppEventLog.deepEvent("STORAGE MONITOR START", category: .storage, fields: [
+                "generation": String(generation),
+                "criticalReserveBytes": String(self.criticalReserveBytes)
+            ])
 
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
             timer.schedule(
@@ -79,6 +102,8 @@ final class StorageGuard {
             self.monitorCallback = nil
             self.monitorTimer?.cancel()
             self.monitorTimer = nil
+            AppEventLog.deepEvent("STORAGE MONITOR STOP", category: .storage,
+                                  fields: ["generation": String(self.monitorGeneration)])
         }
     }
 
@@ -87,8 +112,32 @@ final class StorageGuard {
     }
 
     private func performMonitorCheck(generation: UInt64) {
-        guard isMonitoring, generation == monitorGeneration else { return }
-        guard let snapshot = readSnapshot(criticalReserveBytes: criticalReserveBytes) else { return }
+        guard isMonitoring, generation == monitorGeneration else {
+            AppEventLog.deepEvent("STORAGE MONITOR TICK DROPPED", category: .storage,
+                                  fields: ["requestedGeneration": String(generation), "currentGeneration": String(monitorGeneration)])
+            return
+        }
+        guard let snapshot = readSnapshot(criticalReserveBytes: criticalReserveBytes) else {
+            AppEventLog.event("STORAGE MONITOR READ FAILED", category: .storage, level: .warning)
+            return
+        }
+        monitorTick &+= 1
+        let stateChanged = lastLoggedWarning != snapshot.isWarning || lastLoggedCritical != snapshot.isCritical
+        if AppEventLog.extremeDiagnosticsEnabled && (stateChanged || monitorTick == 1 || monitorTick % 5 == 0) {
+            AppEventLog.deepEvent("STORAGE MONITOR SNAPSHOT", category: .storage, fields: [
+                "tick": String(monitorTick),
+                "availableBytes": String(snapshot.availableBytes),
+                "warning": String(snapshot.isWarning),
+                "critical": String(snapshot.isCritical),
+                "reserveBytes": String(criticalReserveBytes)
+            ])
+        }
+        if snapshot.isCritical && lastLoggedCritical != true {
+            AppEventLog.event("STORAGE CRITICAL", category: .storage, level: .warning,
+                              fields: ["availableBytes": String(snapshot.availableBytes), "reserveBytes": String(criticalReserveBytes)])
+        }
+        lastLoggedWarning = snapshot.isWarning
+        lastLoggedCritical = snapshot.isCritical
         monitorCallback?(snapshot)
     }
 

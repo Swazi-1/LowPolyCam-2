@@ -3,9 +3,46 @@ import Foundation
 import Photos
 import UIKit
 
-/// Opt-in, ordered diagnostics. File I/O stays on its own utility queue and every session gets a
-/// new numbered file so the log containing a crash is not destroyed by the next launch.
+/// Opt-in, ordered bug-forensics diagnostics. Callers never perform file I/O; records are formatted
+/// at the call site, queued on a utility queue, and batch-written so camera/session work is not held
+/// up by diagnostics. Extreme mode adds trace IDs, state/guard breadcrumbs and transition probes.
 enum AppEventLog {
+    enum Level: String {
+        case trace = "TRACE"
+        case debug = "DEBUG"
+        case info = "INFO"
+        case warning = "WARN"
+        case error = "ERROR"
+    }
+
+    enum Category: String {
+        case app = "APP"
+        case ui = "UI"
+        case session = "SESSION"
+        case device = "DEVICE"
+        case format = "FORMAT"
+        case zoom = "ZOOM"
+        case lens = "LENS"
+        case photo = "PHOTO"
+        case burst = "BURST"
+        case video = "VIDEO"
+        case slowMotion = "SLOMO"
+        case recording = "RECORDING"
+        case audio = "AUDIO"
+        case whiteBalance = "WB"
+        case exposure = "EXPOSURE"
+        case focus = "FOCUS"
+        case flash = "FLASH"
+        case torch = "TORCH"
+        case storage = "STORAGE"
+        case save = "SAVE"
+        case settings = "SETTINGS"
+        case request = "REQUEST"
+        case performance = "PERFORMANCE"
+        case thermal = "THERMAL"
+        case error = "ERROR"
+    }
+
     struct CaptureConfigurationLogSnapshot {
         let label: String
         let context: String
@@ -75,77 +112,123 @@ enum AppEventLog {
         }
     }
 
+    final class TraceSpan {
+        let id: String
+        let category: Category
+        let name: String
+        private let startedAt = ProcessInfo.processInfo.systemUptime
+        private var lastStepAt = ProcessInfo.processInfo.systemUptime
+        private let lock = NSLock()
+        private var ended = false
+
+        fileprivate init(id: String, category: Category, name: String, fields: [String: String]) {
+            self.id = id
+            self.category = category
+            self.name = name
+            AppEventLog.structured(.trace, category, "BEGIN \(name)", traceID: id, fields: fields)
+        }
+
+        func step(_ message: String, fields: [String: String] = [:]) {
+            lock.lock()
+            guard !ended else { lock.unlock(); return }
+            let now = ProcessInfo.processInfo.systemUptime
+            let delta = (now - lastStepAt) * 1000
+            let total = (now - startedAt) * 1000
+            lastStepAt = now
+            lock.unlock()
+            var values = fields
+            values["stepMs"] = String(format: "%.2f", delta)
+            values["totalMs"] = String(format: "%.2f", total)
+            AppEventLog.structured(.trace, category, "STEP \(name): \(message)", traceID: id, fields: values)
+        }
+
+        func end(result: String = "success", fields: [String: String] = [:]) {
+            lock.lock()
+            guard !ended else { lock.unlock(); return }
+            ended = true
+            let total = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+            lock.unlock()
+            var values = fields
+            values["result"] = result
+            values["totalMs"] = String(format: "%.2f", total)
+            AppEventLog.structured(result == "success" ? .trace : .warning, category, "END \(name)", traceID: id, fields: values)
+        }
+    }
+
+    struct QueueTicket {
+        let traceID: String
+        let category: Category
+        let name: String
+        let scheduledAt: TimeInterval
+    }
+
+    private struct PendingRecord {
+        let level: Level
+        let category: Category
+        let message: String
+        let traceID: String?
+        let fields: [String: String]
+        let function: String
+        let file: String
+        let line: UInt
+        let callerThread: String
+        let callUptime: TimeInterval
+    }
+
     private static let diagnosticsKey = "diagnosticLoggingEnabled"
+    private static let extremeDiagnosticsKey = "diagnosticExtremeLoggingEnabled"
     private static let logFolderName = "LowPolyCam Logs"
     private static let logFilenamePrefix = "LowPolyCam-Log-"
     private static let queue = DispatchQueue(label: "com.swazi.lowpolycam.eventLog", qos: .utility)
     private static let timestampFormatter = ISO8601DateFormatter()
+    private static let startUptime = ProcessInfo.processInfo.systemUptime
+    private static let traceLock = NSLock()
+    private static var traceCounter: UInt64 = 0
     private static var handle: FileHandle?
     private static var currentFilename: String?
     private static var hasStartedSession = false
     private static var loggingEnabledLocked = UserDefaults.standard.bool(forKey: diagnosticsKey)
     private static var defaultsObserver: NSObjectProtocol?
+    private static var systemObservers: [NSObjectProtocol] = []
     private static var settingsSnapshot: [String: String] = [:]
     private static var settingsLogGeneration: UInt64 = 0
     private static var settingsLogScheduled = false
     private static let settingsLogDebounceNanoseconds: UInt64 = 100_000_000
+    private static var eventCounter: UInt64 = 0
+    private static var warningCount: UInt64 = 0
+    private static var errorCount: UInt64 = 0
+    private static var invariantCount: UInt64 = 0
+    private static var staleRequestCount: UInt64 = 0
+    private static var categoryCounts: [Category: UInt64] = [:]
+    private static var writeBuffer = ""
+    private static var writeFlushScheduled = false
+    private static let writeFlushInterval = 0.20
+    private static let writeFlushThreshold = 64 * 1024
 
-    // Keep this list explicit. Dumping all of UserDefaults would include unrelated iOS framework
-    // values while this records the preferences that can affect LowPolyCam behavior.
     private static let diagnosticSettings: [(key: String, defaultValue: String)] = [
         ("diagnosticLoggingEnabled", "false"),
+        ("diagnosticExtremeLoggingEnabled", "true"),
         ("appColorScheme", "dark"),
         ("iconAppearance", "Ice"),
-        ("iconCustomRed", "0.55"),
-        ("iconCustomGreen", "0.85"),
-        ("iconCustomBlue", "1.0"),
-        ("selectedVideoResolution", "1080p"),
-        ("selectedVideoFrameRate", "60"),
-        ("selectedVideoCodec", "HEVC"),
-        ("videoCompression", "High"),
+        ("iconCustomRed", "0.55"), ("iconCustomGreen", "0.85"), ("iconCustomBlue", "1.0"),
+        ("selectedVideoResolution", "1080p"), ("selectedVideoFrameRate", "60"),
+        ("selectedVideoCodec", "HEVC"), ("videoCompression", "High"),
         ("videoStabilizationEnabled", "true"),
-        ("selectedSlowMotionResolution", "1080p"),
-        ("selectedSlowMotionFrameRate", "240"),
-        ("selectedPhotoMegapixels", "12"),
-        ("photoFileFormat", "HEIC"),
-        ("photoFlashMode", "Auto"),
-        ("photoAspect", "4:3"),
-        ("burstCount", "10"),
-        ("shutterDelay", "0"),
-        ("hapticCaptureEnabled", "true"),
-        ("hapticStrength", "Medium"),
-        ("countdownHaptics", "false"),
-        ("zoomSpeed", "1.0"),
-        ("tapZoomReset", "true"),
-        ("recordingLock", "false"),
-        ("lowStorageWarning", "true"),
-        ("rememberCaptureMode", "false"),
-        ("lastCaptureMode", "VIDEO"),
-        ("lastCameraPosition", "back"),
-        ("mirrorSelfies", "false"),
-        ("centerCrosshair", "false"),
-        ("cameraGridEnabled", "false"),
-        ("gridOpacity", "1.0"),
-        ("levelMeterEnabled", "false"),
-        ("keepScreenAwakeEnabled", "false"),
-        ("cameraHUDEnabled", "true"),
-        ("cameraHUDResolution", "true"),
-        ("cameraHUDFPS", "true"),
-        ("cameraHUDRemaining", "true"),
-        ("cameraHUDWhiteBalance", "false"),
-        ("cameraHUDBattery", "true"),
-        ("cameraHUDStorage", "false"),
-        ("cameraHUDDroppedFrames", "false"),
-        ("thermalHUD", "false"),
-        ("hudTextSize", "10.0"),
-        ("longevityMode", "false"),
-        ("liveRecordingStats", "false"),
-        ("liveStatsSize", "Normal"),
-        ("liveStatsShowFPS", "true"),
-        ("liveStatsShowBitrate", "true"),
-        ("liveStatsShowDrops", "true"),
-        ("liveStatsX", "0.5"),
-        ("liveStatsY", "0.28"),
+        ("selectedSlowMotionResolution", "1080p"), ("selectedSlowMotionFrameRate", "240"),
+        ("selectedPhotoMegapixels", "12"), ("photoFileFormat", "HEIC"),
+        ("photoFlashMode", "Auto"), ("photoAspect", "4:3"), ("burstCount", "10"),
+        ("shutterDelay", "0"), ("hapticCaptureEnabled", "true"), ("hapticStrength", "Medium"),
+        ("countdownHaptics", "false"), ("zoomSpeed", "1.0"), ("tapZoomReset", "true"),
+        ("recordingLock", "false"), ("lowStorageWarning", "true"),
+        ("rememberCaptureMode", "false"), ("lastCaptureMode", "VIDEO"), ("lastCameraPosition", "back"),
+        ("mirrorSelfies", "false"), ("centerCrosshair", "false"), ("cameraGridEnabled", "false"),
+        ("gridOpacity", "1.0"), ("levelMeterEnabled", "false"), ("keepScreenAwakeEnabled", "false"),
+        ("cameraHUDEnabled", "true"), ("cameraHUDResolution", "true"), ("cameraHUDFPS", "true"),
+        ("cameraHUDRemaining", "true"), ("cameraHUDWhiteBalance", "false"), ("cameraHUDBattery", "true"),
+        ("cameraHUDStorage", "false"), ("cameraHUDDroppedFrames", "false"), ("thermalHUD", "false"),
+        ("hudTextSize", "10.0"), ("longevityMode", "false"), ("liveRecordingStats", "false"),
+        ("liveStatsSize", "Normal"), ("liveStatsShowFPS", "true"), ("liveStatsShowBitrate", "true"),
+        ("liveStatsShowDrops", "true"), ("liveStatsX", "0.5"), ("liveStatsY", "0.28"),
         ("splitMinutes", "0")
     ]
 
@@ -153,17 +236,39 @@ enum AppEventLog {
         UserDefaults.standard.bool(forKey: diagnosticsKey)
     }
 
+    /// New installs/builds default to Extreme while diagnostics are enabled. A stored false value is respected.
+    static var extremeDiagnosticsEnabled: Bool {
+        let defaults = UserDefaults.standard
+        guard diagnosticsEnabled else { return false }
+        if defaults.object(forKey: extremeDiagnosticsKey) == nil { return true }
+        return defaults.bool(forKey: extremeDiagnosticsKey)
+    }
+
     static func setDiagnosticsEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: diagnosticsKey)
+        let defaults = UserDefaults.standard
+        if enabled, defaults.object(forKey: extremeDiagnosticsKey) == nil {
+            defaults.set(true, forKey: extremeDiagnosticsKey)
+        }
+        defaults.set(enabled, forKey: diagnosticsKey)
         queue.async {
             if enabled {
                 loggingEnabledLocked = true
                 beginNewSessionLocked()
+                appendStructuredLocked(
+                    PendingRecord(level: .info, category: .settings, message: "Diagnostic logging enabled", traceID: nil,
+                                  fields: ["extreme": String(extremeDiagnosticsEnabled)], function: "setDiagnosticsEnabled", file: "AppEventLog.swift", line: 0,
+                                  callerThread: "settings", callUptime: ProcessInfo.processInfo.systemUptime)
+                )
             } else {
                 disableLocked()
                 loggingEnabledLocked = false
             }
         }
+    }
+
+    static func setExtremeDiagnosticsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: extremeDiagnosticsKey)
+        event("Extreme bug trace \(enabled ? "enabled" : "disabled")", category: .settings, level: .info)
     }
 
     static func beginNewSession() {
@@ -175,36 +280,165 @@ enum AppEventLog {
         }
     }
 
-    static func event(_ message: String) {
-        guard diagnosticsEnabled else { return }
-        queue.async {
-            guard loggingEnabledLocked else { return }
-            beginNewSessionLocked()
-            appendLocked(message)
-        }
+    /// Compatibility entry point used throughout the app. Existing calls now automatically receive
+    /// event number, elapsed time, source file/function/line and caller-thread information.
+    static func event(
+        _ message: String,
+        category: Category = .app,
+        level: Level = .info,
+        traceID: String? = nil,
+        fields: [String: String] = [:],
+        function: StaticString = #function,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) {
+        structured(level, category, message, traceID: traceID, fields: fields, function: function, file: file, line: line)
+    }
+
+    static func deepEvent(
+        _ message: String,
+        category: Category,
+        level: Level = .trace,
+        traceID: String? = nil,
+        fields: [String: String] = [:],
+        function: StaticString = #function,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) {
+        guard extremeDiagnosticsEnabled else { return }
+        structured(level, category, message, traceID: traceID, fields: fields, function: function, file: file, line: line)
     }
 
     static func event(_ snapshot: CaptureConfigurationLogSnapshot) {
-        guard diagnosticsEnabled else { return }
-        queue.async {
-            guard loggingEnabledLocked else { return }
-            beginNewSessionLocked()
-            appendLocked(snapshot.formattedMessage)
-        }
+        structured(.info, .format, snapshot.formattedMessage)
     }
 
     static func event(_ snapshot: SessionLogSnapshot) {
+        structured(.info, .session, snapshot.formattedMessage)
+    }
+
+    static func makeTraceID(_ prefix: String) -> String {
+        traceLock.lock()
+        traceCounter &+= 1
+        let value = traceCounter
+        traceLock.unlock()
+        let normalized = prefix.uppercased().replacingOccurrences(of: " ", with: "-")
+        return String(format: "%@-%06llu", normalized, value)
+    }
+
+    @discardableResult
+    static func beginTrace(
+        _ name: String,
+        category: Category,
+        traceID: String? = nil,
+        fields: [String: String] = [:]
+    ) -> TraceSpan? {
+        guard extremeDiagnosticsEnabled else { return nil }
+        return TraceSpan(id: traceID ?? makeTraceID(name), category: category, name: name, fields: fields)
+    }
+
+    static func guardRejected(
+        _ operation: String,
+        reason: String,
+        traceID: String? = nil,
+        fields: [String: String] = [:],
+        function: StaticString = #function,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) {
+        guard extremeDiagnosticsEnabled else { return }
+        var values = fields
+        values["reason"] = reason
+        structured(.warning, .request, "REQUEST REJECTED: \(operation)", traceID: traceID, fields: values, function: function, file: file, line: line)
+    }
+
+    static func staleRequest(
+        token: String,
+        requestID: UInt64,
+        latestID: UInt64,
+        operation: String,
+        traceID: String? = nil
+    ) {
+        guard extremeDiagnosticsEnabled else { return }
+        structured(.warning, .request, "STALE REQUEST DROPPED: \(operation)", traceID: traceID, fields: [
+            "token": token,
+            "requestID": String(requestID),
+            "latestID": String(latestID)
+        ])
+        queue.async { staleRequestCount &+= 1 }
+    }
+
+    static func invariant(
+        _ name: String,
+        expected: String,
+        actual: String,
+        traceID: String? = nil,
+        fields: [String: String] = [:]
+    ) {
         guard diagnosticsEnabled else { return }
-        queue.async {
-            guard loggingEnabledLocked else { return }
-            beginNewSessionLocked()
-            appendLocked(snapshot.formattedMessage)
+        var values = fields
+        values["expected"] = expected
+        values["actual"] = actual
+        structured(.error, .error, "!!! POSSIBLE BUG / INVARIANT VIOLATION !!! \(name)", traceID: traceID, fields: values)
+        queue.async { invariantCount &+= 1 }
+    }
+
+    static func stateDiff(
+        _ name: String,
+        before: [String: String],
+        after: [String: String],
+        traceID: String? = nil,
+        category: Category = .session
+    ) {
+        guard extremeDiagnosticsEnabled else { return }
+        var changes: [String: String] = [:]
+        for key in Set(before.keys).union(after.keys).sorted() {
+            let old = before[key] ?? "<missing>"
+            let new = after[key] ?? "<missing>"
+            if old != new { changes[key] = "\(old) -> \(new)" }
+        }
+        if changes.isEmpty {
+            deepEvent("STATE DIFF \(name): unchanged", category: category, traceID: traceID)
+        } else {
+            deepEvent("STATE DIFF \(name)", category: category, traceID: traceID, fields: changes)
         }
     }
 
-    static func log(error: Error, prefix: String) {
+    static func queueScheduled(_ name: String, category: Category, traceID: String? = nil) -> QueueTicket? {
+        guard extremeDiagnosticsEnabled else { return nil }
+        let id = traceID ?? makeTraceID(name)
+        let ticket = QueueTicket(traceID: id, category: category, name: name, scheduledAt: ProcessInfo.processInfo.systemUptime)
+        deepEvent("QUEUE SCHEDULED: \(name)", category: category, traceID: id)
+        return ticket
+    }
+
+    static func queueStarted(_ ticket: QueueTicket?) {
+        guard let ticket else { return }
+        let wait = (ProcessInfo.processInfo.systemUptime - ticket.scheduledAt) * 1000
+        deepEvent("QUEUE STARTED: \(ticket.name)", category: ticket.category, traceID: ticket.traceID,
+                  fields: ["queueWaitMs": String(format: "%.2f", wait)])
+        if wait > 100 {
+            event("SLOW QUEUE WAIT: \(ticket.name)", category: .performance, level: .warning, traceID: ticket.traceID,
+                  fields: ["queueWaitMs": String(format: "%.2f", wait)])
+        }
+    }
+
+    static func log(error: Error, prefix: String, category: Category = .error, traceID: String? = nil) {
         let nsError = error as NSError
-        event("\(prefix): domain=\(nsError.domain), code=\(nsError.code), description=\(nsError.localizedDescription)")
+        var fields: [String: String] = [
+            "domain": nsError.domain,
+            "code": String(nsError.code),
+            "description": nsError.localizedDescription
+        ]
+        if let reason = nsError.localizedFailureReason { fields["failureReason"] = reason }
+        if let suggestion = nsError.localizedRecoverySuggestion { fields["recoverySuggestion"] = suggestion }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            fields["underlying"] = "\(underlying.domain)/\(underlying.code): \(underlying.localizedDescription)"
+        }
+        if extremeDiagnosticsEnabled, !nsError.userInfo.isEmpty {
+            fields["userInfoKeys"] = nsError.userInfo.keys.map { String(describing: $0) }.sorted().joined(separator: ",")
+        }
+        structured(.error, category, prefix, traceID: traceID, fields: fields)
     }
 
     static func flush() {
@@ -213,7 +447,48 @@ enum AppEventLog {
             guard loggingEnabledLocked else { return }
             beginNewSessionLocked()
             flushPendingSettingsLogLocked()
+            flushWriteBufferLocked()
             try? handle?.synchronize()
+        }
+    }
+
+    static func emitSessionSummary(reason: String) {
+        guard diagnosticsEnabled else { return }
+        queue.async {
+            guard loggingEnabledLocked else { return }
+            beginNewSessionLocked()
+            appendSessionSummaryLocked(reason: reason)
+        }
+    }
+
+    private static func structured(
+        _ level: Level,
+        _ category: Category,
+        _ message: String,
+        traceID: String? = nil,
+        fields: [String: String] = [:],
+        function: StaticString = #function,
+        file: StaticString = #fileID,
+        line: UInt = #line
+    ) {
+        guard diagnosticsEnabled else { return }
+        let thread = Thread.isMainThread ? "main" : (Thread.current.name?.isEmpty == false ? Thread.current.name! : "background")
+        let record = PendingRecord(
+            level: level,
+            category: category,
+            message: message,
+            traceID: traceID,
+            fields: fields,
+            function: String(describing: function),
+            file: String(describing: file),
+            line: line,
+            callerThread: thread,
+            callUptime: ProcessInfo.processInfo.systemUptime
+        )
+        queue.async {
+            guard loggingEnabledLocked else { return }
+            beginNewSessionLocked()
+            appendStructuredLocked(record)
         }
     }
 
@@ -235,6 +510,7 @@ enum AppEventLog {
             return
         }
 
+        flushWriteBufferLocked()
         try? handle?.synchronize()
         try? handle?.close()
         handle = nil
@@ -247,28 +523,41 @@ enum AppEventLog {
 
         hasStartedSession = true
         currentFilename = url.lastPathComponent
+        eventCounter = 0
+        warningCount = 0
+        errorCount = 0
+        invariantCount = 0
+        staleRequestCount = 0
+        categoryCounts = [:]
+        writeBuffer = ""
+        writeFlushScheduled = false
         installDefaultsObserverLocked()
+        installSystemObserversLocked()
         settingsSnapshot = currentSettingsLocked()
 
-        appendLocked("LowPolyCam diagnostic session started: file=\(url.lastPathComponent)")
-        appendLocked("Environment: appVersion=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"), build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown")")
-        appendLocked("Environment: device=\(UIDevice.current.model), iOS=\(UIDevice.current.systemVersion), locale=\(Locale.current.identifier), timezone=\(TimeZone.current.identifier)")
-        appendLocked("Environment: thermal=\(thermalStateName(ProcessInfo.processInfo.thermalState)), lowPowerMode=\(ProcessInfo.processInfo.isLowPowerModeEnabled), physicalMemory=\(ProcessInfo.processInfo.physicalMemory)")
+        appendRawLocked("================ LOWPOLYCAM DIAGNOSTIC SESSION ================")
+        appendRawLocked("LowPolyCam diagnostic session started: file=\(url.lastPathComponent)")
+        appendRawLocked("Environment: appVersion=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"), build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"), extremeDiagnostics=\(extremeDiagnosticsEnabled)")
+        appendRawLocked("Environment: device=\(UIDevice.current.model), iOS=\(UIDevice.current.systemVersion), locale=\(Locale.current.identifier), timezone=\(TimeZone.current.identifier)")
+        appendRawLocked("Environment: thermal=\(thermalStateName(ProcessInfo.processInfo.thermalState)), lowPowerMode=\(ProcessInfo.processInfo.isLowPowerModeEnabled), physicalMemory=\(ProcessInfo.processInfo.physicalMemory)")
         let homeURL = URL(fileURLWithPath: NSHomeDirectory())
         let freeStorage = (try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage ?? -1
-        appendLocked("Environment: freeStorageBytes=\(freeStorage)")
-        appendLocked("Permissions: camera=\(authorizationName(AVCaptureDevice.authorizationStatus(for: .video))), microphone=\(authorizationName(AVCaptureDevice.authorizationStatus(for: .audio))), photosAddOnly=\(authorizationName(PHPhotoLibrary.authorizationStatus(for: .addOnly)))")
-        appendLocked("Settings snapshot begin")
+        appendRawLocked("Environment: freeStorageBytes=\(freeStorage)")
+        appendRawLocked("Permissions: camera=\(authorizationName(AVCaptureDevice.authorizationStatus(for: .video))), microphone=\(authorizationName(AVCaptureDevice.authorizationStatus(for: .audio))), photosAddOnly=\(authorizationName(PHPhotoLibrary.authorizationStatus(for: .addOnly)))")
+        appendRawLocked("Settings snapshot begin")
         for setting in diagnosticSettings {
-            appendLocked("SETTING \(setting.key)=\(settingsSnapshot[setting.key] ?? setting.defaultValue)")
+            appendRawLocked("SETTING \(setting.key)=\(settingsSnapshot[setting.key] ?? setting.defaultValue)")
         }
-        appendLocked("Settings snapshot end")
+        appendRawLocked("Settings snapshot end")
+        appendRawLocked("===============================================================")
     }
 
     private static func disableLocked() {
         guard hasStartedSession || handle != nil else { return }
-        appendLocked("LowPolyCam diagnostic logging disabled")
+        appendSessionSummaryLocked(reason: "diagnostics disabled")
+        appendRawLocked("LowPolyCam diagnostic logging disabled")
         flushPendingSettingsLogLocked()
+        flushWriteBufferLocked()
         try? handle?.synchronize()
         try? handle?.close()
         handle = nil
@@ -277,6 +566,18 @@ enum AppEventLog {
         settingsSnapshot = [:]
         settingsLogGeneration &+= 1
         settingsLogScheduled = false
+        writeBuffer = ""
+        writeFlushScheduled = false
+    }
+
+    private static func appendSessionSummaryLocked(reason: String) {
+        appendRawLocked("===== DIAGNOSTIC SESSION SUMMARY [\(reason)] =====")
+        appendRawLocked("events=\(eventCounter), warnings=\(warningCount), errors=\(errorCount), staleRequests=\(staleRequestCount), invariantViolations=\(invariantCount)")
+        let categories = categoryCounts.sorted { $0.key.rawValue < $1.key.rawValue }
+            .map { "\($0.key.rawValue)=\($0.value)" }.joined(separator: ", ")
+        appendRawLocked("categories: \(categories)")
+        appendRawLocked("runtimeSeconds=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - startUptime)), extremeDiagnostics=\(extremeDiagnosticsEnabled)")
+        appendRawLocked("===============================================")
     }
 
     private static func nextLogURLLocked(in folder: URL, manager: FileManager) -> URL {
@@ -298,11 +599,55 @@ enum AppEventLog {
         }
     }
 
-    private static func appendLocked(_ message: String) {
-        guard let handle else { return }
+    private static func appendStructuredLocked(_ record: PendingRecord) {
+        eventCounter &+= 1
+        if record.level == .warning { warningCount &+= 1 }
+        if record.level == .error { errorCount &+= 1 }
+        categoryCounts[record.category, default: 0] &+= 1
         let timestamp = timestampFormatter.string(from: Date())
-        guard let data = "[\(timestamp)] \(message)\n".data(using: .utf8) else { return }
+        let elapsed = max(0, record.callUptime - startUptime)
+        let number = String(format: "%07llu", eventCounter)
+        let trace = record.traceID.map { " trace=\($0)" } ?? ""
+        let source = "src=\(record.file):\(record.line) fn=\(record.function) caller=\(record.callerThread)"
+        let fields = record.fields.isEmpty ? "" : " " + record.fields.keys.sorted().map { key in
+            "\(key)=\(sanitize(record.fields[key] ?? ""))"
+        }.joined(separator: " ")
+        appendLineLocked("[\(timestamp)] [#\(number)] [+\(String(format: "%.3f", elapsed))s] [\(record.level.rawValue)] [\(record.category.rawValue)]\(trace) \(record.message) | \(source)\(fields)")
+    }
+
+    private static func appendRawLocked(_ message: String) {
+        let timestamp = timestampFormatter.string(from: Date())
+        appendLineLocked("[\(timestamp)] \(message)")
+    }
+
+    private static func appendLineLocked(_ line: String) {
+        guard handle != nil else { return }
+        writeBuffer += line + "\n"
+        if writeBuffer.utf8.count >= writeFlushThreshold {
+            flushWriteBufferLocked()
+            return
+        }
+        guard !writeFlushScheduled else { return }
+        writeFlushScheduled = true
+        queue.asyncAfter(deadline: .now() + writeFlushInterval) {
+            writeFlushScheduled = false
+            flushWriteBufferLocked()
+        }
+    }
+
+    private static func flushWriteBufferLocked() {
+        guard let handle, !writeBuffer.isEmpty else { return }
+        let pending = writeBuffer
+        writeBuffer = ""
+        guard let data = pending.data(using: .utf8) else { return }
         handle.write(data)
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        if value.contains(" ") || value.contains("\n") || value.contains("\t") {
+            return "\"\(value.replacingOccurrences(of: "\"", with: "'"))\""
+        }
+        return value
     }
 
     private static func installDefaultsObserverLocked() {
@@ -319,14 +664,25 @@ enum AppEventLog {
         }
     }
 
-    /// UserDefaults can emit a notification for every intermediate value while a slider or color
-    /// picker is being dragged. Coalesce that burst so diagnostics capture the final state.
+    private static func installSystemObserversLocked() {
+        guard systemObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        systemObservers.append(center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: nil) { _ in
+            event("THERMAL STATE CHANGED", category: .thermal, level: .warning, fields: ["thermal": thermalStateName(ProcessInfo.processInfo.thermalState)])
+        })
+        systemObservers.append(center.addObserver(forName: Notification.Name.NSProcessInfoPowerStateDidChange, object: nil, queue: nil) { _ in
+            event("LOW POWER MODE CHANGED", category: .performance, level: .info, fields: ["enabled": String(ProcessInfo.processInfo.isLowPowerModeEnabled)])
+        })
+        systemObservers.append(center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil) { _ in
+            event("MEMORY WARNING", category: .performance, level: .warning)
+        })
+    }
+
     private static func scheduleSettingsLogLocked() {
         guard loggingEnabledLocked, hasStartedSession else { return }
         settingsLogGeneration &+= 1
         let generation = settingsLogGeneration
         settingsLogScheduled = true
-
         queue.asyncAfter(deadline: .now() + .nanoseconds(Int(settingsLogDebounceNanoseconds))) {
             guard loggingEnabledLocked, generation == settingsLogGeneration else { return }
             settingsLogScheduled = false
@@ -348,19 +704,22 @@ enum AppEventLog {
             let oldValue = settingsSnapshot[setting.key] ?? setting.defaultValue
             let newValue = current[setting.key] ?? setting.defaultValue
             guard oldValue != newValue else { continue }
-            appendLocked("SETTING CHANGED \(setting.key): \(oldValue) -> \(newValue)")
+            appendStructuredLocked(PendingRecord(
+                level: .info, category: .settings, message: "SETTING CHANGED \(setting.key)", traceID: nil,
+                fields: ["before": oldValue, "after": newValue], function: "UserDefaults.didChange", file: "UserDefaults", line: 0,
+                callerThread: "notification", callUptime: ProcessInfo.processInfo.systemUptime
+            ))
         }
         settingsSnapshot = current
     }
 
     private static let booleanSettingKeys: Set<String> = [
-        "diagnosticLoggingEnabled", "videoStabilizationEnabled", "hapticCaptureEnabled",
-        "countdownHaptics", "tapZoomReset", "recordingLock", "lowStorageWarning",
-        "rememberCaptureMode", "mirrorSelfies", "centerCrosshair", "cameraGridEnabled",
-        "levelMeterEnabled", "keepScreenAwakeEnabled", "cameraHUDEnabled", "cameraHUDResolution",
-        "cameraHUDFPS", "cameraHUDRemaining", "cameraHUDWhiteBalance", "cameraHUDBattery",
-        "cameraHUDStorage", "cameraHUDDroppedFrames", "thermalHUD", "longevityMode",
-        "liveRecordingStats", "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops"
+        "diagnosticLoggingEnabled", "diagnosticExtremeLoggingEnabled", "videoStabilizationEnabled", "hapticCaptureEnabled",
+        "countdownHaptics", "tapZoomReset", "recordingLock", "lowStorageWarning", "rememberCaptureMode", "mirrorSelfies",
+        "centerCrosshair", "cameraGridEnabled", "levelMeterEnabled", "keepScreenAwakeEnabled", "cameraHUDEnabled",
+        "cameraHUDResolution", "cameraHUDFPS", "cameraHUDRemaining", "cameraHUDWhiteBalance", "cameraHUDBattery",
+        "cameraHUDStorage", "cameraHUDDroppedFrames", "thermalHUD", "longevityMode", "liveRecordingStats",
+        "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops"
     ]
 
     private static let decimalSettingKeys: Set<String> = [
@@ -376,27 +735,31 @@ enum AppEventLog {
         })
     }
 
-    private static func formattedSettingValue(
-        _ value: Any?,
-        setting: (key: String, defaultValue: String)
-    ) -> String {
+    private static func formattedSettingValue(_ value: Any?, setting: (key: String, defaultValue: String)) -> String {
         guard let value else { return setting.defaultValue }
-
         if booleanSettingKeys.contains(setting.key) {
             if let bool = value as? Bool { return bool ? "true" : "false" }
             if let number = value as? NSNumber { return number.boolValue ? "true" : "false" }
         }
-
         if decimalSettingKeys.contains(setting.key), let number = value as? NSNumber {
             var text = String(format: "%.4f", number.doubleValue)
             while text.last == "0" { text.removeLast() }
             if text.last == "." { text.append("0") }
             return text
         }
-
         if let string = value as? String { return string }
         if let number = value as? NSNumber { return String(describing: number) }
         return String(describing: value)
+    }
+
+    private static func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
     }
 
     private static func authorizationName(_ status: AVAuthorizationStatus) -> String {
@@ -416,16 +779,6 @@ enum AppEventLog {
         case .denied: return "denied"
         case .restricted: return "restricted"
         case .notDetermined: return "notDetermined"
-        @unknown default: return "unknown"
-        }
-    }
-
-    private static func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
-        switch state {
-        case .nominal: return "nominal"
-        case .fair: return "fair"
-        case .serious: return "serious"
-        case .critical: return "critical"
         @unknown default: return "unknown"
         }
     }

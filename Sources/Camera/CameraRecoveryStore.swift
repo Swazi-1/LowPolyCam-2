@@ -18,7 +18,9 @@ enum CameraRecoveryStore {
     }
 
     static func recordings() -> [URL] {
-        recordingURLs(sorted: true)
+        let result = recordingURLs(sorted: true)
+        AppEventLog.deepEvent("RECOVERY RECORDINGS ENUMERATED", category: .save, fields: ["count": String(result.count)])
+        return result
     }
 
     static func containsRecording(named filename: String) -> Bool {
@@ -31,11 +33,21 @@ enum CameraRecoveryStore {
 
     @discardableResult
     static func preserve(_ source: URL) -> URL? {
+        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("RECOVERY") : nil
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        AppEventLog.deepEvent("RECOVERY PRESERVE BEGIN", category: .save, traceID: traceID,
+                              fields: ["source": source.lastPathComponent])
         let fm = FileManager.default
         let sourceURL = source.standardizedFileURL
         let recoveryDirectory = directory.standardizedFileURL
-        guard fm.fileExists(atPath: sourceURL.path) else { return nil }
+        guard fm.fileExists(atPath: sourceURL.path) else {
+            AppEventLog.guardRejected("recovery preserve", reason: "source file does not exist", traceID: traceID,
+                                      fields: ["source": sourceURL.lastPathComponent])
+            return nil
+        }
         if sourceURL.deletingLastPathComponent() == recoveryDirectory {
+            AppEventLog.deepEvent("RECOVERY PRESERVE NO-OP", category: .save, traceID: traceID,
+                                  fields: ["reason": "already in recovery"])
             return sourceURL
         }
 
@@ -47,15 +59,28 @@ enum CameraRecoveryStore {
                 destination = recoveryDirectory.appendingPathComponent("\(stem)_\(UUID().uuidString).mov")
             }
             try fm.moveItem(at: sourceURL, to: destination)
+            AppEventLog.deepEvent("RECOVERY PRESERVE COMPLETE", category: .save, traceID: traceID, fields: [
+                "destination": destination.lastPathComponent,
+                "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            ])
             return destination
         } catch {
+            AppEventLog.log(error: error, prefix: "RECOVERY PRESERVE FAILED", category: .save, traceID: traceID)
             return nil
         }
     }
 
     static func removeAll() {
-        for url in recordingURLs(sorted: false) {
-            try? FileManager.default.removeItem(at: url)
+        let urls = recordingURLs(sorted: false)
+        var failures = 0
+        for url in urls {
+            do { try FileManager.default.removeItem(at: url) }
+            catch {
+                failures += 1
+                AppEventLog.log(error: error, prefix: "RECOVERY DELETE FAILED", category: .save)
+            }
         }
+        AppEventLog.event("RECOVERY REMOVE ALL", category: .save, level: failures == 0 ? .info : .warning,
+                          fields: ["requested": String(urls.count), "failures": String(failures)])
     }
 }

@@ -20,6 +20,7 @@ final class RecordingClockState: ObservableObject {
         if startUptime == nil {
             startUptime = uptimeProvider()
             if elapsedSeconds != 0 { elapsedSeconds = 0 }
+            AppEventLog.deepEvent("RECORDING CLOCK START", category: .recording)
         }
 
         update()
@@ -34,10 +35,13 @@ final class RecordingClockState: ObservableObject {
     }
 
     func stopAndReset() {
+        let previousElapsed = elapsedSeconds
         timer?.invalidate()
         timer = nil
         startUptime = nil
         if elapsedSeconds != 0 { elapsedSeconds = 0 }
+        AppEventLog.deepEvent("RECORDING CLOCK RESET", category: .recording,
+                              fields: ["previousElapsedSeconds": String(format: "%.0f", previousElapsed)])
     }
 
     func update() {

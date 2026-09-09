@@ -350,6 +350,12 @@ final class CameraManager: NSObject, ObservableObject {
     private var metricsTimer: DispatchSourceTimer?
     private var previousMetricBytes: Int64 = 0
     private var previousMetricDuration: Double = 0
+    // Deep recording-forensics state; sessionQueue only.
+    private var activeRecordingTraceID: String?
+    private var recordingRequestStartedAt: TimeInterval = 0
+    private var movieStartCallAt: TimeInterval = 0
+    private var recordingSegmentIndex: Int = 0
+    private var lastExtremeRecordingHealthSecond: Int = -1
     private struct PhotoCaptureContext {
         let aspect: String
         let megapixels: Int
@@ -357,9 +363,14 @@ final class CameraManager: NSObject, ObservableObject {
         let isBurst: Bool
         let requestedFlash: String
         let appliedFlash: String
+        let traceID: String
+        let startedAt: TimeInterval
+        let burstOrdinal: Int?
     }
 
     private var burstRemaining = 0
+    private var burstRequestedCount = 0
+    private var activeBurstTraceID: String?
     private var burstStopRequested = false
     private var burstAspect = "4:3"
     private var burstMegapixels = 12
@@ -393,20 +404,23 @@ final class CameraManager: NSObject, ObservableObject {
     private var pendingZoomSubmission: ZoomSubmission?
     private var isZoomSubmissionScheduled = false
     private var didLogRecordingLensClamp = false
-    private let zoomRequests = RequestToken()
-    private let cameraSwitchRequests = RequestToken()
-    private let whiteBalanceRequests = RequestToken()
-    private let modeChangeRequests = RequestToken()
-    private let qualityRequests = RequestToken()
-    private let compressionRequests = RequestToken()
-    private let captureConfigurationGeneration = RequestToken()
-    private let videoConfigurationRequests = RequestToken()
-    private let qualityPreviewTransitions = RequestToken()
-    private let exposureRequests = RequestToken()
-    private let torchRequests = RequestToken()
-    private let recordingStartRequests = RequestToken()
-    private let microphonePermissionRequests = RequestToken()
-    private let mediaSaveTaskRequests = RequestToken()
+    // Extreme diagnostics zoom interaction state; owned by sessionQueue.
+    private var diagnosticZoomInteractionTraceID: String?
+    private var diagnosticZoomProbeStarted = false
+    private let zoomRequests = RequestToken("zoomRequests")
+    private let cameraSwitchRequests = RequestToken("cameraSwitchRequests")
+    private let whiteBalanceRequests = RequestToken("whiteBalanceRequests")
+    private let modeChangeRequests = RequestToken("modeChangeRequests")
+    private let qualityRequests = RequestToken("qualityRequests")
+    private let compressionRequests = RequestToken("compressionRequests")
+    private let captureConfigurationGeneration = RequestToken("captureConfigurationGeneration")
+    private let videoConfigurationRequests = RequestToken("videoConfigurationRequests")
+    private let qualityPreviewTransitions = RequestToken("qualityPreviewTransitions")
+    private let exposureRequests = RequestToken("exposureRequests")
+    private let torchRequests = RequestToken("torchRequests")
+    private let recordingStartRequests = RequestToken("recordingStartRequests")
+    private let microphonePermissionRequests = RequestToken("microphonePermissionRequests")
+    private let mediaSaveTaskRequests = RequestToken("mediaSaveTaskRequests")
     private let codecSupportCacheLock = NSLock()
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
@@ -1512,7 +1526,13 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func setZoomFactor(_ requestedFactor: CGFloat) {
-        let requestID = zoomRequests.next()
+        let requestID = zoomRequests.next(reason: "zoom factor requested")
+        let requestTraceID = "ZOOM-\(requestID)"
+        AppEventLog.deepEvent("ZOOM REQUEST SUBMITTED", category: .zoom, traceID: requestTraceID, fields: [
+            "requestedDisplayedZoom": String(format: "%.3f", Double(requestedFactor)),
+            "publishedZoom": String(format: "%.3f", Double(zoomFactor)),
+            "hudZoom": zoomLabel
+        ])
         // A 60 Hz drag can outpace an expensive 4K60 lens handoff. Retain only the newest value
         // instead of leaving obsolete device/format scans queued behind the current camera work.
         zoomSubmissionLock.lock()
@@ -1521,21 +1541,50 @@ final class CameraManager: NSObject, ObservableObject {
         if shouldSchedule { isZoomSubmissionScheduled = true }
         zoomSubmissionLock.unlock()
 
-        guard shouldSchedule else { return }
+        guard shouldSchedule else {
+            AppEventLog.deepEvent("ZOOM REQUEST COALESCED", category: .zoom, traceID: requestTraceID)
+            return
+        }
+        let ticket = AppEventLog.queueScheduled("drainZoomSubmissions", category: .zoom, traceID: requestTraceID)
         sessionQueue.async { [weak self] in
+            AppEventLog.queueStarted(ticket)
             self?.drainZoomSubmissions()
         }
     }
 
     func beginZoomInteraction() {
+        let trace = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("ZOOM-INTERACTION") : nil
         sessionQueue.async { [weak self] in
-            self?.didLogRecordingLensClamp = false
+            guard let self else { return }
+            self.didLogRecordingLensClamp = false
+            self.diagnosticZoomInteractionTraceID = trace
+            self.diagnosticZoomProbeStarted = false
+            AppEventLog.deepEvent("ZOOM GESTURE BEGIN", category: .zoom, traceID: trace, fields: [
+                "requestedZoom": String(format: "%.3f", Double(self.requestedZoom)),
+                "hudZoom": self.zoomLabel,
+                "device": self.videoInput?.device.localizedName ?? "none"
+            ])
         }
     }
 
     func endZoomInteraction() {
-        // Kept as a gesture boundary for diagnostics and future zoom policies. The diagnostic flag
-        // resets at the beginning of the next interaction so late queued samples stay quiet.
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let trace = self.diagnosticZoomInteractionTraceID
+            AppEventLog.deepEvent("ZOOM GESTURE END", category: .zoom, traceID: trace, fields: [
+                "requestedZoom": String(format: "%.3f", Double(self.requestedZoom)),
+                "hudZoom": self.zoomLabel,
+                "deviceZoom": self.videoInput.map { String(format: "%.3f", Double($0.device.videoZoomFactor)) } ?? "none"
+            ])
+            if let trace {
+                self.sessionQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self, self.diagnosticZoomInteractionTraceID == trace else { return }
+                    self.liveMetrics.endZoomTransitionProbe(traceID: trace, reason: "zoom interaction settled")
+                    self.diagnosticZoomInteractionTraceID = nil
+                    self.diagnosticZoomProbeStarted = false
+                }
+            }
+        }
     }
 
     private func drainZoomSubmissions() {
@@ -1557,14 +1606,34 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func applyZoomSubmission(_ submission: ZoomSubmission) {
             let requestID = submission.requestID
-            guard zoomRequests.isLatest(requestID),
-                  let currentDevice = videoInput?.device,
-                  session.isRunning,
-                  !session.isInterrupted else { return }
+            let requestTraceID = "ZOOM-\(requestID)"
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            guard zoomRequests.isLatest(requestID) else { return }
+            guard let currentDevice = videoInput?.device else {
+                AppEventLog.guardRejected("applyZoomSubmission", reason: "no active video input", traceID: requestTraceID)
+                return
+            }
+            guard session.isRunning else {
+                AppEventLog.guardRejected("applyZoomSubmission", reason: "session not running", traceID: requestTraceID)
+                return
+            }
+            guard !session.isInterrupted else {
+                AppEventLog.guardRejected("applyZoomSubmission", reason: "session interrupted", traceID: requestTraceID)
+                return
+            }
+            AppEventLog.deepEvent("ZOOM APPLY BEGIN", category: .zoom, traceID: requestTraceID, fields: [
+                "requested": String(format: "%.3f", Double(submission.factor)),
+                "currentRequested": String(format: "%.3f", Double(requestedZoom)),
+                "device": currentDevice.localizedName,
+                "actualDeviceZoom": String(format: "%.3f", Double(currentDevice.videoZoomFactor)),
+                "lensTransitionActive": String(lensTransitionCoordinator.hasActiveTransition)
+            ])
 
             var requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
             if !lensTransitionCoordinator.hasActiveTransition,
                abs(requested - requestedZoom) < 0.0005 {
+                AppEventLog.deepEvent("ZOOM APPLY NO-OP", category: .zoom, traceID: requestTraceID,
+                                      fields: ["reason": "already at requested zoom"])
                 return
             }
 
@@ -1590,6 +1659,12 @@ final class CameraManager: NSObject, ObservableObject {
                         self.displayedZoomFactor(for: factor, device: device)
                     }
                 ) {
+                    self.beginExtremeZoomTransitionProbeIfPossible(
+                        device: currentDevice,
+                        targetDisplayedZoom: requested,
+                        requestTraceID: requestTraceID,
+                        reason: "virtual lens boundary"
+                    )
                     let request = LensTransitionCoordinator.Request(
                         id: requestID,
                         mode: self.captureMode,
@@ -1666,6 +1741,12 @@ final class CameraManager: NSObject, ObservableObject {
                 let wantsDifferentLens = desiredPhysical?.uniqueID != currentDevice.uniqueID
 
                 if wantsDifferentLens {
+                    self.beginExtremeZoomTransitionProbeIfPossible(
+                        device: currentDevice,
+                        targetDisplayedZoom: requested,
+                        requestTraceID: requestTraceID,
+                        reason: "physical lens handoff"
+                    )
                     let recordingOrStarting = self.movieOutput.isRecording || self.recordingState.requestsRecording || self.isRecordingStarting
                     if recordingOrStarting && self.captureMode != .video {
                         // HFR recording must keep its physical input for the whole file. Do not
@@ -1760,8 +1841,14 @@ final class CameraManager: NSObject, ObservableObject {
                   let device = self.videoInput?.device else { return }
             let factor = self.snappedZoomFactor(requested, for: device)
             do {
+                let lockStart = ProcessInfo.processInfo.systemUptime
                 try device.lockForConfiguration()
+                let lockWaitMs = (ProcessInfo.processInfo.systemUptime - lockStart) * 1000
                 let deviceFactor = self.deviceZoomFactor(for: factor, device: device)
+                AppEventLog.deepEvent("ZOOM DEVICE LOCK ACQUIRED", category: .device, traceID: requestTraceID, fields: [
+                    "waitMs": String(format: "%.2f", lockWaitMs),
+                    "targetDeviceZoom": String(format: "%.3f", Double(deviceFactor))
+                ])
 
                 if self.lensTransitionCoordinator.hasActiveTransition {
                     // A newer drag returned to the currently active lens while a covered switch
@@ -1773,9 +1860,16 @@ final class CameraManager: NSObject, ObservableObject {
                 } else {
                     device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
                 }
+                let readbackZoom = device.videoZoomFactor
                 device.unlockForConfiguration()
                 guard self.zoomRequests.isLatest(requestID) else { return }
                 self.requestedZoom = factor
+                AppEventLog.deepEvent("ZOOM HARDWARE APPLIED", category: .zoom, traceID: requestTraceID, fields: [
+                    "displayedTarget": String(format: "%.3f", Double(factor)),
+                    "deviceTarget": String(format: "%.3f", Double(deviceFactor)),
+                    "deviceReadback": String(format: "%.3f", Double(readbackZoom)),
+                    "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+                ])
                 self.publish {
                     self.applyPublishedZoomIfNeeded(factor)
                 }
@@ -1784,18 +1878,87 @@ final class CameraManager: NSObject, ObservableObject {
                     self.lensTransitionCoordinator.finish(requestID, revealDelay: 0.08)
                 }
             } catch {
+                AppEventLog.log(error: error, prefix: "ZOOM APPLY FAILED", category: .zoom, traceID: requestTraceID)
                 self.showError("Couldn’t change the zoom.")
             }
     }
 
+    private func beginExtremeZoomTransitionProbeIfPossible(
+        device: AVCaptureDevice,
+        targetDisplayedZoom: CGFloat,
+        requestTraceID: String,
+        reason: String
+    ) {
+        guard AppEventLog.extremeDiagnosticsEnabled else { return }
+        let interactionTrace = diagnosticZoomInteractionTraceID ?? requestTraceID
+        let expectedDeviceZoom = deviceZoomFactor(for: snappedZoomFactor(targetDisplayedZoom, for: device), device: device)
+        let canObserveFrames = session.outputs.contains { $0 === liveMetrics.output } &&
+            liveMetrics.output.connection(with: .video)?.isEnabled == true
+        AppEventLog.deepEvent("EXTREME ZOOM TRANSITION MONITOR", category: .zoom, traceID: interactionTrace, fields: [
+            "reason": reason,
+            "requestTrace": requestTraceID,
+            "frameProbeAvailable": String(canObserveFrames),
+            "device": device.localizedName,
+            "actualDeviceZoomBefore": String(format: "%.3f", Double(device.videoZoomFactor)),
+            "targetDisplayedZoom": String(format: "%.3f", Double(targetDisplayedZoom)),
+            "targetDeviceZoom": String(format: "%.3f", Double(expectedDeviceZoom))
+        ])
+        guard canObserveFrames else {
+            AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE UNAVAILABLE", category: .zoom, level: .warning, traceID: interactionTrace,
+                                  fields: ["reason": "video-data diagnostics output intentionally unavailable/disabled for this capture configuration"])
+            return
+        }
+        if diagnosticZoomProbeStarted {
+            liveMetrics.updateZoomTransitionProbe(
+                traceID: interactionTrace,
+                device: device,
+                expectedDeviceZoom: expectedDeviceZoom,
+                expectedDisplayedZoom: targetDisplayedZoom,
+                hudZoom: formattedZoomLabel(for: targetDisplayedZoom)
+            )
+        } else {
+            diagnosticZoomProbeStarted = true
+            liveMetrics.beginZoomTransitionProbe(
+                traceID: interactionTrace,
+                device: device,
+                expectedDeviceZoom: expectedDeviceZoom,
+                expectedDisplayedZoom: targetDisplayedZoom,
+                hudZoom: formattedZoomLabel(for: targetDisplayedZoom)
+            )
+        }
+    }
+
     private func applyVirtualLensZoom(_ request: LensTransitionCoordinator.Request, device: AVCaptureDevice) -> Bool {
         let factor = snappedZoomFactor(request.requestedZoom, for: device)
+        let traceID = "ZOOM-\(request.id)"
         do {
+            let lockStart = ProcessInfo.processInfo.systemUptime
             try device.lockForConfiguration()
+            let lockWait = (ProcessInfo.processInfo.systemUptime - lockStart) * 1000
+            let target = deviceZoomFactor(for: factor, device: device)
+            let before = device.videoZoomFactor
             device.cancelVideoZoomRamp()
-            device.videoZoomFactor = deviceZoomFactor(for: factor, device: device)
+            device.videoZoomFactor = target
+            let after = device.videoZoomFactor
             device.unlockForConfiguration()
+            AppEventLog.deepEvent("VIRTUAL LENS ZOOM SET", category: .zoom, traceID: traceID, fields: [
+                "lockWaitMs": String(format: "%.2f", lockWait),
+                "before": String(format: "%.3f", Double(before)),
+                "target": String(format: "%.3f", Double(target)),
+                "readback": String(format: "%.3f", Double(after)),
+                "displayedTarget": String(format: "%.3f", Double(factor))
+            ])
+            if let interactionTrace = diagnosticZoomInteractionTraceID, diagnosticZoomProbeStarted {
+                liveMetrics.updateZoomTransitionProbe(
+                    traceID: interactionTrace,
+                    device: device,
+                    expectedDeviceZoom: target,
+                    expectedDisplayedZoom: factor,
+                    hudZoom: formattedZoomLabel(for: factor)
+                )
+            }
         } catch {
+            AppEventLog.log(error: error, prefix: "VIRTUAL LENS ZOOM FAILED", category: .zoom, traceID: traceID)
             return false
         }
 
@@ -1886,9 +2049,27 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera() {
-        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isLensTransitioning else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isLensTransitioning else {
+            AppEventLog.guardRejected("switchCamera", reason: "camera busy", fields: [
+                "recording": String(isRecording), "recordingStarting": String(isRecordingStarting),
+                "finalizing": String(isFinalizingRecording), "capturingPhoto": String(isCapturingPhoto),
+                "lensTransition": String(isLensTransitioning)
+            ])
+            return
+        }
         let previous = cameraPosition
         let target: CameraPosition = previous == .back ? .front : .back
+        let switchTraceID = AppEventLog.makeTraceID("CAMSWITCH")
+        let switchStartedAt = ProcessInfo.processInfo.systemUptime
+        let beforeDevice = videoInput?.device
+        AppEventLog.event("========== CAMERA SWITCH START =========", category: .device, traceID: switchTraceID, fields: [
+            "from": previous.rawValue, "to": target.rawValue,
+            "device": beforeDevice?.localizedName ?? "none",
+            "deviceID": beforeDevice?.uniqueID ?? "none",
+            "mode": captureMode.rawValue,
+            "requestedZoom": String(format: "%.3f", requestedZoom),
+            "actualDeviceZoom": beforeDevice.map { String(format: "%.3f", $0.videoZoomFactor) } ?? "none"
+        ])
         let previousCodec = selectedVideoCodec
         let previousSupportedResolutions = supportedResolutions
         let previousSupportedFrameRates = supportedFrameRates
@@ -1898,7 +2079,7 @@ final class CameraManager: NSObject, ObservableObject {
         let previousSupportedSlowMotionFrameRates = supportedSlowMotionFrameRates
         let previousSlowMotionAvailabilityKnown = isSlowMotionAvailabilityKnown
         let previousSlowMotionAvailable = isSlowMotionAvailable
-        AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")")
+        AppEventLog.event("Camera switch requested: \(previous == .back ? "back" : "front") to \(target == .back ? "back" : "front")", category: .device, traceID: switchTraceID)
         invalidateCodecSupportCache()
         codecAvailabilityMessage = nil
         isVideoAvailabilityKnown = false
@@ -1909,7 +2090,8 @@ final class CameraManager: NSObject, ObservableObject {
         supportedSlowMotionFrameRates.removeAll(keepingCapacity: true)
         isSlowMotionAvailabilityKnown = false
         isSlowMotionAvailable = true
-        let requestID = cameraSwitchRequests.next()
+        let requestID = cameraSwitchRequests.next(reason: "camera switch \(previous.rawValue) -> \(target.rawValue)")
+        let switchQueueTicket = AppEventLog.queueScheduled("camera switch", category: .device, traceID: switchTraceID)
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
         _ = qualityRequests.next() // Do not apply an old quality request to the new input.
         _ = captureConfigurationGeneration.next() // Drop output work captured for the old input.
@@ -1925,11 +2107,21 @@ final class CameraManager: NSObject, ObservableObject {
         )
 
         sessionQueue.async { [weak self] in
-            guard let self, self.cameraSwitchRequests.isLatest(requestID) else { return }
+            AppEventLog.queueStarted(switchQueueTicket)
+            guard let self else { return }
+            guard self.cameraSwitchRequests.isLatest(requestID) else {
+                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch", traceID: switchTraceID)
+                return
+            }
             self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             guard self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput) else {
-                guard self.cameraSwitchRequests.isLatest(requestID) else { return }
+                AppEventLog.event("CAMERA SWITCH FORMAT/APPLY FAILED", category: .device, level: .warning, traceID: switchTraceID,
+                                  fields: ["elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - switchStartedAt) * 1000)])
+                guard self.cameraSwitchRequests.isLatest(requestID) else {
+                    AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch rollback", traceID: switchTraceID)
+                    return
+                }
                 self.publish {
                     self.cameraPosition = previous
                     self.loadCameraPreferences(for: previous)
@@ -1950,22 +2142,52 @@ final class CameraManager: NSObject, ObservableObject {
                     self.codecAvailabilityMessage = nil
                 }
                 self.showError("That camera is unavailable.")
+                AppEventLog.event("========== CAMERA SWITCH END =========", category: .device, level: .warning, traceID: switchTraceID,
+                                  fields: ["result": "failed", "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - switchStartedAt) * 1000)])
                 return
             }
-            guard self.cameraSwitchRequests.isLatest(requestID) else { return }
+            guard self.cameraSwitchRequests.isLatest(requestID) else {
+                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch post-apply", traceID: switchTraceID)
+                return
+            }
             self.synchronizeTorchState()
             self.persistRememberedCameraSetup()
-            AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")")
+            let afterDevice = self.videoInput?.device
+            AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")", category: .device, traceID: switchTraceID, fields: [
+                "device": afterDevice?.localizedName ?? "none",
+                "deviceID": afterDevice?.uniqueID ?? "none",
+                "actualDeviceZoom": afterDevice.map { String(format: "%.3f", $0.videoZoomFactor) } ?? "none",
+                "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - switchStartedAt) * 1000)
+            ])
+            AppEventLog.stateDiff("CAMERA SWITCH", before: ["position": previous.rawValue, "device": beforeDevice?.localizedName ?? "none"],
+                                  after: ["position": target.rawValue, "device": afterDevice?.localizedName ?? "none"], traceID: switchTraceID, category: .device)
+            AppEventLog.event("========== CAMERA SWITCH END =========", category: .device, traceID: switchTraceID,
+                              fields: ["result": "success", "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - switchStartedAt) * 1000)])
         }
     }
 
     func selectCaptureMode(_ mode: CaptureMode) {
-        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, !isLensTransitioning, captureMode != mode else { return }
-        guard isCaptureModeSupported(mode) else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isPreviewTransitioning, !isLensTransitioning, captureMode != mode else {
+            AppEventLog.guardRejected("selectCaptureMode", reason: "busy or already selected", fields: [
+                "requested": mode.rawValue, "current": captureMode.rawValue,
+                "recording": String(isRecording), "capturingPhoto": String(isCapturingPhoto),
+                "previewTransition": String(isPreviewTransitioning), "lensTransition": String(isLensTransitioning)
+            ])
+            return
+        }
+        guard isCaptureModeSupported(mode) else {
+            AppEventLog.guardRejected("selectCaptureMode", reason: "unsupported mode", fields: ["requested": mode.rawValue])
+            return
+        }
         let previousMode = captureMode
-        AppEventLog.event("Capture mode requested: \(previousMode.rawValue) to \(mode.rawValue)")
+        let modeTraceID = AppEventLog.makeTraceID("MODE")
+        let modeStartedAt = ProcessInfo.processInfo.systemUptime
+        AppEventLog.event("========== MODE CHANGE START =========", category: .session, traceID: modeTraceID,
+                          fields: ["from": previousMode.rawValue, "to": mode.rawValue, "camera": cameraPosition.rawValue])
+        AppEventLog.event("Capture mode requested: \(previousMode.rawValue) to \(mode.rawValue)", category: .session, traceID: modeTraceID)
         codecAvailabilityMessage = nil
-        let requestID = modeChangeRequests.next()
+        let requestID = modeChangeRequests.next(reason: "capture mode \(previousMode.rawValue) -> \(mode.rawValue)")
+        let modeQueueTicket = AppEventLog.queueScheduled("capture mode change", category: .session, traceID: modeTraceID)
         _ = zoomRequests.next() // A queued old-mode zoom must not reconfigure the new mode.
         _ = qualityRequests.next() // Drop quality work that belonged to the previous mode.
         _ = captureConfigurationGeneration.next() // Drop output work captured for the previous mode.
@@ -1974,7 +2196,12 @@ final class CameraManager: NSObject, ObservableObject {
         isPreviewTransitioning = true
         captureMode = mode
         sessionQueue.async { [weak self] in
-            guard let self, self.modeChangeRequests.isLatest(requestID) else { return }
+            AppEventLog.queueStarted(modeQueueTicket)
+            guard let self else { return }
+            guard self.modeChangeRequests.isLatest(requestID) else {
+                AppEventLog.staleRequest(token: "modeChangeRequests", requestID: requestID, latestID: self.modeChangeRequests.current, operation: "capture mode change", traceID: modeTraceID)
+                return
+            }
             self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
@@ -1984,7 +2211,10 @@ final class CameraManager: NSObject, ObservableObject {
                 }
                 self.synchronizeTorchState()
             }
-            AppEventLog.event("Capture mode \(success ? "applied" : "failed"): \(mode.rawValue)")
+            AppEventLog.event("Capture mode \(success ? "applied" : "failed"): \(mode.rawValue)", category: .session,
+                              level: success ? .info : .warning, traceID: modeTraceID,
+                              fields: ["totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - modeStartedAt) * 1000),
+                                       "device": self.videoInput?.device.localizedName ?? "none"])
 
             self.publish {
                 self.isPreviewTransitioning = false
@@ -1997,6 +2227,11 @@ final class CameraManager: NSObject, ObservableObject {
                         self.synchronizeTorchState()
                     }
                 }
+                AppEventLog.event("========== MODE CHANGE END =========", category: .session,
+                                  level: success ? .info : .warning, traceID: modeTraceID,
+                                  fields: ["result": success ? "success" : "rolled-back",
+                                           "publishedMode": self.captureMode.rawValue,
+                                           "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - modeStartedAt) * 1000)])
             }
         }
     }
@@ -2054,7 +2289,8 @@ final class CameraManager: NSObject, ObservableObject {
 
             let wanted = self.liveMetricsAttachmentWanted()
             let attached = self.liveMetricsOutputIsAttached()
-            let connectionNeedsDisable = self.liveMetrics.output.connection(with: .video)?.isEnabled == true
+            let connectionNeedsDisable = self.liveMetrics.output.connection(with: .video)?.isEnabled == true &&
+                !AppEventLog.extremeDiagnosticsEnabled
             let publishedStateNeedsSync = self.liveMetricsAvailable != attached
             guard wanted != attached || connectionNeedsDisable || publishedStateNeedsSync else { return }
 
@@ -2081,7 +2317,8 @@ final class CameraManager: NSObject, ObservableObject {
         let attached = liveMetricsOutputIsAttached()
         let connectionNeedsDisable = liveMetrics.output.connection(with: .video)?.isEnabled == true &&
             !recordingState.requestsRecording &&
-            !movieOutput.isRecording
+            !movieOutput.isRecording &&
+            !AppEventLog.extremeDiagnosticsEnabled
 
         if wanted == attached && !connectionNeedsDisable {
             publish {
@@ -2101,7 +2338,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         let available = session.outputs.contains { $0 === liveMetrics.output }
         if available && !movieOutput.isRecording {
-            setLiveMetricsConnectionEnabled(false)
+            setLiveMetricsConnectionEnabled(AppEventLog.extremeDiagnosticsEnabled && captureMode != .photo)
         }
         publish {
             if self.liveMetricsAvailable != available {
@@ -2121,7 +2358,9 @@ final class CameraManager: NSObject, ObservableObject {
         // A second video-data stream can push multi-camera 4K60 beyond the device's sustainable
         // capture budget and trigger a runtime-error rebuild loop. File bitrate remains available
         // without this optional output; only measured FPS/drop counters are omitted in rear 4K60.
-        return UserDefaults.standard.bool(forKey: "liveRecordingStats") &&
+        let requestedByUser = UserDefaults.standard.bool(forKey: "liveRecordingStats")
+        let requestedByExtremeDiagnostics = AppEventLog.extremeDiagnosticsEnabled
+        return (requestedByUser || requestedByExtremeDiagnostics) &&
             captureMode != .photo &&
             !isRear4K60
     }
@@ -2141,7 +2380,7 @@ final class CameraManager: NSObject, ObservableObject {
         metricsTimer?.cancel()
         metricsTimer = nil
         liveMetrics.setRunning(false)
-        setLiveMetricsConnectionEnabled(false)
+        setLiveMetricsConnectionEnabled(AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
         if wasRunning {
             AppEventLog.event("Live metrics stopped")
         }
@@ -2151,8 +2390,11 @@ final class CameraManager: NSObject, ObservableObject {
         stopLiveMetrics()
         previousMetricBytes = 0
         previousMetricDuration = 0
-        publish { self.liveStats.reset() }
-        guard UserDefaults.standard.bool(forKey: "liveRecordingStats") else {
+        lastExtremeRecordingHealthSecond = -1
+        let userStatsEnabled = UserDefaults.standard.bool(forKey: "liveRecordingStats")
+        let extremeEnabled = AppEventLog.extremeDiagnosticsEnabled
+        if userStatsEnabled { publish { self.liveStats.reset() } }
+        guard userStatsEnabled || extremeEnabled else {
             AppEventLog.event("Live metrics not started: setting disabled")
             return
         }
@@ -2164,8 +2406,9 @@ final class CameraManager: NSObject, ObservableObject {
         }
         let initialDuration = videoInput?.device.activeVideoMinFrameDuration.seconds ?? 0
         let initialFPS: Double? = initialDuration > 0 ? 1 / initialDuration : nil
-        publish { self.liveStats.update(fps: initialFPS, mbps: nil, drops: nil) }
-        AppEventLog.event("Live metrics started: captureMetricsAvailable=\(captureMetricsAvailable), mode=\(captureMode.rawValue)")
+        if userStatsEnabled { publish { self.liveStats.update(fps: initialFPS, mbps: nil, drops: nil) } }
+        AppEventLog.event("Live metrics started: captureMetricsAvailable=\(captureMetricsAvailable), mode=\(captureMode.rawValue)", category: .performance,
+                          traceID: activeRecordingTraceID, fields: ["userStats": String(userStatsEnabled), "extreme": String(extremeEnabled)])
 
         // Bitrate comes from AVCaptureMovieFileOutput and remains available even if the optional
         // video-data output could not be attached. Only FPS/drop measurement depends on it.
@@ -2209,14 +2452,36 @@ final class CameraManager: NSObject, ObservableObject {
             let activeFPSText = activeFPS.map { String(format: "%.1f", $0) } ?? "unavailable"
             let bitrateText = mbps.map { String(format: "%.2f Mbps", $0) } ?? "unavailable"
             let dropsText = drops.map { String($0) } ?? "unavailable"
-            AppEventLog.event(
-                "LIVE METRICS: duration=\(String(format: "%.1f", duration))s, bytes=\(bytes), bitrate=\(bitrateText), " +
-                "monitoredFPS=\(fpsText), activeFPS=\(activeFPSText), monitoredDrops=\(dropsText), " +
-                "dropsAvailable=\(displayedDrops != nil), captureMetricsAttached=\(attached)"
-            )
-
-            self.publish {
-                self.liveStats.update(fps: displayedFPS, mbps: mbps, drops: displayedDrops)
+            if userStatsEnabled {
+                AppEventLog.event(
+                    "LIVE METRICS: duration=\(String(format: "%.1f", duration))s, bytes=\(bytes), bitrate=\(bitrateText), " +
+                    "monitoredFPS=\(fpsText), activeFPS=\(activeFPSText), monitoredDrops=\(dropsText), " +
+                    "dropsAvailable=\(displayedDrops != nil), captureMetricsAttached=\(attached)",
+                    category: .performance, traceID: self.activeRecordingTraceID
+                )
+                self.publish {
+                    self.liveStats.update(fps: displayedFPS, mbps: mbps, drops: displayedDrops)
+                }
+            }
+            if AppEventLog.extremeDiagnosticsEnabled {
+                let second = Int(duration.rounded(.down))
+                if second == 0 || second >= self.lastExtremeRecordingHealthSecond + 5 {
+                    self.lastExtremeRecordingHealthSecond = second
+                    let device = self.videoInput?.device
+                    AppEventLog.deepEvent("RECORDING HEALTH", category: .recording, traceID: self.activeRecordingTraceID, fields: [
+                        "elapsedSeconds": String(format: "%.2f", duration),
+                        "fileBytes": String(bytes),
+                        "bitrateMbps": mbps.map { String(format: "%.2f", $0) } ?? "unavailable",
+                        "activeFPS": activeFPSText,
+                        "monitoredFPS": fpsText,
+                        "drops": dropsText,
+                        "metricsOutputAttached": String(attached),
+                        "device": device?.localizedName ?? "none",
+                        "deviceZoom": device.map { String(format: "%.3f", $0.videoZoomFactor) } ?? "none",
+                        "thermal": String(describing: ProcessInfo.processInfo.thermalState),
+                        "lowPowerMode": String(ProcessInfo.processInfo.isLowPowerModeEnabled)
+                    ])
+                }
             }
         }
         metricsTimer = timer
@@ -2286,17 +2551,34 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func captureBurst() {
-        guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
+        guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else {
+            AppEventLog.guardRejected("captureBurst", reason: "camera busy or not in Photo mode", fields: [
+                "mode": captureMode.rawValue,
+                "isCapturingPhoto": String(isCapturingPhoto),
+                "recordingStarting": String(isRecordingStarting),
+                "finalizing": String(isFinalizingRecording)
+            ])
+            return
+        }
         let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
         let count = Self.photoBurstCountOptions.contains(savedCount) ? savedCount : Self.defaultPhotoBurstCount
-        AppEventLog.event("Burst capture requested: count=\(count)")
+        let burstTrace = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("BURST") : "BURST"
+        AppEventLog.event("========== BURST CAPTURE START =========", category: .burst, traceID: burstTrace,
+                          fields: ["requestedCount": String(count)])
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.activeBurstTraceID = burstTrace
+            self.burstRequestedCount = count
             self.burstRemaining = count
             self.burstStopRequested = false
             self.burstAspect = UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
             self.burstMegapixels = self.selectedPhotoMegapixels
+            AppEventLog.deepEvent("BURST SETTINGS SNAPSHOT", category: .burst, traceID: burstTrace, fields: [
+                "aspect": self.burstAspect,
+                "megapixels": String(self.burstMegapixels),
+                "camera": self.videoInput?.device.localizedName ?? "none"
+            ])
             self.refreshAvailableStorage()
             self.beginPhotoCapture()
         }
@@ -2306,16 +2588,28 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.burstRemaining > 0 else { return }
             self.burstStopRequested = true
-            AppEventLog.event("Burst capture stop requested: remaining=\(self.burstRemaining)")
+            AppEventLog.event("Burst capture stop requested: remaining=\(self.burstRemaining)", category: .burst,
+                              traceID: self.activeBurstTraceID)
         }
     }
 
     func capturePhoto() {
-        guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else { return }
+        guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else {
+            AppEventLog.guardRejected("capturePhoto", reason: "camera busy or not in Photo mode", fields: [
+                "mode": captureMode.rawValue,
+                "recording": String(isRecording),
+                "recordingStarting": String(isRecordingStarting),
+                "finalizing": String(isFinalizingRecording),
+                "capturingPhoto": String(isCapturingPhoto)
+            ])
+            return
+        }
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.burstRemaining = 0
+            self.burstRequestedCount = 0
+            self.activeBurstTraceID = nil
             self.burstStopRequested = false
             self.beginPhotoCapture()
         }
@@ -2342,12 +2636,31 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func selectWhiteBalancePreset(_ preset: WhiteBalancePreset) {
-        AppEventLog.event("White balance requested: \(preset.rawValue)")
-        let requestID = whiteBalanceRequests.next()
+        let requestID = whiteBalanceRequests.next(reason: "white balance -> \(preset.rawValue)")
+        let traceID = "WB-\(requestID)"
+        let ticket = AppEventLog.queueScheduled("white balance apply", category: .whiteBalance, traceID: traceID)
+        AppEventLog.event("White balance requested: \(preset.rawValue)", category: .whiteBalance, traceID: traceID, fields: [
+            "currentPreset": requestedWhiteBalancePreset.rawValue,
+            "camera": cameraPosition.rawValue,
+            "device": videoInput?.device.localizedName ?? "none"
+        ])
         sessionQueue.async { [weak self] in
-            guard let self, self.whiteBalanceRequests.isLatest(requestID),
-                  !self.movieOutput.isRecording, !self.recordingState.requestsRecording,
-                  !self.lensTransitionCoordinator.hasActiveTransition else { return }
+            AppEventLog.queueStarted(ticket)
+            guard let self else { return }
+            guard self.whiteBalanceRequests.isLatest(requestID) else {
+                AppEventLog.staleRequest(token: "whiteBalanceRequests", requestID: requestID, latestID: self.whiteBalanceRequests.current,
+                                         operation: "white balance selection", traceID: traceID)
+                return
+            }
+            guard !self.movieOutput.isRecording, !self.recordingState.requestsRecording,
+                  !self.lensTransitionCoordinator.hasActiveTransition else {
+                AppEventLog.guardRejected("white balance selection", reason: "camera busy", traceID: traceID, fields: [
+                    "movieRecording": String(self.movieOutput.isRecording),
+                    "recordingRequested": String(self.recordingState.requestsRecording),
+                    "lensTransition": String(self.lensTransitionCoordinator.hasActiveTransition)
+                ])
+                return
+            }
 
             let previousPreset = self.requestedWhiteBalancePreset
             self.requestedWhiteBalancePreset = preset
@@ -2381,7 +2694,9 @@ final class CameraManager: NSObject, ObservableObject {
             previousPreset: previousPreset
         )
         let state = session.isInterrupted ? "interrupted" : "not running"
-        AppEventLog.event("White balance deferred: camera session is \(state)")
+        AppEventLog.event("White balance deferred: camera session is \(state)", category: .whiteBalance, traceID: "WB-\(id)", fields: [
+            "preset": preset.rawValue, "previousPreset": previousPreset.rawValue
+        ])
     }
 
     private func applyDeferredWhiteBalanceIfPossible() {
@@ -2404,9 +2719,18 @@ final class CameraManager: NSObject, ObservableObject {
         previousPreset: WhiteBalancePreset,
         requestID: UInt64
     ) {
+        let traceID = "WB-\(requestID)"
+        let wbStartedAt = ProcessInfo.processInfo.systemUptime
         guard whiteBalanceRequests.isLatest(requestID),
               !movieOutput.isRecording, !recordingState.requestsRecording,
-              !lensTransitionCoordinator.hasActiveTransition else { return }
+              !lensTransitionCoordinator.hasActiveTransition else {
+            AppEventLog.guardRejected("applyWhiteBalanceRequest", reason: "stale or camera busy", traceID: traceID, fields: [
+                "latestID": String(whiteBalanceRequests.current), "requestID": String(requestID),
+                "movieRecording": String(movieOutput.isRecording), "recordingRequested": String(recordingState.requestsRecording),
+                "lensTransition": String(lensTransitionCoordinator.hasActiveTransition)
+            ])
+            return
+        }
         guard session.isRunning, !session.isInterrupted else {
             deferWhiteBalanceRequest(
                 id: requestID,
@@ -2427,6 +2751,11 @@ final class CameraManager: NSObject, ObservableObject {
             (preset != .auto && currentDevice?.isVirtualDevice == true) ||
             (preset == .auto && currentDevice?.isVirtualDevice == false)
         )
+        AppEventLog.deepEvent("WB APPLY DECISION", category: .whiteBalance, traceID: traceID, fields: [
+            "preset": preset.rawValue, "previousPreset": previousPreset.rawValue,
+            "device": currentDevice?.localizedName ?? "none", "virtualDevice": String(currentDevice?.isVirtualDevice ?? false),
+            "needsInputSwap": String(needsInputSwap), "mode": captureMode.rawValue
+        ])
 
         // Manual-to-manual (or any front-camera WB change) only needs a device WB update.
         // Do not rebuild/reapply the whole capture format for a color-temperature change.
@@ -2436,7 +2765,16 @@ final class CameraManager: NSObject, ObservableObject {
                     self.whiteBalancePreset = preset
                     self.isPreviewTransitioning = false
                 }
-                AppEventLog.event("White balance applied: \(preset.rawValue)")
+                let device = self.videoInput?.device
+                let gains = device?.deviceWhiteBalanceGains
+                AppEventLog.event("White balance applied: \(preset.rawValue)", category: .whiteBalance, traceID: traceID, fields: [
+                    "device": device?.localizedName ?? "none",
+                    "mode": device.map { String(describing: $0.whiteBalanceMode) } ?? "none",
+                    "redGain": gains.map { String(format: "%.3f", $0.redGain) } ?? "none",
+                    "greenGain": gains.map { String(format: "%.3f", $0.greenGain) } ?? "none",
+                    "blueGain": gains.map { String(format: "%.3f", $0.blueGain) } ?? "none",
+                    "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - wbStartedAt) * 1000)
+                ])
             } else {
                 requestedWhiteBalancePreset = previousPreset
                 _ = applyWhiteBalancePresetToCurrentCamera(previousPreset)
@@ -2478,7 +2816,13 @@ final class CameraManager: NSObject, ObservableObject {
                     ? "Couldn’t enable Auto white balance."
                     : "Manual white balance isn’t available on this lens.")
             } else {
-                AppEventLog.event("White balance applied after camera handoff: \(preset.rawValue)")
+                let device = self.videoInput?.device
+                AppEventLog.event("White balance applied after camera handoff: \(preset.rawValue)", category: .whiteBalance, traceID: traceID, fields: [
+                    "device": device?.localizedName ?? "none",
+                    "virtualDevice": String(device?.isVirtualDevice ?? false),
+                    "mode": device.map { String(describing: $0.whiteBalanceMode) } ?? "none",
+                    "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - wbStartedAt) * 1000)
+                ])
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
@@ -2825,8 +3169,12 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func prepareMicrophoneAndBeginRecording() {
         guard recordingState.requestsRecording else { return }
-        let requestID = microphonePermissionRequests.next()
+        let requestID = microphonePermissionRequests.next(reason: "prepare microphone for recording")
         let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        AppEventLog.deepEvent("MICROPHONE PREPARATION", category: .audio, traceID: activeRecordingTraceID, fields: [
+            "requestID": String(requestID), "authorization": String(authorization.rawValue),
+            "audioInputAttached": String(audioInput != nil)
+        ])
 
         if authorization == .notDetermined {
             awaitingMicrophonePermission = true
@@ -2877,15 +3225,26 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func startOrStopRecording() {
-        guard captureMode == .video || captureMode == .sloMo else { return }
+        guard captureMode == .video || captureMode == .sloMo else {
+            AppEventLog.guardRejected("startOrStopRecording", reason: "capture mode is not recordable", fields: ["mode": captureMode.rawValue])
+            return
+        }
+        let queueTicket = AppEventLog.queueScheduled("record button action", category: .recording, traceID: activeRecordingTraceID)
         sessionQueue.async { [weak self] in
-            guard let self, !self.recordingState.isFinalizing else { return }
+            AppEventLog.queueStarted(queueTicket)
+            guard let self else { return }
+            guard !self.recordingState.isFinalizing else {
+                AppEventLog.guardRejected("startOrStopRecording", reason: "recording is finalizing", traceID: self.activeRecordingTraceID)
+                return
+            }
 
             if self.recordingState.requestsRecording {
-                AppEventLog.event("Recording stop requested")
+                AppEventLog.event("Recording stop requested", category: .recording, traceID: self.activeRecordingTraceID,
+                                  fields: ["movieOutputRecording": String(self.movieOutput.isRecording),
+                                           "state": String(describing: self.recordingState)])
                 let wasWaitingForMicrophone = self.awaitingMicrophonePermission
-                _ = self.recordingStartRequests.next()
-                _ = self.microphonePermissionRequests.next()
+                _ = self.recordingStartRequests.next(reason: "user requested recording stop")
+                _ = self.microphonePermissionRequests.next(reason: "recording stop invalidates microphone request")
                 self.awaitingMicrophonePermission = false
                 self.storageGuard.stopMonitoring()
                 self.stopLiveMetrics()
@@ -2897,6 +3256,7 @@ final class CameraManager: NSObject, ObservableObject {
                     self.movieOutput.stopRecording()
                 } else if wasWaitingForMicrophone {
                     self.transitionRecordingState(to: .idle, resetClock: true)
+                    self.closeRecordingDiagnostics(reason: "cancelled while waiting for microphone", result: "cancelled")
                 } else {
                     // A second tap arrived while AVCaptureMovieFileOutput was still starting.
                     // If didStart arrives later, stop and discard that canceled startup clip.
@@ -2905,8 +3265,28 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
 
-            guard !self.isCapturingPhoto, !self.lensTransitionCoordinator.hasActiveTransition else { return }
-            AppEventLog.event("Recording start requested: \(self.captureMode.rawValue) \(self.hudResolutionLabel) \(self.hudFrameRateLabel ?? "")fps")
+            guard !self.isCapturingPhoto, !self.lensTransitionCoordinator.hasActiveTransition else {
+                AppEventLog.guardRejected("recording start", reason: "camera busy", fields: [
+                    "capturingPhoto": String(self.isCapturingPhoto),
+                    "lensTransition": String(self.lensTransitionCoordinator.hasActiveTransition)
+                ])
+                return
+            }
+            self.activeRecordingTraceID = AppEventLog.makeTraceID("RECORD")
+            self.recordingRequestStartedAt = ProcessInfo.processInfo.systemUptime
+            self.recordingSegmentIndex = 1
+            self.lastExtremeRecordingHealthSecond = -1
+            let traceID = self.activeRecordingTraceID
+            AppEventLog.event("========== RECORDING START REQUEST =========", category: .recording, traceID: traceID, fields: [
+                "mode": self.captureMode.rawValue,
+                "resolution": self.hudResolutionLabel,
+                "fps": self.hudFrameRateLabel ?? "unknown",
+                "codec": self.activeVideoCodec,
+                "compression": self.videoCompression.rawValue,
+                "camera": self.cameraPosition.rawValue,
+                "device": self.videoInput?.device.localizedName ?? "none",
+                "requestedZoom": String(format: "%.3f", self.requestedZoom)
+            ])
             let splitDuration = Double(UserDefaults.standard.integer(forKey: "splitMinutes")) * 60
             self.storageProtectionStopIssued = false
             self.transitionRecordingState(
@@ -3121,6 +3501,32 @@ final class CameraManager: NSObject, ObservableObject {
         refreshAuxiliaryOutputs: Bool = true,
         requestedCodec: String? = nil
     ) -> CGFloat? {
+        let transactionTrace = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("CAPTURE-TX") : nil
+        let transactionStart = ProcessInfo.processInfo.systemUptime
+        let oldDeviceForTrace = videoInput?.device
+        let oldDimensionsForTrace = oldDeviceForTrace.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
+        let oldFPSForTrace: Double = oldDeviceForTrace.map {
+            let duration = $0.activeVideoMinFrameDuration.seconds
+            return duration > 0 ? 1 / duration : 0
+        } ?? 0
+        let beforeTraceState: [String: String] = [
+            "device": oldDeviceForTrace?.localizedName ?? "none",
+            "format": oldDimensionsForTrace.map { "\($0.width)x\($0.height)" } ?? "none",
+            "fps": String(format: "%.2f", oldFPSForTrace),
+            "deviceZoom": oldDeviceForTrace.map { String(format: "%.3f", Double($0.videoZoomFactor)) } ?? "none",
+            "requestedZoom": String(format: "%.3f", Double(requestedZoom)),
+            "inputs": String(session.inputs.count),
+            "outputs": String(session.outputs.count)
+        ]
+        let targetDimensionsForTrace = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        AppEventLog.deepEvent("CAPTURE TRANSACTION REQUEST", category: .session, traceID: transactionTrace, fields: [
+            "targetDevice": desiredDevice.localizedName,
+            "targetFormat": "\(targetDimensionsForTrace.width)x\(targetDimensionsForTrace.height)",
+            "targetFPS": String(format: "%.2f", frameRate),
+            "photoDimensions": photoDimensions.map { "\($0.width)x\($0.height)" } ?? "none",
+            "requestedCodec": requestedCodec ?? activeVideoCodec,
+            "refreshAuxiliaryOutputs": String(refreshAuxiliaryOutputs)
+        ])
         // Any input/format transaction makes proof from the previous capture graph unusable,
         // including attempts that fail before AVFoundation accepts the replacement.
         invalidateVerifiedHighOutputProvenance()
@@ -3128,7 +3534,7 @@ final class CameraManager: NSObject, ObservableObject {
         let oldInput = videoInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
-        let torchRequestID = torchRequests.next()
+        let torchRequestID = torchRequests.next(reason: "capture configuration transaction")
         let shouldRetryTorchAfterPreviewHandoff = shouldPreserveTorch &&
             isSwitchingInput &&
             captureMode == .video &&
@@ -3162,8 +3568,14 @@ final class CameraManager: NSObject, ObservableObject {
                 replacementInput = preparedReplacementInput
             } else {
                 do {
+                    let inputStart = ProcessInfo.processInfo.systemUptime
                     replacementInput = try AVCaptureDeviceInput(device: desiredDevice)
+                    AppEventLog.deepEvent("CAPTURE TX REPLACEMENT INPUT CREATED", category: .device, traceID: transactionTrace, fields: [
+                        "device": desiredDevice.localizedName,
+                        "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - inputStart) * 1000)
+                    ])
                 } catch {
+                    AppEventLog.log(error: error, prefix: "CAPTURE TX REPLACEMENT INPUT FAILED", category: .device, traceID: transactionTrace)
                     showError("Couldn’t access the selected camera.")
                     return nil
                 }
@@ -3188,13 +3600,24 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
+        let beginConfigurationAt = ProcessInfo.processInfo.systemUptime
         session.beginConfiguration()
+        AppEventLog.deepEvent("SESSION beginConfiguration", category: .session, traceID: transactionTrace, fields: [
+            "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - transactionStart) * 1000),
+            "switchingInput": String(isSwitchingInput)
+        ])
         var committed = false
         if refreshAuxiliaryOutputs {
             configureLiveMetrics()
         }
         defer {
-            if !committed { session.commitConfiguration() }
+            if !committed {
+                let fallbackCommitStart = ProcessInfo.processInfo.systemUptime
+                session.commitConfiguration()
+                AppEventLog.deepEvent("SESSION fallback commitConfiguration", category: .session, level: .warning, traceID: transactionTrace, fields: [
+                    "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - fallbackCommitStart) * 1000)
+                ])
+            }
             restoreSuspendedTorchIfPossible()
             if committed, shouldRetryTorchAfterPreviewHandoff {
                 scheduleTorchRestoreAfterLensHandoff(on: desiredDevice, requestID: torchRequestID)
@@ -3204,6 +3627,10 @@ final class CameraManager: NSObject, ObservableObject {
         if isSwitchingInput {
             if let oldInput { session.removeInput(oldInput) }
             guard let replacementInput, session.canAddInput(replacementInput) else {
+                AppEventLog.guardRejected("capture transaction input replacement", reason: "session cannot add replacement input", traceID: transactionTrace, fields: [
+                    "targetDevice": desiredDevice.localizedName,
+                    "oldDevice": oldInput?.device.localizedName ?? "none"
+                ])
                 if let oldInput, session.canAddInput(oldInput) {
                     session.addInput(oldInput)
                     videoInput = oldInput
@@ -3218,9 +3645,25 @@ final class CameraManager: NSObject, ObservableObject {
 
         let displayedZoom = snappedZoomFactor(requestedZoom, for: desiredDevice)
         do {
+            let lockRequestedAt = ProcessInfo.processInfo.systemUptime
             try desiredDevice.lockForConfiguration()
+            let lockWaitMs = (ProcessInfo.processInfo.systemUptime - lockRequestedAt) * 1000
+            AppEventLog.deepEvent("DEVICE LOCK ACQUIRED", category: .device, traceID: transactionTrace, fields: [
+                "device": desiredDevice.localizedName,
+                "waitMs": String(format: "%.2f", lockWaitMs)
+            ])
+            if lockWaitMs > 100 {
+                AppEventLog.event("SLOW DEVICE LOCK", category: .performance, level: .warning, traceID: transactionTrace,
+                                  fields: ["waitMs": String(format: "%.2f", lockWaitMs), "device": desiredDevice.localizedName])
+            }
             do {
-                defer { desiredDevice.unlockForConfiguration() }
+                let lockHeldAt = ProcessInfo.processInfo.systemUptime
+                defer {
+                    let heldMs = (ProcessInfo.processInfo.systemUptime - lockHeldAt) * 1000
+                    desiredDevice.unlockForConfiguration()
+                    AppEventLog.deepEvent("DEVICE LOCK RELEASED", category: .device, traceID: transactionTrace,
+                                          fields: ["heldMs": String(format: "%.2f", heldMs)])
+                }
 
                 desiredDevice.activeFormat = format
                 desiredDevice.automaticallyAdjustsVideoHDREnabled = effectiveCodec != "H264"
@@ -3253,14 +3696,46 @@ final class CameraManager: NSObject, ObservableObject {
                 photoOutput.maxPhotoDimensions = photoDimensions
             }
 
+            let commitStart = ProcessInfo.processInfo.systemUptime
             session.commitConfiguration()
+            let commitMs = (ProcessInfo.processInfo.systemUptime - commitStart) * 1000
             committed = true
-            setLiveMetricsConnectionEnabled(recordingState.requestsRecording && movieOutput.isRecording)
+            AppEventLog.deepEvent("SESSION commitConfiguration", category: .session, traceID: transactionTrace, fields: [
+                "commitMs": String(format: "%.2f", commitMs),
+                "transactionMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - transactionStart) * 1000),
+                "beginToCommitMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - beginConfigurationAt) * 1000)
+            ])
+            if commitMs > 250 {
+                AppEventLog.event("SLOW SESSION COMMIT", category: .performance, level: .warning, traceID: transactionTrace,
+                                  fields: ["commitMs": String(format: "%.2f", commitMs)])
+            }
+            setLiveMetricsConnectionEnabled(
+                (recordingState.requestsRecording && movieOutput.isRecording) ||
+                (AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
+            )
             rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
             requestedZoom = displayedZoom
             if shouldPreserveTorch, isSwitchingInput {
                 torchRestoreDevice = desiredDevice
             }
+            let afterDimensions = CMVideoFormatDescriptionGetDimensions(desiredDevice.activeFormat.formatDescription)
+            let afterDuration = desiredDevice.activeVideoMinFrameDuration.seconds
+            let afterFPS = afterDuration > 0 ? 1 / afterDuration : 0
+            let afterTraceState: [String: String] = [
+                "device": desiredDevice.localizedName,
+                "format": "\(afterDimensions.width)x\(afterDimensions.height)",
+                "fps": String(format: "%.2f", afterFPS),
+                "deviceZoom": String(format: "%.3f", Double(desiredDevice.videoZoomFactor)),
+                "requestedZoom": String(format: "%.3f", Double(displayedZoom)),
+                "inputs": String(session.inputs.count),
+                "outputs": String(session.outputs.count)
+            ]
+            AppEventLog.stateDiff("CAPTURE TRANSACTION", before: beforeTraceState, after: afterTraceState,
+                                  traceID: transactionTrace, category: .session)
+            AppEventLog.deepEvent("CAPTURE TRANSACTION COMPLETE", category: .session, traceID: transactionTrace, fields: [
+                "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - transactionStart) * 1000),
+                "displayedZoom": String(format: "%.3f", Double(displayedZoom))
+            ])
             return displayedZoom
         } catch {
             if isSwitchingInput {
@@ -3274,6 +3749,7 @@ final class CameraManager: NSObject, ObservableObject {
                     torchRestoreDevice = nil
                 }
             }
+            AppEventLog.log(error: error, prefix: "CAPTURE TRANSACTION FAILED", category: .session, traceID: transactionTrace)
             showError("Couldn’t configure the selected camera format.")
             return nil
         }
@@ -3431,9 +3907,31 @@ final class CameraManager: NSObject, ObservableObject {
 
     @discardableResult
     private func applyWhiteBalancePreset(_ preset: WhiteBalancePreset, to device: AVCaptureDevice) -> Bool {
+        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("WBHW") : nil
+        let lockRequestedAt = ProcessInfo.processInfo.systemUptime
         do {
             try device.lockForConfiguration()
-            defer { device.unlockForConfiguration() }
+            let lockAcquiredAt = ProcessInfo.processInfo.systemUptime
+            let beforeGains = device.deviceWhiteBalanceGains
+            AppEventLog.deepEvent("WB DEVICE LOCK ACQUIRED", category: .whiteBalance, traceID: traceID, fields: [
+                "device": device.localizedName,
+                "waitMs": String(format: "%.3f", (lockAcquiredAt - lockRequestedAt) * 1000),
+                "modeBefore": String(describing: device.whiteBalanceMode),
+                "beforeR": String(format: "%.3f", beforeGains.redGain),
+                "beforeG": String(format: "%.3f", beforeGains.greenGain),
+                "beforeB": String(format: "%.3f", beforeGains.blueGain)
+            ])
+            defer {
+                let afterGains = device.deviceWhiteBalanceGains
+                device.unlockForConfiguration()
+                AppEventLog.deepEvent("WB DEVICE UNLOCK", category: .whiteBalance, traceID: traceID, fields: [
+                    "heldMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - lockAcquiredAt) * 1000),
+                    "modeAfter": String(describing: device.whiteBalanceMode),
+                    "afterR": String(format: "%.3f", afterGains.redGain),
+                    "afterG": String(format: "%.3f", afterGains.greenGain),
+                    "afterB": String(format: "%.3f", afterGains.blueGain)
+                ])
+            }
 
             if preset == .auto {
                 if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
@@ -3462,9 +3960,19 @@ final class CameraManager: NSObject, ObservableObject {
             gains.redGain = min(max(gains.redGain, 1), maximum)
             gains.greenGain = min(max(gains.greenGain, 1), maximum)
             gains.blueGain = min(max(gains.blueGain, 1), maximum)
+            AppEventLog.deepEvent("WB LOCKED GAINS TARGET", category: .whiteBalance, traceID: traceID, fields: [
+                "preset": preset.rawValue,
+                "temperature": String(format: "%.1f", temperature),
+                "tint": String(format: "%.1f", preset.tint),
+                "red": String(format: "%.3f", gains.redGain),
+                "green": String(format: "%.3f", gains.greenGain),
+                "blue": String(format: "%.3f", gains.blueGain),
+                "maxGain": String(format: "%.3f", maximum)
+            ])
             device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
             return true
         } catch {
+            AppEventLog.log(error: error, prefix: "White balance device configuration failed", category: .whiteBalance, traceID: traceID)
             return false
         }
     }
@@ -4416,8 +4924,13 @@ final class CameraManager: NSObject, ObservableObject {
         requestedMode: CaptureMode? = nil
     ) -> Bool {
         invalidateVerifiedHighOutputProvenance()
+        let outputTraceID = activeRecordingTraceID ?? (AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("OUTPUT") : nil)
+        let outputStartedAt = ProcessInfo.processInfo.systemUptime
         let requestSnapshot = currentOutputConfigurationRequestSnapshot()
-        guard let connection = movieOutput.connection(with: .video) else { return false }
+        guard let connection = movieOutput.connection(with: .video) else {
+            AppEventLog.guardRejected("configureMovieOutputSettings", reason: "movie output video connection missing", traceID: outputTraceID)
+            return false
+        }
 
         let effectiveMode = requestedMode ?? captureMode
         let effectivePosition = requestedPosition ?? cameraPosition
@@ -4435,6 +4948,16 @@ final class CameraManager: NSObject, ObservableObject {
             codec: effectiveCodec,
             compression: effectiveCompression
         )
+        AppEventLog.deepEvent("MOVIE OUTPUT CONFIG REQUEST", category: .video, traceID: outputTraceID, fields: [
+            "mode": effectiveMode.rawValue,
+            "position": effectivePosition.rawValue,
+            "resolution": effectiveResolution.rawValue,
+            "fps": String(format: "%.1f", effectiveFPS),
+            "codec": effectiveCodec,
+            "compression": effectiveCompression.rawValue,
+            "expectedBitrate": String(Int(expectedBitRate)),
+            "availableCodecs": movieOutput.availableVideoCodecTypes.map(\.rawValue).joined(separator: ",")
+        ])
 
         let shouldMirror = effectivePosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
         if connection.isVideoMirroringSupported {
@@ -4466,7 +4989,14 @@ final class CameraManager: NSObject, ObservableObject {
                 self.codecAvailabilityMessage = message
             }
         }
-        guard codecAvailable else { return false }
+        guard codecAvailable else {
+            AppEventLog.event("MOVIE OUTPUT CODEC REJECTED", category: .video, level: .warning, traceID: outputTraceID, fields: [
+                "requestedCodec": preferred.rawValue,
+                "availableCodecs": movieOutput.availableVideoCodecTypes.map(\.rawValue).joined(separator: ","),
+                "supportedKeys": supportedKeys.sorted().joined(separator: ",")
+            ])
+            return false
+        }
 
         var settings: [String: Any] = [AVVideoCodecKey: preferred]
         if effectiveCompression != .high, supportedKeys.contains(AVVideoCompressionPropertiesKey) {
@@ -4479,6 +5009,14 @@ final class CameraManager: NSObject, ObservableObject {
         movieOutput.setOutputSettings(settings, for: connection)
 
         let applied = movieOutput.outputSettings(for: connection)
+        let appliedCompression = applied[AVVideoCompressionPropertiesKey] as? [String: Any]
+        AppEventLog.deepEvent("MOVIE OUTPUT CONFIG READBACK", category: .video, traceID: outputTraceID, fields: [
+            "codec": applied[AVVideoCodecKey] as? String ?? "missing",
+            "bitrate": (appliedCompression?[AVVideoAverageBitRateKey] as? NSNumber).map { String($0.int64Value) } ?? "default",
+            "mirrored": String(connection.isVideoMirrored),
+            "stabilization": String(describing: connection.preferredVideoStabilizationMode),
+            "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - outputStartedAt) * 1000)
+        ])
         guard (applied[AVVideoCodecKey] as? String) == preferred.rawValue else {
             let message = preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
                 ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
@@ -4524,6 +5062,10 @@ final class CameraManager: NSObject, ObservableObject {
                 expectedStabilization: expectedStabilization
             )
         }
+        AppEventLog.deepEvent("MOVIE OUTPUT CONFIG COMPLETE", category: .video, traceID: outputTraceID, fields: [
+            "result": "success",
+            "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - outputStartedAt) * 1000)
+        ])
         return true
     }
 
@@ -4617,8 +5159,15 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func beginPhotoCapture() {
-        guard activePhotoCaptureID == nil else { return }
+        guard activePhotoCaptureID == nil else {
+            AppEventLog.guardRejected("beginPhotoCapture", reason: "another hardware photo capture is active",
+                                      fields: ["activeCaptureID": String(activePhotoCaptureID ?? -1)])
+            return
+        }
         guard session.isRunning else {
+            AppEventLog.event("PHOTO CAPTURE REJECTED", category: .photo, level: .warning,
+                              fields: ["reason": "session not running"])
+
             burstRemaining = 0
             burstStopRequested = false
             publish { self.isCapturingPhoto = false }
@@ -4627,6 +5176,14 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let isBurst = burstRemaining > 0
+        let burstOrdinal = isBurst ? max(1, burstRequestedCount - burstRemaining + 1) : nil
+        let traceID: String
+        if isBurst, let parent = activeBurstTraceID {
+            traceID = "\(parent)-P\(burstOrdinal ?? 0)"
+        } else {
+            traceID = AppEventLog.makeTraceID("PHOTO")
+        }
+        let captureStartedAt = ProcessInfo.processInfo.systemUptime
         let aspect = isBurst ? burstAspect : (UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3")
         let megapixels = isBurst ? burstMegapixels : selectedPhotoMegapixels
         let useHEIC = photoFileFormat == "HEIC" && photoOutput.availablePhotoCodecTypes.contains(.hevc)
@@ -4669,26 +5226,53 @@ final class CameraManager: NSObject, ObservableObject {
             filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
             isBurst: isBurst,
             requestedFlash: requestedFlash.rawValue,
-            appliedFlash: appliedFlashLabel
+            appliedFlash: appliedFlashLabel,
+            traceID: traceID,
+            startedAt: captureStartedAt,
+            burstOrdinal: burstOrdinal
         )
         activePhotoCaptureID = captureID
         activePhotoCaptureIsBurst = isBurst
-        AppEventLog.event(
-            "Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG"), " +
-            "aspect=\(aspect), mirrored=\(mirrored), flashRequested=\(requestedFlash.rawValue), " +
-            "flashApplied=\(appliedFlashLabel), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
-        )
-        if !isBurst {
-            refreshAvailableStorage()
-        }
+        let activeDevice = videoInput?.device
+        let activeDimensions = activeDevice.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
+        AppEventLog.event("PHOTO CAPTURE REQUEST", category: isBurst ? .burst : .photo, traceID: traceID, fields: [
+            "captureID": String(captureID),
+            "burstOrdinal": burstOrdinal.map(String.init) ?? "none",
+            "requestedMP": String(megapixels),
+            "codec": useHEIC ? "HEIC" : "JPEG",
+            "aspect": aspect,
+            "mirrored": String(mirrored),
+            "flashRequested": requestedFlash.rawValue,
+            "flashApplied": appliedFlashLabel,
+            "responsive": String(photoOutput.isResponsiveCaptureEnabled),
+            "device": activeDevice?.localizedName ?? "none",
+            "activePreviewFormat": activeDimensions.map { "\($0.width)x\($0.height)" } ?? "none",
+            "maxPhotoDimensions": "\(dimensions.width)x\(dimensions.height)",
+            "filename": photoCaptureContexts[captureID]?.filename ?? "unknown"
+        ])
+        if !isBurst { refreshAvailableStorage() }
+        let submitAt = ProcessInfo.processInfo.systemUptime
         photoOutput.capturePhoto(with: settings, delegate: self)
+        AppEventLog.deepEvent("capturePhoto() RETURNED", category: .photo, traceID: traceID, fields: [
+            "callMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - submitAt) * 1000),
+            "elapsedFromRequestMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - captureStartedAt) * 1000)
+        ])
     }
 
     private func beginRecording() {
+        let traceID = activeRecordingTraceID
         guard recordingState.requestsRecording, session.isRunning, movieOutput.isRecording == false else {
+            AppEventLog.guardRejected("beginRecording", reason: "recording preconditions failed", traceID: traceID, fields: [
+                "requestsRecording": String(recordingState.requestsRecording),
+                "sessionRunning": String(session.isRunning),
+                "movieOutputRecording": String(movieOutput.isRecording)
+            ])
             transitionRecordingState(to: .idle, resetClock: true)
             return
         }
+        AppEventLog.deepEvent("RECORDING PREPARATION BEGIN", category: .recording, traceID: traceID, fields: [
+            "elapsedFromUserRequestMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - recordingRequestStartedAt) * 1000)
+        ])
 
         var reconfiguredForRecording = false
         if captureMode == .video {
@@ -4743,10 +5327,11 @@ final class CameraManager: NSObject, ObservableObject {
         // rear 4K60 and Slo-Mo now), start immediately instead of imposing the old AF/AE wait. Only
         // keep the settle window for the recovery path that actually had to reconfigure hardware.
         let readinessDeadline = reconfiguredForRecording ? Date().addingTimeInterval(1.0) : Date()
-        let storageStartRequestID = recordingStartRequests.next()
+        let storageStartRequestID = recordingStartRequests.next(reason: "recording storage safety check")
         let reserve = criticalStorageReserveBytes
         activeCriticalStorageReserveBytes = reserve
-        AppEventLog.event("Recording storage check requested: reserve=\(reserve), bitrate=\(Int(estimatedVideoBitsPerSecond))")
+        AppEventLog.event("Recording storage check requested: reserve=\(reserve), bitrate=\(Int(estimatedVideoBitsPerSecond))", category: .storage, traceID: traceID,
+                          fields: ["reconfiguredForRecording": String(reconfiguredForRecording)])
         storageGuard.checkNow(criticalReserveBytes: reserve) { [weak self] snapshot in
             guard let self else { return }
             self.sessionQueue.async {
@@ -4754,7 +5339,8 @@ final class CameraManager: NSObject, ObservableObject {
                       self.recordingState.requestsRecording,
                       self.appLifecyclePhase == .active,
                       self.session.isRunning else {
-                    AppEventLog.event("Stale recording storage check dropped")
+                    AppEventLog.staleRequest(token: "recordingStartRequests", requestID: storageStartRequestID,
+                                                latestID: self.recordingStartRequests.current, operation: "recording storage completion", traceID: self.activeRecordingTraceID)
                     return
                 }
                 guard let snapshot else {
@@ -4798,7 +5384,13 @@ final class CameraManager: NSObject, ObservableObject {
     ) {
         guard recordingStartRequests.isLatest(storageStartRequestID),
               recordingState.requestsRecording,
-              !movieOutput.isRecording else { return }
+              !movieOutput.isRecording else {
+            AppEventLog.guardRejected("startMovieOutputWhenReady", reason: "request/state changed", traceID: activeRecordingTraceID, fields: [
+                "requestID": String(storageStartRequestID), "latestID": String(recordingStartRequests.current),
+                "requestsRecording": String(recordingState.requestsRecording), "movieOutputRecording": String(movieOutput.isRecording)
+            ])
+            return
+        }
         if let device = videoInput?.device,
            (device.isAdjustingFocus || device.isAdjustingExposure),
             Date() < deadline {
@@ -4812,16 +5404,30 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        guard recordingStartRequests.isLatest(storageStartRequestID), recordingState.requestsRecording else { return }
+        guard recordingStartRequests.isLatest(storageStartRequestID), recordingState.requestsRecording else {
+            AppEventLog.staleRequest(token: "recordingStartRequests", requestID: storageStartRequestID,
+                                     latestID: recordingStartRequests.current, operation: "movie output start", traceID: activeRecordingTraceID)
+            return
+        }
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        AppEventLog.event("Starting movie output: \(filename)")
+        movieStartCallAt = ProcessInfo.processInfo.systemUptime
+        AppEventLog.event("MOVIE OUTPUT startRecording()", category: .recording, traceID: activeRecordingTraceID, fields: [
+            "filename": filename,
+            "segment": String(recordingSegmentIndex),
+            "elapsedFromUserRequestMs": String(format: "%.2f", (movieStartCallAt - recordingRequestStartedAt) * 1000),
+            "focusAdjusting": String(videoInput?.device.isAdjustingFocus ?? false),
+            "exposureAdjusting": String(videoInput?.device.isAdjustingExposure ?? false)
+        ])
         storageGuard.startMonitoring(criticalReserveBytes: activeCriticalStorageReserveBytes) { [weak self] snapshot in
             self?.sessionQueue.async { [weak self] in
                 self?.applyStorageSnapshot(snapshot, source: "recording monitor")
             }
         }
         movieOutput.startRecording(to: url, recordingDelegate: self)
+        AppEventLog.deepEvent("MOVIE OUTPUT startRecording() RETURNED", category: .recording, traceID: activeRecordingTraceID, fields: [
+            "callMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - movieStartCallAt) * 1000)
+        ])
         afterStart()
     }
 
@@ -4966,9 +5572,28 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func finishFinalizingIfPossible() {
         guard pendingVideoSaves == 0 else { return }
+        closeRecordingDiagnostics(reason: "finalization complete", result: "success")
         transitionRecordingState(to: .idle, resetClock: true)
         storageProtectionStopIssued = false
         endBackgroundMediaSaveIfPossible()
+    }
+
+    private func closeRecordingDiagnostics(reason: String, result: String) {
+        guard let traceID = activeRecordingTraceID else { return }
+        AppEventLog.event("========== RECORDING TRACE END =========", category: .recording,
+                          level: result == "success" ? .info : .warning, traceID: traceID, fields: [
+                            "reason": reason,
+                            "result": result,
+                            "segments": String(recordingSegmentIndex),
+                            "lifetimeMs": recordingRequestStartedAt > 0
+                                ? String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - recordingRequestStartedAt) * 1000)
+                                : "unknown"
+                          ])
+        activeRecordingTraceID = nil
+        recordingRequestStartedAt = 0
+        movieStartCallAt = 0
+        recordingSegmentIndex = 0
+        lastExtremeRecordingHealthSecond = -1
     }
 
     private func restoreIdleCaptureConfigurationAfterRecording() {
@@ -5068,7 +5693,22 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func showError(_ message: String) {
-        AppEventLog.event("ERROR: \(message)")
+        AppEventLog.event("ERROR: \(message)", category: .error, level: .error, traceID: activeRecordingTraceID, fields: [
+            "mode": captureMode.rawValue,
+            "camera": cameraPosition.rawValue,
+            "recordingState": String(describing: recordingState),
+            "sessionRunning": String(session.isRunning),
+            "sessionInterrupted": String(session.isInterrupted),
+            "requestedZoom": String(format: "%.3f", requestedZoom),
+            "device": videoInput?.device.localizedName ?? "none"
+        ])
+        if AppEventLog.extremeDiagnosticsEnabled {
+            sessionQueue.async { [weak self] in
+                guard let self else { return }
+                self.logCaptureConfiguration("automatic error context", label: "ERROR CAPTURE READBACK")
+                self.logSessionSnapshot("automatic error context: \(message)")
+            }
+        }
         postStatus(message)
     }
 }
@@ -5085,10 +5725,15 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             }
 
             self.startLiveMetrics()
-            AppEventLog.event(
-                "Recording start callback: microphoneAuthorized=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue), " +
-                "audioInputAttached=\(self.audioInput != nil)"
-            )
+            let callbackAt = ProcessInfo.processInfo.systemUptime
+            AppEventLog.event("RECORDING DID START CALLBACK", category: .recording, traceID: self.activeRecordingTraceID, fields: [
+                "file": fileURL.lastPathComponent,
+                "segment": String(self.recordingSegmentIndex),
+                "startCallToCallbackMs": self.movieStartCallAt > 0 ? String(format: "%.2f", (callbackAt - self.movieStartCallAt) * 1000) : "unknown",
+                "userRequestToCallbackMs": self.recordingRequestStartedAt > 0 ? String(format: "%.2f", (callbackAt - self.recordingRequestStartedAt) * 1000) : "unknown",
+                "microphoneAuthorized": String(AVCaptureDevice.authorizationStatus(for: .audio).rawValue),
+                "audioInputAttached": String(self.audioInput != nil)
+            ])
             self.segmentTimer?.cancel()
             let splitDuration = self.recordingState.splitDuration
             if splitDuration > 0 {
@@ -5108,7 +5753,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
             // Validate and publish the recording state before collecting detailed diagnostics.
             // Snapshot formatting and disk I/O are handled asynchronously by AppEventLog.
-            AppEventLog.event("Recording started: \(fileURL.lastPathComponent)")
+            AppEventLog.event("Recording started: \(fileURL.lastPathComponent)", category: .recording, traceID: self.activeRecordingTraceID)
             self.logCaptureConfiguration(
                 "delegate callback",
                 label: "RECORDING START CALLBACK"
@@ -5123,7 +5768,17 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             let errorDetail = error.map { " error=\($0.localizedDescription)" } ?? ""
-            AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)\(errorDetail)")
+            AppEventLog.event("RECORDING DID FINISH CALLBACK", category: .recording, level: successful ? .info : .warning,
+                              traceID: self.activeRecordingTraceID, fields: [
+                                "file": outputFileURL.lastPathComponent,
+                                "success": String(successful),
+                                "segment": String(self.recordingSegmentIndex),
+                                "recordedDuration": String(format: "%.3f", self.movieOutput.recordedDuration.seconds),
+                                "recordedBytes": String(self.movieOutput.recordedFileSize),
+                                "error": error?.localizedDescription ?? "none"
+                              ])
+            AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)\(errorDetail)", category: .recording, traceID: self.activeRecordingTraceID)
+            if let error { AppEventLog.log(error: error, prefix: "Recording delegate error", category: .recording, traceID: self.activeRecordingTraceID) }
             self.stopLiveMetrics()
             self.storageGuard.stopMonitoring()
             self.segmentTimer?.cancel()
@@ -5133,6 +5788,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 self.transitionRecordingState(to: .idle, resetClock: true)
                 self.storageProtectionStopIssued = false
                 self.restoreIdleCaptureConfigurationAfterRecording()
+                self.closeRecordingDiagnostics(reason: "recording discarded/cancelled", result: "cancelled")
                 return
             }
 
@@ -5150,6 +5806,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 self.restoreIdleCaptureConfigurationAfterRecording()
                 let suffix = retained == nil ? "" : " It is kept in Recovery."
                 self.showError("Recording stopped: \(error?.localizedDescription ?? "Unknown error").\(suffix)")
+                self.closeRecordingDiagnostics(reason: "recording delegate failure", result: "failed")
                 return
             }
 
@@ -5161,9 +5818,15 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             )
 
             if shouldContinue {
+                self.recordingSegmentIndex += 1
+                AppEventLog.event("RECORDING SPLIT CONTINUE", category: .recording, traceID: self.activeRecordingTraceID,
+                                  fields: ["nextSegment": String(self.recordingSegmentIndex)])
                 self.transitionRecordingState(to: .starting(splitDuration: splitDuration))
                 self.beginRecording()
             } else {
+                AppEventLog.event("========== RECORDING CAPTURE COMPLETE =========", category: .recording, traceID: self.activeRecordingTraceID,
+                                  fields: ["segments": String(self.recordingSegmentIndex),
+                                           "totalRequestLifetimeMs": self.recordingRequestStartedAt > 0 ? String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - self.recordingRequestStartedAt) * 1000) : "unknown"])
                 self.transitionRecordingState(to: .finalizing, resetClock: true)
                 self.restoreIdleCaptureConfigurationAfterRecording()
                 self.finishFinalizingIfPossible()
@@ -5174,14 +5837,49 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 
 extension CameraManager: AVCapturePhotoCaptureDelegate {
+    func photoOutput(_ output: AVCapturePhotoOutput, willBeginCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        let captureID = resolvedSettings.uniqueID
+        sessionQueue.async {
+            guard let context = self.photoCaptureContexts[captureID] else { return }
+            AppEventLog.deepEvent("PHOTO willBeginCapture", category: context.isBurst ? .burst : .photo, traceID: context.traceID, fields: [
+                "captureID": String(captureID),
+                "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
+            ])
+        }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        let captureID = resolvedSettings.uniqueID
+        sessionQueue.async {
+            guard let context = self.photoCaptureContexts[captureID] else { return }
+            AppEventLog.deepEvent("PHOTO willCapturePhoto", category: context.isBurst ? .burst : .photo, traceID: context.traceID, fields: [
+                "captureID": String(captureID),
+                "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
+            ])
+        }
+    }
+
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         let captureID = photo.resolvedSettings.uniqueID
-        guard error == nil, let data = photo.fileDataRepresentation() else {
+        if let error {
             sessionQueue.async {
+                let trace = self.photoCaptureContexts[captureID]?.traceID
+                AppEventLog.log(error: error, prefix: "PHOTO PROCESSING CALLBACK FAILED", category: .photo, traceID: trace)
                 self.photoCaptureContexts.removeValue(forKey: captureID)
                 self.burstStopRequested = true
             }
-            showError(error?.localizedDescription ?? "Couldn’t create the photo file.")
+            showError(error.localizedDescription)
+            return
+        }
+        guard let data = photo.fileDataRepresentation() else {
+            sessionQueue.async {
+                let trace = self.photoCaptureContexts[captureID]?.traceID
+                AppEventLog.event("PHOTO FILE REPRESENTATION MISSING", category: .photo, level: .error, traceID: trace,
+                                  fields: ["captureID": String(captureID)])
+                self.photoCaptureContexts.removeValue(forKey: captureID)
+                self.burstStopRequested = true
+            }
+            showError("Couldn’t create the photo file.")
             return
         }
 
@@ -5189,35 +5887,73 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             guard let self, let context = self.photoCaptureContexts[captureID] else { return }
             self.pendingPhotoSaves += 1
             self.beginBackgroundMediaSaveIfNeeded()
-            AppEventLog.event(
-                "Photo processing started: captureID=\(captureID), filename=\(context.filename), " +
-                "flashRequested=\(context.requestedFlash), flashApplied=\(context.appliedFlash), " +
-                "pendingPhotoSaves=\(self.pendingPhotoSaves)"
-            )
+            let pixelWidth = photo.pixelBuffer.map { CVPixelBufferGetWidth($0) }
+            let pixelHeight = photo.pixelBuffer.map { CVPixelBufferGetHeight($0) }
+            let actualMP: String
+            if let pixelWidth, let pixelHeight {
+                actualMP = String(format: "%.2f", Double(pixelWidth * pixelHeight) / 1_000_000)
+            } else {
+                actualMP = "unknown"
+            }
+            AppEventLog.event("PHOTO PROCESSING CALLBACK", category: context.isBurst ? .burst : .photo, traceID: context.traceID, fields: [
+                "captureID": String(captureID),
+                "filename": context.filename,
+                "fileBytes": String(data.count),
+                "pixelDimensions": (pixelWidth != nil && pixelHeight != nil) ? "\(pixelWidth!)x\(pixelHeight!)" : "unknown",
+                "actualMP": actualMP,
+                "requestedMP": String(context.megapixels),
+                "flashRequested": context.requestedFlash,
+                "flashApplied": context.appliedFlash,
+                "pendingPhotoSaves": String(self.pendingPhotoSaves),
+                "hardwareToProcessedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
+            ])
+            if let pixelWidth, let pixelHeight {
+                let actual = Double(pixelWidth * pixelHeight) / 1_000_000
+                if actual + 0.6 < Double(context.megapixels) {
+                    AppEventLog.invariant("PHOTO RESOLUTION LOWER THAN REQUESTED", expected: "~\(context.megapixels)MP", actual: String(format: "%.2fMP", actual),
+                                          traceID: context.traceID, fields: ["dimensions": "\(pixelWidth)x\(pixelHeight)"])
+                }
+            }
             if !context.isBurst {
                 self.postStatus("Photo captured · saving…")
             }
 
+            let processingQueuedAt = ProcessInfo.processInfo.systemUptime
             self.storageQueue.async {
+                let processingStartedAt = ProcessInfo.processInfo.systemUptime
+                AppEventLog.deepEvent("PHOTO STORAGE QUEUE START", category: .photo, traceID: context.traceID,
+                                      fields: ["queueWaitMs": String(format: "%.2f", (processingStartedAt - processingQueuedAt) * 1000)])
                 guard let result = PhotoAspectProcessor.process(
                     data,
                     aspect: context.aspect,
-                    megapixels: context.megapixels
+                    megapixels: context.megapixels,
+                    traceID: context.traceID
                 ) else {
                     self.showError("Couldn’t process the photo. Please try again.")
                     self.completePhotoSave(captureID: captureID, context: context, success: false)
                     return
                 }
 
+                AppEventLog.deepEvent("PHOTOS SAVE REQUESTED", category: .save, traceID: context.traceID, fields: [
+                    "filename": context.filename,
+                    "bytes": String(result.count),
+                    "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
+                ])
                 PHPhotoLibrary.shared().performChanges({
                     let request = PHAssetCreationRequest.forAsset()
                     let options = PHAssetResourceCreationOptions()
                     options.originalFilename = context.filename
                     request.addResource(with: .photo, data: result, options: options)
                 }) { success, error in
-                    if !success {
-                        self.showError(error?.localizedDescription ?? "Couldn’t save the photo.")
+                    if let error {
+                        AppEventLog.log(error: error, prefix: "PHOTOS SAVE CALLBACK", category: .save, traceID: context.traceID)
                     }
+                    AppEventLog.event("PHOTOS SAVE CALLBACK", category: .save, level: success ? .info : .error, traceID: context.traceID, fields: [
+                        "success": String(success),
+                        "filename": context.filename,
+                        "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
+                    ])
+                    if !success { self.showError(error?.localizedDescription ?? "Couldn’t save the photo.") }
                     self.completePhotoSave(captureID: captureID, context: context, success: success)
                 }
             }
@@ -5228,6 +5964,14 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
         sessionQueue.async {
             self.photoCaptureContexts.removeValue(forKey: captureID)
             self.pendingPhotoSaves = max(0, self.pendingPhotoSaves - 1)
+            AppEventLog.event("PHOTO PIPELINE COMPLETE", category: context.isBurst ? .burst : .photo,
+                              level: success ? .info : .error, traceID: context.traceID, fields: [
+                "success": String(success),
+                "filename": context.filename,
+                "burstOrdinal": context.burstOrdinal.map(String.init) ?? "none",
+                "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000),
+                "pendingPhotoSaves": String(self.pendingPhotoSaves)
+            ])
 
             if !success {
                 self.burstStopRequested = true
@@ -5259,14 +6003,24 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             }
 
             let wasBurst = self.activePhotoCaptureIsBurst
+            let context = self.photoCaptureContexts[captureID]
             self.activePhotoCaptureID = nil
             self.activePhotoCaptureIsBurst = false
+
+            if let context {
+                AppEventLog.event("PHOTO HARDWARE CAPTURE COMPLETE", category: wasBurst ? .burst : .photo, traceID: context.traceID, fields: [
+                    "captureID": String(captureID),
+                    "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000),
+                    "error": error?.localizedDescription ?? "none"
+                ])
+            }
 
             if let error {
                 self.photoCaptureContexts.removeValue(forKey: captureID)
                 self.burstRemaining = 0
                 self.burstStopRequested = false
                 self.publish { self.isCapturingPhoto = false }
+                if let context { AppEventLog.log(error: error, prefix: "PHOTO HARDWARE CAPTURE FAILED", category: .photo, traceID: context.traceID) }
                 self.showError("Photo capture failed: \(error.localizedDescription)")
                 return
             }
@@ -5276,9 +6030,18 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 if self.burstRemaining > 0 && !self.burstStopRequested && self.session.isRunning {
                     self.beginPhotoCapture()
                 } else {
+                    let captured = self.burstRequestedCount - self.burstRemaining
                     self.burstRemaining = 0
                     self.burstStopRequested = false
                     self.publish { self.isCapturingPhoto = false }
+                    AppEventLog.event("========== BURST HARDWARE COMPLETE =========", category: .burst,
+                                      traceID: self.activeBurstTraceID, fields: [
+                        "requested": String(self.burstRequestedCount),
+                        "captured": String(max(0, captured)),
+                        "pendingSaves": String(self.pendingPhotoSaves)
+                    ])
+                    self.activeBurstTraceID = nil
+                    self.burstRequestedCount = 0
                 }
             } else {
                 // The hardware capture is finished. Cropping, resizing and Photos-library

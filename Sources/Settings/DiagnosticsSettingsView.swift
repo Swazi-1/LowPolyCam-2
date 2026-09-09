@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DiagnosticsSettingsView: View {
     @State private var loggingEnabled = AppEventLog.diagnosticsEnabled
+    @State private var extremeEnabled = AppEventLog.extremeDiagnosticsEnabled
 
     private var loggingBinding: Binding<Bool> {
         Binding(
@@ -9,6 +10,16 @@ struct DiagnosticsSettingsView: View {
             set: { value in
                 loggingEnabled = value
                 AppEventLog.setDiagnosticsEnabled(value)
+            }
+        )
+    }
+
+    private var extremeBinding: Binding<Bool> {
+        Binding(
+            get: { extremeEnabled },
+            set: { value in
+                extremeEnabled = value
+                AppEventLog.setExtremeDiagnosticsEnabled(value)
             }
         )
     }
@@ -24,10 +35,21 @@ struct DiagnosticsSettingsView: View {
                         subtitle: "Record detailed camera, settings, storage, save and session events for bug reports."
                     )
                 }
+
+
+                Toggle(isOn: extremeBinding) {
+                    SettingsToggleLabel(
+                        symbol: "waveform.path.ecg.rectangle.fill",
+                        color: .orange,
+                        title: "Extreme Bug Trace",
+                        subtitle: "Near-frame zoom/lens tracing, request tokens, queue timing, state diffs, guard failures and hardware readback."
+                    )
+                }
+                .disabled(!loggingEnabled)
             } header: {
                 Text("DIAGNOSTIC LOGGING")
             } footer: {
-                Text("Logging is off by default. When enabled, every app session creates a new numbered log. Older logs are never deleted automatically.")
+                Text("Extreme Bug Trace is enabled by default with diagnostics in this build. It records far more detail while keeping disk I/O off the camera queues and rate-limiting frame-level probes.")
             }
 
             Section("LOG FILES") {
@@ -52,6 +74,9 @@ struct DiagnosticsSettingsView: View {
         .navigationTitle("Diagnostics")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .onAppear { loggingEnabled = AppEventLog.diagnosticsEnabled }
+        .onAppear {
+            loggingEnabled = AppEventLog.diagnosticsEnabled
+            extremeEnabled = AppEventLog.extremeDiagnosticsEnabled
+        }
     }
 }
