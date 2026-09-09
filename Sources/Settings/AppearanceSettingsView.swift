@@ -23,25 +23,33 @@ struct AppearanceSettingsView: View {
             }
 
             Section {
-                ForEach(accentNames, id: \.self) { name in
-                    Button {
-                        appearance = name
-                    } label: {
-                        HStack(spacing: 12) {
-                            Circle()
-                                .fill(color(for: name))
-                                .frame(width: 26, height: 26)
-                            Text(name)
-                                .foregroundStyle(.primary)
-                            Spacer()
+                Menu {
+                    ForEach(accentNames, id: \.self) { name in
+                        Button {
+                            appearance = name
+                        } label: {
                             if appearance == name {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
-                                    .foregroundStyle(.blue)
+                                Label(name, systemImage: "checkmark")
+                            } else {
+                                Text(name)
                             }
                         }
-                        .contentShape(Rectangle())
                     }
+                } label: {
+                    HStack {
+                        Text("Camera Accent")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Circle()
+                            .fill(color(for: appearance))
+                            .frame(width: 18, height: 18)
+                        Text(appearance)
+                            .foregroundStyle(.secondary)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
                 }
 
                 if appearance == "Custom" {
@@ -51,6 +59,11 @@ struct AppearanceSettingsView: View {
                 Text("CAMERA ACCENT")
             } footer: {
                 Text("Accent color changes LowPolyCam's camera controls. Settings itself stays system-styled for readability.")
+            }
+
+            Section("PREVIEW") {
+                CameraAccentPreview(accent: color(for: appearance))
+                    .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
             }
         }
         .listStyle(.insetGrouped)
@@ -97,6 +110,54 @@ struct AppearanceSettingsView: View {
     }
 }
 
+private struct CameraAccentPreview: View {
+    let accent: Color
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.black)
+
+            VStack {
+                HStack(spacing: 18) {
+                    Image(systemName: "gearshape.fill")
+                    Spacer()
+                    Text("4K · 60")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .overlay(Capsule().stroke(accent.opacity(0.75)))
+                    Spacer()
+                    Image(systemName: "bolt.fill")
+                }
+                .foregroundStyle(accent)
+                .padding(.horizontal, 18)
+                .padding(.top, 14)
+
+                Spacer()
+
+                HStack(spacing: 26) {
+                    Text("0.5×")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white)
+                    ZStack {
+                        Circle().fill(.white).frame(width: 52, height: 52)
+                        Circle().stroke(accent, lineWidth: 4).frame(width: 62, height: 62)
+                    }
+                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                        .foregroundStyle(accent)
+                        .font(.title3)
+                }
+                .padding(.bottom, 16)
+            }
+        }
+        .frame(height: 180)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Camera accent preview")
+    }
+}
+
 struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
@@ -110,39 +171,49 @@ struct VideoPresetsView: View {
                     Button {
                         preview = preset
                     } label: {
-                        SettingsCheckmarkRow(
-                            title: preset.rawValue,
-                            subtitle: preset.detail,
-                            selected: preview == preset
-                        )
+                        HStack(spacing: 12) {
+                            Image(systemName: icon(for: preset))
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(iconColor(for: preset))
+                                .frame(width: 24)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(preset.rawValue)
+                                    .foregroundStyle(.primary)
+                                Text(preset.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.78)
+                            }
+
+                            Spacer(minLength: 6)
+                            if preview == preset {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        .contentShape(Rectangle())
                     }
                 }
             }
 
             Section {
-                HStack {
-                    Text("Resolution")
-                    Spacer()
-                    Text(preview.resolution.rawValue).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(preview.resolution.rawValue)
+                    Text("·")
+                    Text("\(preview.frameRate.rawValue) fps")
+                    Text("·")
+                    Text("HEVC")
+                    Text("·")
+                    Text(preview.compression.rawValue)
                 }
-                HStack {
-                    Text("Frame Rate")
-                    Spacer()
-                    Text("\(preview.frameRate.rawValue) fps").foregroundStyle(.secondary)
-                }
-                HStack {
-                    Text("Codec")
-                    Spacer()
-                    Text("HEVC").foregroundStyle(.secondary)
-                }
-                HStack {
-                    Text("Compression")
-                    Spacer()
-                    Text(preview.compression.rawValue).foregroundStyle(.secondary)
-                }
-            }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
 
-            Section {
                 Button {
                     camera.applyQuickPreset(preview) { success in
                         if success { dismiss() }
@@ -166,7 +237,7 @@ struct VideoPresetsView: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Video Presets")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear {
@@ -176,6 +247,26 @@ struct VideoPresetsView: View {
                 $0.compression == camera.videoCompression &&
                 camera.selectedVideoCodec == "HEVC"
             } ?? .balanced
+        }
+    }
+
+    private func icon(for preset: VideoQuickPreset) -> String {
+        switch preset {
+        case .balanced: return "slider.horizontal.3"
+        case .highQuality: return "sparkles"
+        case .allRounder: return "square.grid.2x2.fill"
+        case .allDay: return "battery.100percent"
+        case .social: return "person.2.fill"
+        }
+    }
+
+    private func iconColor(for preset: VideoQuickPreset) -> Color {
+        switch preset {
+        case .balanced: return .blue
+        case .highQuality: return .purple
+        case .allRounder: return .green
+        case .allDay: return .orange
+        case .social: return .pink
         }
     }
 }

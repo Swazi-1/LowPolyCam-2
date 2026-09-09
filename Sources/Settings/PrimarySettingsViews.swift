@@ -83,9 +83,23 @@ struct RecordVideoSettingsView: View {
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     private var formatOptions: [VideoFormatOption] {
-        camera.supportedVideoFormatPairs().map {
-            VideoFormatOption(resolution: $0.0, frameRate: $0.1)
+        camera.supportedVideoFormatPairs()
+            .map { VideoFormatOption(resolution: $0.0, frameRate: $0.1) }
+            .sorted { lhs, rhs in
+                let left = formatSortKey(lhs)
+                let right = formatSortKey(rhs)
+                return left > right
+            }
+    }
+
+    private func formatSortKey(_ option: VideoFormatOption) -> Int {
+        let resolutionRank: Int
+        switch option.resolution {
+        case .p4k: resolutionRank = 3
+        case .p1080: resolutionRank = 2
+        case .p720: resolutionRank = 1
         }
+        return resolutionRank * 1_000 + option.frameRate.rawValue
     }
 
     var body: some View {
@@ -116,19 +130,8 @@ struct RecordVideoSettingsView: View {
                     SettingsNavigationLabel(
                         symbol: "internaldrive.fill",
                         color: .blue,
-                        title: "Codec",
-                        value: camera.selectedVideoCodec == "HEVC" ? "HEVC" : "H.264"
-                    )
-                }
-
-                NavigationLink {
-                    CodecCompressionSettingsView(camera: camera)
-                } label: {
-                    SettingsNavigationLabel(
-                        symbol: "square.stack.3d.up.fill",
-                        color: .purple,
-                        title: "Compression",
-                        value: camera.videoCompression.rawValue
+                        title: "Codec & Compression",
+                        value: "\(camera.selectedVideoCodec == "HEVC" ? "HEVC" : "H.264") · \(camera.videoCompression.rawValue)"
                     )
                 }
             }
@@ -242,34 +245,31 @@ struct PhotoCaptureSettingsView: View {
     var body: some View {
         List {
             Section {
-                ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
-                    Button {
-                        camera.selectPhotoMegapixels(megapixels)
-                    } label: {
-                        SettingsCheckmarkRow(
-                            title: "\(megapixels) MP",
-                            selected: camera.selectedPhotoMegapixels == megapixels
-                        )
+                Picker("Megapixels", selection: megapixelBinding) {
+                    ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
+                        Text("\(megapixels) MP").tag(megapixels)
                     }
                 }
+                .pickerStyle(.menu)
+
+                Picker("Photos per Burst", selection: $burstCount) {
+                    Text("5").tag(5)
+                    Text("10").tag(10)
+                    Text("15").tag(15)
+                }
+                .pickerStyle(.menu)
             } header: {
                 Text("PHOTO QUALITY")
             } footer: {
-                Text("LowPolyCam keeps full sensor quality and saves at the selected megapixel count.")
+                Text("LowPolyCam keeps full sensor quality and saves at the selected megapixel count. Hold the shutter to start a burst and release it to stop early.")
             }
 
             Section("FORMAT") {
-                ForEach(["HEIC", "JPEG"], id: \.self) { format in
-                    Button {
-                        camera.photoFileFormat = format
-                    } label: {
-                        SettingsCheckmarkRow(
-                            title: format,
-                            subtitle: format == "HEIC" ? "Smaller files with high quality" : "Wider compatibility",
-                            selected: camera.photoFileFormat == format
-                        )
-                    }
+                Picker("Format", selection: photoFormatBinding) {
+                    Text("HEIC").tag("HEIC")
+                    Text("JPEG").tag("JPEG")
                 }
+                .pickerStyle(.menu)
             }
 
             Section("ASPECT RATIO") {
@@ -282,18 +282,6 @@ struct PhotoCaptureSettingsView: View {
                         SettingsCheckmarkRow(title: aspect, selected: photoAspect == aspect)
                     }
                 }
-            }
-
-            Section {
-                Picker("Photos per Burst", selection: $burstCount) {
-                    Text("5").tag(5)
-                    Text("10").tag(10)
-                    Text("15").tag(15)
-                }
-            } header: {
-                Text("BURST")
-            } footer: {
-                Text("Hold the shutter to start a burst and release it to stop early.")
             }
 
             Section {
@@ -316,6 +304,20 @@ struct PhotoCaptureSettingsView: View {
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear { camera.updatePhotoAspectSelection(photoAspect) }
+    }
+
+    private var megapixelBinding: Binding<Int> {
+        Binding(
+            get: { camera.selectedPhotoMegapixels },
+            set: { camera.selectPhotoMegapixels($0) }
+        )
+    }
+
+    private var photoFormatBinding: Binding<String> {
+        Binding(
+            get: { camera.photoFileFormat },
+            set: { camera.photoFileFormat = $0 }
+        )
     }
 }
 
@@ -379,11 +381,21 @@ struct CodecCompressionSettingsView: View {
         } label: {
             SettingsCheckmarkRow(
                 title: title,
+                subtitle: enabled ? nil : codecUnavailableReason(codec),
                 selected: camera.selectedVideoCodec == codec,
                 enabled: enabled
             )
         }
         .disabled(!enabled)
+    }
+
+
+    private func codecUnavailableReason(_ codec: String) -> String? {
+        guard !camera.isVideoCodecSupported(codec) else { return nil }
+        if codec == "H264", camera.selectedResolution == .p4k, camera.selectedFrameRate == .fps60 {
+            return "Not available because 4K at 60 fps is selected."
+        }
+        return "Not available for the current camera and video format."
     }
 
     private func compressionSubtitle(_ compression: VideoCompression) -> String {

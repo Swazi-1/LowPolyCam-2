@@ -11,40 +11,32 @@ struct AdvancedRecordingSettingsView: View {
 
     var body: some View {
         List {
-            if camera.recoverableRecordingCount > 0 {
-                Section("RECOVERY") {
-                    HStack(spacing: 12) {
-                        SettingsListIcon(symbol: "arrow.clockwise", color: .purple)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(camera.recoverableRecordingCount) Recording\(camera.recoverableRecordingCount == 1 ? "" : "s") Waiting")
-                            Text("Retry videos that Photos could not import earlier.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Retry") {
-                            camera.retryRecoverableRecordings()
-                        }
-                        .buttonStyle(.bordered)
+            if camera.captureMode != .photo {
+                Section("LIVE STATS") {
+                    Toggle(isOn: $liveStats) {
+                        SettingsToggleLabel(
+                            symbol: "chart.bar.fill",
+                            color: .blue,
+                            title: "Live Recording Stats",
+                            subtitle: "Show FPS, file bitrate and monitored frame drops."
+                        )
                     }
-                    .padding(.vertical, 2)
+                    .onChange(of: liveStats) { _, _ in
+                        camera.refreshLiveMetrics()
+                    }
+
+                    NavigationLink {
+                        LiveStatsSettings(positionStats: positionStats)
+                    } label: {
+                        SettingsNavigationLabel(
+                            symbol: "slider.horizontal.3",
+                            color: .gray,
+                            title: "Live Stats Settings",
+                            subtitle: liveStats ? "Size, information and position" : "Turn on Live Recording Stats to edit"
+                        )
+                    }
+                    .disabled(!liveStats)
                 }
-            }
-
-            Section("SAFETY") {
-                SettingsInfoRow(
-                    symbol: "externaldrive.fill.badge.checkmark",
-                    color: .blue,
-                    title: "Low-Storage Protection",
-                    detail: "Critical storage monitoring is always active while recording and safely finalizes the clip before space is exhausted."
-                )
-
-                SettingsInfoRow(
-                    symbol: "square.and.arrow.down.fill",
-                    color: .green,
-                    title: "Background Save Protection",
-                    detail: "Pending photo and video saves are protected when LowPolyCam moves to the background."
-                )
             }
 
             if camera.captureMode != .photo {
@@ -85,32 +77,40 @@ struct AdvancedRecordingSettingsView: View {
                 }
             }
 
-            if camera.captureMode != .photo {
-                Section("LIVE STATS") {
-                    Toggle(isOn: $liveStats) {
-                        SettingsToggleLabel(
-                            symbol: "chart.bar.fill",
-                            color: .blue,
-                            title: "Live Recording Stats",
-                            subtitle: "Show FPS, file bitrate and monitored frame drops."
-                        )
+            if camera.recoverableRecordingCount > 0 {
+                Section("RECOVERY") {
+                    HStack(spacing: 12) {
+                        SettingsListIcon(symbol: "arrow.clockwise", color: .purple)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(camera.recoverableRecordingCount) Recording\(camera.recoverableRecordingCount == 1 ? "" : "s") Waiting")
+                            Text("Retry videos that Photos could not import earlier.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Retry") {
+                            camera.retryRecoverableRecordings()
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .onChange(of: liveStats) { _, _ in
-                        camera.refreshLiveMetrics()
-                    }
-
-                    NavigationLink {
-                        LiveStatsSettings(positionStats: positionStats)
-                    } label: {
-                        SettingsNavigationLabel(
-                            symbol: "slider.horizontal.3",
-                            color: .gray,
-                            title: "Live Stats Settings",
-                            subtitle: "Size, information and position"
-                        )
-                    }
-                    .disabled(!liveStats)
+                    .padding(.vertical, 2)
                 }
+            }
+
+            Section("SAFETY") {
+                SettingsInfoRow(
+                    symbol: "externaldrive.fill.badge.checkmark",
+                    color: .blue,
+                    title: "Low-Storage Protection",
+                    detail: "Critical storage monitoring is always active while recording and safely finalizes the clip before space is exhausted."
+                )
+
+                SettingsInfoRow(
+                    symbol: "square.and.arrow.down.fill",
+                    color: .green,
+                    title: "Background Save Protection",
+                    detail: "Pending photo and video saves are protected when LowPolyCam moves to the background."
+                )
             }
         }
         .listStyle(.insetGrouped)

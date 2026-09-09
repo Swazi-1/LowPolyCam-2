@@ -124,7 +124,7 @@ struct CapturePreferencesView: View {
     }
 }
 
-private struct ShutterHapticsSettingsView: View {
+struct ShutterHapticsSettingsView: View {
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("hapticCaptureEnabled") private var haptics = true
     @AppStorage("hapticStrength") private var strength = "Medium"
@@ -168,7 +168,7 @@ private struct ShutterHapticsSettingsView: View {
     }
 }
 
-private struct ZoomRecordingSettingsView: View {
+struct ZoomRecordingSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
     @AppStorage("tapZoomReset") private var tapZoomReset = true
@@ -204,7 +204,7 @@ private struct ZoomRecordingSettingsView: View {
     }
 }
 
-private struct CameraControlsSettingsView: View {
+struct CameraControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
     @AppStorage("centerCrosshair") private var crosshair = false
