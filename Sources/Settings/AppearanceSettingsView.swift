@@ -6,16 +6,19 @@ struct AppearanceSettingsView: View {
     @AppStorage("iconCustomRed") private var red = 0.55
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    @AppStorage("appColorScheme") private var appColorScheme = "dark"
 
     private let accentNames = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
     var body: some View {
         List {
             Section {
-                appearanceRow("system", title: "System")
-                appearanceRow("light", title: "Light")
-                appearanceRow("dark", title: "Dark")
+                Picker("Appearance", selection: $appColorScheme) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                .pickerStyle(.menu)
             } header: {
                 Text("APP APPEARANCE")
             } footer: {
@@ -78,16 +81,6 @@ struct AppearanceSettingsView: View {
         .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
-    }
-
-    @ViewBuilder
-    private func appearanceRow(_ value: String, title: String) -> some View {
-        Button {
-            appColorScheme = value
-        } label: {
-            SettingsCheckmarkRow(title: title, selected: appColorScheme == value)
-        }
     }
 
     private var customColorBinding: Binding<Color> {
@@ -169,7 +162,6 @@ private struct CameraAccentPreview: View {
 struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @State private var preview: VideoQuickPreset = .balanced
 
     var body: some View {
@@ -248,7 +240,6 @@ struct VideoPresetsView: View {
         .navigationTitle("Video Presets")
         .navigationBarTitleDisplayMode(.inline)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear {
             preview = VideoQuickPreset.allCases.first {
                 $0.resolution == camera.selectedResolution &&

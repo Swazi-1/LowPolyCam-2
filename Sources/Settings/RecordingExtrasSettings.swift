@@ -106,7 +106,6 @@ struct RecordingExtrasSettings: View {
 
 struct LiveStatsSettings: View {
     var positionStats: () -> Void
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @AppStorage("liveStatsSize") private var size = "Normal"
     @AppStorage("liveStatsShowFPS") private var showFPS = true
     @AppStorage("liveStatsShowBitrate") private var showBitrate = true
@@ -119,6 +118,7 @@ struct LiveStatsSettings: View {
                     Text("Compact").tag("Compact")
                     Text("Normal").tag("Normal")
                 }
+                .pickerStyle(.menu)
             } header: {
                 Text("APPEARANCE")
             } footer: {
@@ -151,6 +151,5 @@ struct LiveStatsSettings: View {
         .navigationTitle("Live Stats")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

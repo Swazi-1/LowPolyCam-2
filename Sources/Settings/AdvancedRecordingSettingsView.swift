@@ -7,7 +7,6 @@ struct AdvancedRecordingSettingsView: View {
     @AppStorage("splitMinutes") private var splitMinutes = 0
     @AppStorage("longevityMode") private var longevity = false
     @AppStorage("liveRecordingStats") private var liveStats = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
@@ -48,6 +47,7 @@ struct AdvancedRecordingSettingsView: View {
                         Text("Every hour").tag(60)
                         Text("Every 2 hours").tag(120)
                     }
+                    .pickerStyle(.menu)
                 } header: {
                     Text("RECORDING")
                 } footer: {
@@ -117,6 +117,5 @@ struct AdvancedRecordingSettingsView: View {
         .navigationTitle("Advanced Recording")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

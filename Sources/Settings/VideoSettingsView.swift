@@ -7,7 +7,7 @@ struct VideoSettingsView: View {
     @ObservedObject var camera: CameraManager
     var positionStats: () -> Void = {}
 
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    @AppStorage("appColorScheme") private var appColorScheme = "dark"
     @AppStorage("diagnosticLoggingEnabled") private var diagnosticsEnabled = false
     @State private var searchText = ""
     @State private var showingCameraSetup = false
@@ -38,7 +38,6 @@ struct VideoSettingsView: View {
             }
             .tint(.blue)
             .accentColor(.blue)
-            .preferredColorScheme(resolvedColorScheme(appColorScheme))
         }
     }
 

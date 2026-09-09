@@ -4,7 +4,6 @@ struct CameraSetupSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("rememberCaptureMode") private var rememberCameraSetup = false
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
@@ -28,18 +27,13 @@ struct CameraSetupSettingsView: View {
 
             if rememberCameraSetup {
                 Section("CAPTURE MODE") {
-                    ForEach(CameraManager.CaptureMode.allCases) { mode in
-                        Button {
-                            camera.selectCaptureMode(mode)
-                        } label: {
-                            SettingsCheckmarkRow(
-                                title: displayName(for: mode),
-                                selected: camera.captureMode == mode,
-                                enabled: camera.isCaptureModeSupported(mode)
-                            )
+                    Picker("Capture Mode", selection: captureModeBinding) {
+                        ForEach(CameraManager.CaptureMode.allCases.filter { camera.isCaptureModeSupported($0) }) { mode in
+                            Text(displayName(for: mode)).tag(mode.id)
                         }
-                        .disabled(!camera.isCaptureModeSupported(mode) || !cameraControlsEnabled)
                     }
+                    .pickerStyle(.menu)
+                    .disabled(!cameraControlsEnabled)
                 }
             }
 
@@ -58,7 +52,6 @@ struct CameraSetupSettingsView: View {
         .navigationTitle("Camera Setup")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 
     private var cameraControlsEnabled: Bool {
@@ -68,6 +61,16 @@ struct CameraSetupSettingsView: View {
         !camera.isCapturingPhoto &&
         !camera.isPreviewTransitioning &&
         !camera.isLensTransitioning
+    }
+
+    private var captureModeBinding: Binding<String> {
+        Binding(
+            get: { camera.captureMode.id },
+            set: { rawValue in
+                guard let mode = CameraManager.CaptureMode.allCases.first(where: { $0.id == rawValue }) else { return }
+                camera.selectCaptureMode(mode)
+            }
+        )
     }
 
     private func displayName(for mode: CameraManager.CaptureMode) -> String {
@@ -81,7 +84,6 @@ struct CameraSetupSettingsView: View {
 
 struct RecordVideoSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     private var formatOptions: [VideoFormatOption] {
         camera.supportedVideoFormatPairs()
@@ -106,16 +108,16 @@ struct RecordVideoSettingsView: View {
     var body: some View {
         List {
             Section {
-                ForEach(formatOptions) { option in
-                    Button {
-                        camera.selectVideoFormat(resolution: option.resolution, frameRate: option.frameRate)
-                    } label: {
-                        SettingsCheckmarkRow(
-                            title: formatName(option.resolution, option.frameRate),
-                            selected: camera.selectedResolution == option.resolution && camera.selectedFrameRate == option.frameRate,
-                            enabled: formatControlsEnabled
-                        )
+                if formatOptions.isEmpty {
+                    Text("No supported video formats are available for this camera.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Format", selection: videoFormatBinding) {
+                        ForEach(formatOptions) { option in
+                            Text(formatName(option.resolution, option.frameRate)).tag(option.id)
+                        }
                     }
+                    .pickerStyle(.menu)
                     .disabled(!formatControlsEnabled)
                 }
             } header: {
@@ -157,7 +159,6 @@ struct RecordVideoSettingsView: View {
         .navigationTitle("Record Video")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 
     private var formatControlsEnabled: Bool {
@@ -165,6 +166,16 @@ struct RecordVideoSettingsView: View {
         !camera.isRecordingStarting &&
         !camera.isFinalizingRecording &&
         !camera.isLensTransitioning
+    }
+
+    private var videoFormatBinding: Binding<String> {
+        Binding(
+            get: { "\(camera.selectedResolution.rawValue)-\(camera.selectedFrameRate.rawValue)" },
+            set: { id in
+                guard let option = formatOptions.first(where: { $0.id == id }) else { return }
+                camera.selectVideoFormat(resolution: option.resolution, frameRate: option.frameRate)
+            }
+        )
     }
 
     private func formatName(_ resolution: VideoResolution, _ frameRate: VideoFrameRate) -> String {
@@ -178,7 +189,6 @@ struct RecordVideoSettingsView: View {
 
 struct SlowMotionSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     private var formatOptions: [SlowMotionFormatOption] {
         camera.supportedSlowMotionFormatPairs().map {
@@ -205,18 +215,13 @@ struct SlowMotionSettingsView: View {
                     Text("Slo-Mo isn’t available on this camera.")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(formatOptions) { option in
-                        Button {
-                            camera.selectSlowMotionFormat(resolution: option.resolution, frameRate: option.frameRate)
-                        } label: {
-                            SettingsCheckmarkRow(
-                                title: formatName(option.resolution, option.frameRate),
-                                selected: camera.selectedSlowMotionResolution == option.resolution && camera.selectedSlowMotionFrameRate == option.frameRate,
-                                enabled: formatControlsEnabled
-                            )
+                    Picker("Format", selection: slowMotionFormatBinding) {
+                        ForEach(formatOptions) { option in
+                            Text(formatName(option.resolution, option.frameRate)).tag(option.id)
                         }
-                        .disabled(!formatControlsEnabled)
                     }
+                    .pickerStyle(.menu)
+                    .disabled(!formatControlsEnabled)
                 }
             } header: {
                 Text("SLO-MO QUALITY")
@@ -228,7 +233,6 @@ struct SlowMotionSettingsView: View {
         .navigationTitle("Record Slo-Mo")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 
     private var formatControlsEnabled: Bool {
@@ -236,6 +240,16 @@ struct SlowMotionSettingsView: View {
         !camera.isRecordingStarting &&
         !camera.isFinalizingRecording &&
         !camera.isLensTransitioning
+    }
+
+    private var slowMotionFormatBinding: Binding<String> {
+        Binding(
+            get: { "\(camera.selectedSlowMotionResolution.rawValue)-\(camera.selectedSlowMotionFrameRate.rawValue)" },
+            set: { id in
+                guard let option = formatOptions.first(where: { $0.id == id }) else { return }
+                camera.selectSlowMotionFormat(resolution: option.resolution, frameRate: option.frameRate)
+            }
+        )
     }
 
     private func formatName(_ resolution: VideoResolution, _ frameRate: CameraManager.SlowMotionFrameRate) -> String {
@@ -250,19 +264,17 @@ struct SlowMotionSettingsView: View {
 struct PhotoCaptureSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("photoAspect") private var photoAspect = "4:3"
-    @AppStorage("burstCount") private var burstCount = 5
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    @AppStorage("burstCount") private var burstCount = CameraManager.defaultPhotoBurstCount
 
     var body: some View {
         List {
             Section {
-                SettingsFixedOptionPicker(
-                    title: "Megapixels",
-                    selection: megapixelBinding,
-                    options: camera.supportedPhotoMegapixels.map {
-                        SettingsPickerOption(value: $0, title: "\($0) MP")
+                Picker("Megapixels", selection: megapixelBinding) {
+                    ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
+                        Text("\(megapixels) MP").tag(megapixels)
                     }
-                )
+                }
+                .pickerStyle(.menu)
             } header: {
                 Text("PHOTO QUALITY")
             } footer: {
@@ -278,25 +290,23 @@ struct PhotoCaptureSettingsView: View {
             }
 
             Section("ASPECT RATIO") {
-                ForEach(["4:3", "1:1"], id: \.self) { aspect in
-                    Button {
-                        guard photoAspect != aspect else { return }
-                        photoAspect = aspect
-                        camera.updatePhotoAspectSelection(aspect)
-                    } label: {
-                        SettingsCheckmarkRow(title: aspect, selected: photoAspect == aspect)
-                    }
+                Picker("Aspect Ratio", selection: $photoAspect) {
+                    Text("4:3").tag("4:3")
+                    Text("1:1").tag("1:1")
+                }
+                .pickerStyle(.menu)
+                .onChange(of: photoAspect) { _, newValue in
+                    camera.updatePhotoAspectSelection(newValue)
                 }
             }
 
             Section {
-                SettingsFixedOptionPicker(
-                    title: "Photos per Burst",
-                    selection: $burstCount,
-                    options: CameraManager.photoBurstCountOptions.map {
-                        SettingsPickerOption(value: $0, title: "\($0)")
+                Picker("Photos per Burst", selection: $burstCount) {
+                    ForEach(CameraManager.photoBurstCountOptions, id: \.self) { count in
+                        Text("\(count)").tag(count)
                     }
-                )
+                }
+                .pickerStyle(.menu)
             } header: {
                 Text("EXTRAS")
             } footer: {
@@ -304,13 +314,12 @@ struct PhotoCaptureSettingsView: View {
             }
 
             Section {
-                ForEach(CameraManager.PhotoFlashMode.allCases) { mode in
-                    Button {
-                        camera.photoFlashMode = mode
-                    } label: {
-                        SettingsCheckmarkRow(title: mode.rawValue, selected: camera.photoFlashMode == mode)
+                Picker("Flash", selection: photoFlashBinding) {
+                    ForEach(CameraManager.PhotoFlashMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode.rawValue)
                     }
                 }
+                .pickerStyle(.menu)
             } header: {
                 Text("FLASH")
             } footer: {
@@ -321,7 +330,6 @@ struct PhotoCaptureSettingsView: View {
         .navigationTitle("Photo Capture")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear { camera.updatePhotoAspectSelection(photoAspect) }
     }
 
@@ -338,37 +346,50 @@ struct PhotoCaptureSettingsView: View {
             set: { camera.photoFileFormat = $0 }
         )
     }
+
+    private var photoFlashBinding: Binding<String> {
+        Binding(
+            get: { camera.photoFlashMode.rawValue },
+            set: { rawValue in
+                guard let mode = CameraManager.PhotoFlashMode(rawValue: rawValue) else { return }
+                camera.photoFlashMode = mode
+            }
+        )
+    }
 }
 
 struct CodecCompressionSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
             Section {
-                codecRow("HEVC", title: "HEVC")
-                codecRow("H264", title: "H.264")
+                if availableCodecs.isEmpty {
+                    Text("No video codec is available for the current camera format.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Codec", selection: codecBinding) {
+                        ForEach(availableCodecs, id: \.self) { codec in
+                            Text(codec == "HEVC" ? "HEVC" : "H.264").tag(codec)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!codecControlsEnabled)
+                }
             } header: {
                 Text("CODEC")
             } footer: {
                 Text("HEVC saves space efficiently and is required for some high-resolution or high-frame-rate combinations.")
             }
 
-            Section {
-                ForEach(VideoCompression.allCases) { compression in
-                    Button {
-                        camera.videoCompression = compression
-                    } label: {
-                        SettingsCheckmarkRow(
-                            title: compression.rawValue,
-                            subtitle: compressionSubtitle(compression),
-                            selected: camera.videoCompression == compression
-                        )
+            Section("COMPRESSION") {
+                Picker("Compression", selection: compressionBinding) {
+                    ForEach(VideoCompression.allCases) { compression in
+                        Text(compression.rawValue).tag(compression.rawValue)
                     }
                 }
-            } header: {
-                Text("COMPRESSION")
+                .pickerStyle(.menu)
+                .disabled(!codecControlsEnabled)
             } footer: {
                 Text("Data Saver creates smaller files. High uses more data to preserve detail.")
             }
@@ -388,47 +409,42 @@ struct CodecCompressionSettingsView: View {
         .navigationTitle("Codec & Compression")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 
-    @ViewBuilder
-    private func codecRow(_ codec: String, title: String) -> some View {
-        let enabled = camera.isVideoCodecSupported(codec)
-        Button {
-            guard enabled else { return }
-            camera.selectedVideoCodec = codec
-        } label: {
-            SettingsCheckmarkRow(
-                title: title,
-                subtitle: enabled ? nil : codecUnavailableReason(codec),
-                selected: camera.selectedVideoCodec == codec,
-                enabled: enabled
-            )
-        }
-        .disabled(!enabled)
+    private var availableCodecs: [String] {
+        ["HEVC", "H264"].filter { camera.isVideoCodecSupported($0) }
     }
 
-
-    private func codecUnavailableReason(_ codec: String) -> String? {
-        guard !camera.isVideoCodecSupported(codec) else { return nil }
-        if codec == "H264", camera.selectedResolution == .p4k, camera.selectedFrameRate == .fps60 {
-            return "Not available because 4K at 60 fps is selected."
-        }
-        return "Not available for the current camera and video format."
+    private var codecBinding: Binding<String> {
+        Binding(
+            get: { camera.selectedVideoCodec },
+            set: { codec in
+                guard availableCodecs.contains(codec) else { return }
+                camera.selectedVideoCodec = codec
+            }
+        )
     }
 
-    private func compressionSubtitle(_ compression: VideoCompression) -> String {
-        switch compression {
-        case .dataSaver: return "Smallest files"
-        case .medium: return "Balanced size and quality"
-        case .high: return "Highest recording quality"
-        }
+    private var compressionBinding: Binding<String> {
+        Binding(
+            get: { camera.videoCompression.rawValue },
+            set: { rawValue in
+                guard let compression = VideoCompression(rawValue: rawValue) else { return }
+                camera.videoCompression = compression
+            }
+        )
+    }
+
+    private var codecControlsEnabled: Bool {
+        !camera.isRecording &&
+        !camera.isRecordingStarting &&
+        !camera.isFinalizingRecording &&
+        !camera.isCapturingPhoto &&
+        !camera.isLensTransitioning
     }
 }
 
 struct AboutSettingsView: View {
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
-
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
@@ -470,7 +486,6 @@ struct AboutSettingsView: View {
         .navigationTitle("About")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }
 

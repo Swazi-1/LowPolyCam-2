@@ -86,32 +86,25 @@ struct CapturePreferencesView: View {
     @AppStorage("hapticCaptureEnabled") private var hapticCaptureEnabled = true
     @AppStorage("hapticStrength") private var hapticStrength = "Medium"
     @AppStorage("countdownHaptics") private var countdownHaptics = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
             Section("SHUTTER") {
-                SettingsFixedOptionPicker(
-                    title: "Timer",
-                    selection: $shutterDelay,
-                    options: [
-                        SettingsPickerOption(value: 0, title: "Off"),
-                        SettingsPickerOption(value: 3, title: "3 seconds"),
-                        SettingsPickerOption(value: 10, title: "10 seconds")
-                    ]
-                )
+                Picker("Timer", selection: $shutterDelay) {
+                    Text("Off").tag(0)
+                    Text("3 seconds").tag(3)
+                    Text("10 seconds").tag(10)
+                }
+                .pickerStyle(.menu)
             }
 
             Section("ZOOM") {
-                SettingsFixedOptionPicker(
-                    title: "Zoom Speed",
-                    selection: $zoomSpeed,
-                    options: [
-                        SettingsPickerOption(value: 0.5, title: "Slow"),
-                        SettingsPickerOption(value: 1.0, title: "Normal"),
-                        SettingsPickerOption(value: 1.5, title: "Fast")
-                    ]
-                )
+                Picker("Zoom Speed", selection: $zoomSpeed) {
+                    Text("Slow").tag(0.5)
+                    Text("Normal").tag(1.0)
+                    Text("Fast").tag(1.5)
+                }
+                .pickerStyle(.menu)
                 Toggle("Tap Zoom to Reset", isOn: $tapZoomReset)
             }
 
@@ -134,15 +127,12 @@ struct CapturePreferencesView: View {
                     )
                 }
 
-                SettingsFixedOptionPicker(
-                    title: "Haptic Strength",
-                    selection: $hapticStrength,
-                    options: [
-                        SettingsPickerOption(value: "Low", title: "Low"),
-                        SettingsPickerOption(value: "Medium", title: "Medium"),
-                        SettingsPickerOption(value: "Strong", title: "Strong")
-                    ]
-                )
+                Picker("Haptic Strength", selection: $hapticStrength) {
+                    Text("Low").tag("Low")
+                    Text("Medium").tag("Medium")
+                    Text("Strong").tag("Strong")
+                }
+                .pickerStyle(.menu)
                 .disabled(!hapticCaptureEnabled)
                 .onChange(of: hapticStrength) { _, newValue in
                     guard hapticCaptureEnabled else { return }
@@ -174,6 +164,5 @@ struct CapturePreferencesView: View {
         .navigationTitle("Preferences")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

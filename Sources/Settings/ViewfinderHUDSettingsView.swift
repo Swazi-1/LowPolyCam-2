@@ -3,7 +3,6 @@ import SwiftUI
 struct CameraHUDSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
@@ -34,7 +33,6 @@ struct CameraHUDSettingsView: View {
         .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }
 
@@ -44,12 +42,11 @@ private struct CameraHUDContentSettingsView: View {
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
-    @AppStorage("cameraHUDBattery") private var hudBattery = false
+    @AppStorage("cameraHUDBattery") private var hudBattery = true
     @AppStorage("cameraHUDStorage") private var hudStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
@@ -76,12 +73,12 @@ private struct CameraHUDContentSettingsView: View {
                     Text("Compact").tag(10.0)
                     Text("Large").tag(12.0)
                 }
+                .pickerStyle(.menu)
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

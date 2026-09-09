@@ -1,17 +1,25 @@
 import SwiftUI
 import UIKit
 
+private struct CameraLowerControlsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct CameraView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
-    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
+    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = false
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    @AppStorage("appColorScheme") private var appColorScheme = "dark"
     @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @State private var isShowingSettings = false
@@ -20,6 +28,7 @@ struct CameraView: View {
     @State private var countdown = 0
     @State private var shutterTask: Task<Void, Never>?
     @State private var zoomWidth: CGFloat = 320
+    @State private var lowerControlsHeight: CGFloat = 204
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
@@ -90,13 +99,40 @@ struct CameraView: View {
                 }.foregroundStyle(.white).zIndex(10)
             }
 
-            CameraLevelMeterHost(enabled: isLevelMeterEnabled && !isShowingSettings)
+            GeometryReader { proxy in
+                let levelHalfExtent: CGFloat = 54
+                let topControlsBottom = 14 + 116
+                let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
+                let preferredY = proxy.size.height / 2 + 72
+                let minimumY = topControlsBottom + levelHalfExtent
+                let maximumY = lowerControlsTop - levelHalfExtent
+                let hasSafeSpace = maximumY >= minimumY
+                let levelY = hasSafeSpace
+                    ? min(max(preferredY, minimumY), maximumY)
+                    : max(levelHalfExtent, maximumY)
+
+                CameraLevelMeterHost(
+                    enabled: isLevelMeterEnabled && !isShowingSettings && hasSafeSpace
+                )
+                .position(x: proxy.size.width / 2, y: levelY)
+            }
+            .allowsHitTesting(false)
 
             VStack {
                 topControls
                 Spacer()
-                statusToast
-                bottomControls
+                VStack(spacing: 8) {
+                    statusToast
+                    bottomControls
+                }
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: CameraLowerControlsHeightKey.self,
+                            value: proxy.size.height
+                        )
+                    }
+                }
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
@@ -124,6 +160,10 @@ struct CameraView: View {
             if editingStats || (liveStats && camera.isRecording) {
                 LiveStatsOverlay(stats: camera.liveStats, editing: editingStats) { editingStats = false }
             }
+        }
+        .onPreferenceChange(CameraLowerControlsHeightKey.self) { height in
+            guard abs(lowerControlsHeight - height) > 0.5 else { return }
+            lowerControlsHeight = height
         }
         .onChange(of: camera.isRecording) { _, recording in
             AppEventLog.event("Camera UI: recording visible state changed to \(recording)")
@@ -174,6 +214,7 @@ struct CameraView: View {
                 cancelCountdown()
                 editingStats = true
             }
+                .preferredColorScheme(resolvedColorScheme(appColorScheme))
                 .presentationDetents([.large])
                 .presentationDragIndicator(.hidden)
         }

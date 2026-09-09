@@ -265,7 +265,7 @@ struct CameraHUDSnapshot: Equatable {
 }
 
 struct CameraHUD: View {
-    @AppStorage("cameraHUDBattery") private var showBattery = false
+    @AppStorage("cameraHUDBattery") private var showBattery = true
     @AppStorage("cameraHUDStorage") private var showStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
     @State private var batteryLevel: Float = -1
@@ -557,10 +557,6 @@ struct CameraLevelMeterHost: View {
                     isAvailable: monitor.isAvailable,
                     isLevel: monitor.isLevel
                 )
-                // Keep the level clearly below the center crosshair. The fixed offset is
-                // relative to the camera canvas, so it follows rotation without drifting into
-                // the bottom shutter controls in landscape.
-                .offset(y: 24)
                 .allowsHitTesting(false)
             }
         }

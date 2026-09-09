@@ -33,6 +33,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     static let photoMegapixelPresets = [12, 8, 4, 2, 1]
     static let photoBurstCountOptions = [15, 10, 5]
+    static let defaultPhotoBurstCount = 10
 
     enum SlowMotionFrameRate: Int, CaseIterable, Identifiable {
         case fps120 = 120
@@ -548,7 +549,7 @@ final class CameraManager: NSObject, ObservableObject {
         let savedResolution = defaults.string(forKey: Self.resolutionKey + positionSuffix)
         selectedResolution = VideoResolution(rawValue: savedResolution ?? "") ?? .p1080
         let savedFrameRate = defaults.integer(forKey: Self.frameRateKey + positionSuffix)
-        selectedFrameRate = VideoFrameRate(rawValue: savedFrameRate) ?? .fps30
+        selectedFrameRate = VideoFrameRate(rawValue: savedFrameRate) ?? .fps60
         let savedSlowMotionResolution = defaults.string(forKey: Self.slowMotionResolutionKey + positionSuffix)
         selectedSlowMotionResolution = VideoResolution(rawValue: savedSlowMotionResolution ?? "") ?? .p1080
         let savedSlowMotionFrameRate = defaults.integer(forKey: Self.slowMotionFrameRateKey + positionSuffix)
@@ -1049,7 +1050,7 @@ final class CameraManager: NSObject, ObservableObject {
         let resolution = defaults.string(forKey: preferenceKey(Self.resolutionKey, for: position))
         selectedResolution = VideoResolution(rawValue: resolution ?? "") ?? .p1080
         let fps = defaults.integer(forKey: preferenceKey(Self.frameRateKey, for: position))
-        selectedFrameRate = VideoFrameRate(rawValue: fps) ?? .fps30
+        selectedFrameRate = VideoFrameRate(rawValue: fps) ?? .fps60
         let slowResolution = defaults.string(forKey: preferenceKey(Self.slowMotionResolutionKey, for: position))
         selectedSlowMotionResolution = VideoResolution(rawValue: slowResolution ?? "") ?? .p1080
         let slowFPS = defaults.integer(forKey: preferenceKey(Self.slowMotionFrameRateKey, for: position))
@@ -1223,7 +1224,7 @@ final class CameraManager: NSObject, ObservableObject {
             storageWarningEpisodeActive = false
         } else if snapshot.isWarning, !storageWarningEpisodeActive {
             storageWarningEpisodeActive = true
-            if UserDefaults.standard.bool(forKey: "lowStorageWarning") {
+            if UserDefaults.standard.object(forKey: "lowStorageWarning") as? Bool ?? true {
                 postStatus("Storage is below 1 GB. Long recordings may stop early.")
             }
             AppEventLog.event("Storage warning threshold crossed: available=\(snapshot.availableBytes), source=\(source)")
@@ -2287,7 +2288,7 @@ final class CameraManager: NSObject, ObservableObject {
     func captureBurst() {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
         let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
-        let count = Self.photoBurstCountOptions.contains(savedCount) ? savedCount : (Self.photoBurstCountOptions.last ?? 5)
+        let count = Self.photoBurstCountOptions.contains(savedCount) ? savedCount : Self.defaultPhotoBurstCount
         AppEventLog.event("Burst capture requested: count=\(count)")
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in

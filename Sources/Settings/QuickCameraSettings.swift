@@ -4,9 +4,8 @@ struct QuickControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraGridEnabled") private var grid = false
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
-    @AppStorage("levelMeterEnabled") private var level = true
+    @AppStorage("levelMeterEnabled") private var level = false
     @AppStorage("centerCrosshair") private var crosshair = false
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
@@ -32,7 +31,7 @@ struct QuickControlsSettingsView: View {
                         symbol: "grid",
                         color: .blue,
                         title: "Grid",
-                        subtitle: "Show composition guides in the viewfinder."
+                        subtitle: "Show composition guides over the camera preview."
                     )
                 }
 
@@ -73,6 +72,5 @@ struct QuickControlsSettingsView: View {
         .navigationTitle("Quick Controls")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

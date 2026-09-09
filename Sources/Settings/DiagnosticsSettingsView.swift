@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct DiagnosticsSettingsView: View {
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @State private var loggingEnabled = AppEventLog.diagnosticsEnabled
 
     private var loggingBinding: Binding<Bool> {
@@ -53,7 +52,6 @@ struct DiagnosticsSettingsView: View {
         .navigationTitle("Diagnostics")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear { loggingEnabled = AppEventLog.diagnosticsEnabled }
     }
 }
