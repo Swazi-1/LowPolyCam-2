@@ -3781,7 +3781,7 @@ final class CameraManager: NSObject, ObservableObject {
               abs(provenance.frameRate - (captureMode == .sloMo
                   ? Double(selectedSlowMotionFrameRate.rawValue)
                   : Double(selectedFrameRate.rawValue))) < 0.0001,
-              provenance.codec == activeVideoCodec,
+              provenance.codec == preferredCodec.rawValue,
               videoCompression == .high else {
             return false
         }
