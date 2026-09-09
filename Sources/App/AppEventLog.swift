@@ -19,8 +19,8 @@ enum AppEventLog {
         let bitRate: Int?
         let zoomFactor: Double
         let whiteBalance: String
-        let torchOn: Bool = false
-        let photoFlashMode: String = "Off"
+        let torchOn: Bool
+        let photoFlashMode: String
 
         var formattedMessage: String {
             let bitRateText = bitRate.map { "\($0 / 1_000_000) Mbps target" } ?? "bitrate default"
@@ -46,19 +46,19 @@ enum AppEventLog {
         let outputNames: [String]
         let photoResponsive: Bool
         let liveMetricsAttached: Bool
-        let availableStorageBytes: Int64 = -1
-        let requestedResolution: String = "unknown"
-        let requestedFrameRate: Int = 0
-        let selectedCodec: String = "unknown"
-        let compression: String = "unknown"
-        let torchOn: Bool = false
-        let photoFlashMode: String = "Off"
-        let zoomFactor: Double = 1
-        let exposureBias: Float = 0
-        let whiteBalance: String = "Auto"
-        let focusExposureLocked: Bool = false
-        let microphoneAuthorized: String = "unknown"
-        let microphoneAttached: Bool = false
+        let availableStorageBytes: Int64
+        let requestedResolution: String
+        let requestedFrameRate: Int
+        let selectedCodec: String
+        let compression: String
+        let torchOn: Bool
+        let photoFlashMode: String
+        let zoomFactor: Double
+        let exposureBias: Float
+        let whiteBalance: String
+        let focusExposureLocked: Bool
+        let microphoneAuthorized: String
+        let microphoneAttached: Bool
 
         var formattedMessage: String {
             let storage = availableStorageBytes >= 0 ? "\(availableStorageBytes)" : "unknown"

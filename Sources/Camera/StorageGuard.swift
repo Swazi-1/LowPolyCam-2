@@ -18,7 +18,7 @@ final class StorageGuard {
     private var monitorTimer: DispatchSourceTimer?
     private var monitorGeneration: UInt64 = 0
     private var isMonitoring = false
-    private var criticalReserveBytes = Self.minimumCriticalReserveBytes
+    private var criticalReserveBytes = StorageGuard.minimumCriticalReserveBytes
     private var monitorCallback: ((StorageSnapshot) -> Void)?
 
     /// Keeps enough room for movie finalization and Photos/recovery metadata. The absolute floor

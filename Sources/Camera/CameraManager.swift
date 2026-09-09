@@ -1212,8 +1212,8 @@ final class CameraManager: NSObject, ObservableObject {
     private func issueStorageProtectionStop(snapshot: StorageSnapshot, source: String) {
         guard !storageProtectionStopIssued else { return }
         storageProtectionStopIssued = true
-        recordingStartRequests.next()
-        microphonePermissionRequests.next()
+        _ = recordingStartRequests.next()
+        _ = microphonePermissionRequests.next()
         awaitingMicrophonePermission = false
         segmentTimer?.cancel()
         storageGuard.stopMonitoring()
@@ -1235,7 +1235,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func rejectRecordingStartForStorage(snapshot: StorageSnapshot) {
         storageProtectionStopIssued = true
-        recordingStartRequests.next()
+        _ = recordingStartRequests.next()
         storageGuard.stopMonitoring()
         AppEventLog.event(
             "Recording start rejected: critically low storage, available=\(snapshot.availableBytes), " +
@@ -4352,6 +4352,13 @@ final class CameraManager: NSObject, ObservableObject {
 
         let requestedFlash = photoFlashMode
         let appliedFlash = resolvedPhotoFlashMode()
+        let appliedFlashLabel: String
+        switch appliedFlash {
+        case .off: appliedFlashLabel = "Off"
+        case .auto: appliedFlashLabel = "Auto"
+        case .on: appliedFlashLabel = "On"
+        @unknown default: appliedFlashLabel = "Unknown"
+        }
         settings.flashMode = appliedFlash
 
         // Balanced is AVFoundation's default speed/quality tradeoff. It avoids the extra
@@ -4369,14 +4376,14 @@ final class CameraManager: NSObject, ObservableObject {
             filename: nextMediaFilename(fileExtension: useHEIC ? "heic" : "jpg"),
             isBurst: isBurst,
             requestedFlash: requestedFlash.rawValue,
-            appliedFlash: appliedFlash.rawValue
+            appliedFlash: appliedFlashLabel
         )
         activePhotoCaptureID = captureID
         activePhotoCaptureIsBurst = isBurst
         AppEventLog.event(
             "Photo capture requested: \(isBurst ? "burst" : "single"), \(megapixels) MP, \(useHEIC ? "HEIC" : "JPEG"), " +
             "aspect=\(aspect), mirrored=\(mirrored), flashRequested=\(requestedFlash.rawValue), " +
-            "flashApplied=\(appliedFlash.rawValue), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
+            "flashApplied=\(appliedFlashLabel), responsive=\(photoOutput.isResponsiveCaptureEnabled), captureID=\(captureID)"
         )
         if !isBurst {
             refreshAvailableStorage()
