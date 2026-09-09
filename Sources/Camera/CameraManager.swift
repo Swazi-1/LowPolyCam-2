@@ -634,17 +634,26 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func updateSlowMotionAvailability(for devices: [AVCaptureDevice]) {
+    private func updateSlowMotionAvailability(
+        for devices: [AVCaptureDevice],
+        selector: CameraFormatSelector? = nil,
+        position: CameraPosition? = nil,
+        codec: String? = nil,
+        validation: (() -> Bool)? = nil
+    ) {
+        let targetPosition = position ?? cameraPosition
+        let targetCodec = codec ?? activeVideoCodec
+        let targetSelector = selector ?? formatSelector
         let key = [
-            cameraPosition == .back ? "back" : "front",
-            activeVideoCodec,
+            targetPosition == .back ? "back" : "front",
+            targetCodec,
             devices.map(\.uniqueID).joined(separator: ",")
         ].joined(separator: "|")
         guard slowMotionAvailabilityKey != key else { return }
+        let available = !targetSelector.slowMotionResolutions(for: devices).isEmpty
+        if let validation, !validation() { return }
         slowMotionAvailabilityKey = key
-        publishSlowMotionAvailability(
-            !formatSelector.slowMotionResolutions(for: devices).isEmpty
-        )
+        publishSlowMotionAvailability(available)
     }
 
     private func transitionRecordingState(
@@ -815,8 +824,11 @@ final class CameraManager: NSObject, ObservableObject {
                     preferVirtualCamera: request.preferVirtualCamera,
                     requestedResolution: request.resolution,
                     requestedFrameRate: request.frameRate,
+                    requestedCodec: request.codec,
+                    requestedCompression: request.compression,
                     qualityRequestID: request.qualityRequestID,
-                    requestedPosition: request.position
+                    requestedPosition: request.position,
+                    requestValidation: { self.isCurrentVideoConfiguration(request) }
                 )
             case .sloMo:
                 success = applySlowMotionFormat(
@@ -829,7 +841,14 @@ final class CameraManager: NSObject, ObservableObject {
                 success = applyBestPhotoFormat(preferVirtualCamera: request.preferVirtualCamera)
             }
         } else {
-            success = configureMovieOutputSettings()
+            success = configureMovieOutputSettings(
+                requestedCodec: request.codec,
+                requestedCompression: request.compression,
+                requestedResolution: request.resolution,
+                requestedFrameRate: request.frameRate,
+                requestedPosition: request.position,
+                requestedMode: request.mode
+            )
         }
 
         AppEventLog.event(
@@ -1042,9 +1061,23 @@ final class CameraManager: NSObject, ObservableObject {
         let fps: Double = captureMode == .sloMo
             ? Double(selectedSlowMotionFrameRate.rawValue)
             : Double(selectedFrameRate.rawValue)
+        return estimatedVideoBitsPerSecond(
+            resolution: resolution,
+            fps: fps,
+            codec: activeVideoCodec,
+            compression: videoCompression
+        )
+    }
+
+    private func estimatedVideoBitsPerSecond(
+        resolution: VideoResolution,
+        fps: Double,
+        codec: String,
+        compression: VideoCompression
+    ) -> Double {
         let pixels = Double(resolution.dimensions.width) * Double(resolution.dimensions.height)
-        let codecFactor = activeVideoCodec == "H264" ? 1.0 : 0.72
-        return max(pixels * fps * videoCompression.bitsPerPixel * codecFactor, 2_000_000)
+        let codecFactor = codec == "H264" ? 1.0 : 0.72
+        return max(pixels * fps * compression.bitsPerPixel * codecFactor, 2_000_000)
     }
 
     private var estimatedBytesPerPhoto: Double {
@@ -2472,8 +2505,10 @@ final class CameraManager: NSObject, ObservableObject {
         frameRate: Double,
         photoDimensions: CMVideoDimensions? = nil,
         preparedReplacementInput: AVCaptureDeviceInput? = nil,
-        refreshAuxiliaryOutputs: Bool = true
+        refreshAuxiliaryOutputs: Bool = true,
+        requestedCodec: String? = nil
     ) -> CGFloat? {
+        let effectiveCodec = requestedCodec ?? activeVideoCodec
         let oldInput = videoInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
@@ -2560,8 +2595,8 @@ final class CameraManager: NSObject, ObservableObject {
                 defer { desiredDevice.unlockForConfiguration() }
 
                 desiredDevice.activeFormat = format
-                desiredDevice.automaticallyAdjustsVideoHDREnabled = activeVideoCodec != "H264"
-                if activeVideoCodec == "H264", desiredDevice.isVideoHDREnabled {
+                desiredDevice.automaticallyAdjustsVideoHDREnabled = effectiveCodec != "H264"
+                if effectiveCodec == "H264", desiredDevice.isVideoHDREnabled {
                     desiredDevice.isVideoHDREnabled = false
                 }
                 if desiredDevice.isGeometricDistortionCorrectionSupported {
@@ -3187,22 +3222,41 @@ final class CameraManager: NSObject, ObservableObject {
         preferVirtualCamera: Bool = true,
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: VideoFrameRate? = nil,
+        requestedCodec: String? = nil,
+        requestedCompression: VideoCompression? = nil,
         qualityRequestID: UInt64? = nil,
-        requestedPosition: CameraPosition? = nil
+        requestedPosition: CameraPosition? = nil,
+        requestValidation: (() -> Bool)? = nil
     ) -> Bool {
         if let qualityRequestID, !qualityRequests.isLatest(qualityRequestID) { return false }
+        if let requestValidation, !requestValidation() { return false }
         let targetPosition = requestedPosition ?? cameraPosition
+        let effectiveCodec = requestedCodec ?? activeVideoCodec
+        let effectiveCompression = requestedCompression ?? videoCompression
+        let requestSelector = CameraFormatSelector(
+            selectedVideoCodec: effectiveCodec,
+            selectedResolution: requestedResolution ?? selectedResolution,
+            selectedFrameRate: requestedFrameRate ?? selectedFrameRate
+        )
         let devices = capabilityDevices(for: targetPosition.avPosition)
-        let videoSelection = formatSelector.videoFormatSelection(
+        let videoSelection = requestSelector.videoFormatSelection(
             for: devices,
             requestedResolution: requestedResolution,
             requestedFrameRate: requestedFrameRate
         )
+        if let requestValidation, !requestValidation() { return false }
         publishVideoAvailability(
             !videoSelection.availableResolutions.isEmpty &&
                 !videoSelection.supportedFrameRates.isEmpty
         )
-        updateSlowMotionAvailability(for: devices)
+        updateSlowMotionAvailability(
+            for: devices,
+            selector: requestSelector,
+            position: targetPosition,
+            codec: effectiveCodec,
+            validation: requestValidation
+        )
+        if let requestValidation, !requestValidation() { return false }
         let available = videoSelection.availableResolutions
         guard !available.isEmpty else {
             if qualityRequests.isCurrent(qualityRequestID) {
@@ -3268,10 +3322,12 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
+        if let requestValidation, !requestValidation() { return false }
         guard let displayed = applyAtomicCaptureConfiguration(
             device: desiredDevice,
             format: selectedFormat,
-            frameRate: Double(selection.frameRate.rawValue)
+            frameRate: Double(selection.frameRate.rawValue),
+            requestedCodec: effectiveCodec
         ) else {
             if qualityRequests.isCurrent(qualityRequestID) {
                 showError("Couldn’t set the video quality.")
@@ -3279,7 +3335,17 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
-        _ = configureMovieOutputSettings()
+        let outputConfigured = configureMovieOutputSettings(
+            requestedCodec: effectiveCodec,
+            requestedCompression: effectiveCompression,
+            requestedResolution: selection.resolution,
+            requestedFrameRate: selection.frameRate,
+            requestedPosition: targetPosition,
+            requestedMode: .video
+        )
+        if requestedCodec != nil || requestedCompression != nil {
+            guard outputConfigured else { return false }
+        }
         let zoomDevices = forcePhysical4K60 ? physicalSupportedDevices : [desiredDevice]
         let minZoom = zoomDevices.map { minimumSupportedZoom(for: $0) }.min() ?? minimumSupportedZoom(for: desiredDevice)
         let maxZoom = zoomDevices.map { maximumSupportedZoom(for: $0) }.max() ?? maximumSupportedZoom(for: desiredDevice)
@@ -3500,10 +3566,34 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func configureMovieOutputSettings() -> Bool {
+    private func configureMovieOutputSettings(
+        requestedCodec: String? = nil,
+        requestedCompression: VideoCompression? = nil,
+        requestedResolution: VideoResolution? = nil,
+        requestedFrameRate: VideoFrameRate? = nil,
+        requestedPosition: CameraPosition? = nil,
+        requestedMode: CaptureMode? = nil
+    ) -> Bool {
         guard let connection = movieOutput.connection(with: .video) else { return false }
 
-        let shouldMirror = cameraPosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
+        let effectiveMode = requestedMode ?? captureMode
+        let effectivePosition = requestedPosition ?? cameraPosition
+        let effectiveCodec = effectiveMode == .sloMo ? "HEVC" : (requestedCodec ?? activeVideoCodec)
+        let effectiveCompression = requestedCompression ?? videoCompression
+        let effectiveResolution = effectiveMode == .sloMo
+            ? selectedSlowMotionResolution
+            : (requestedResolution ?? selectedResolution)
+        let effectiveFPS: Double = effectiveMode == .sloMo
+            ? Double(selectedSlowMotionFrameRate.rawValue)
+            : Double((requestedFrameRate ?? selectedFrameRate).rawValue)
+        let expectedBitRate = estimatedVideoBitsPerSecond(
+            resolution: effectiveResolution,
+            fps: effectiveFPS,
+            codec: effectiveCodec,
+            compression: effectiveCompression
+        )
+
+        let shouldMirror = effectivePosition == .front && UserDefaults.standard.bool(forKey: "mirrorSelfies")
         if connection.isVideoMirroringSupported {
             if connection.automaticallyAdjustsVideoMirroring {
                 connection.automaticallyAdjustsVideoMirroring = false
@@ -3513,7 +3603,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
-        let shouldStabilize = captureMode == .video && isVideoStabilizationEnabled
+        let shouldStabilize = effectiveMode == .video && isVideoStabilizationEnabled
         if connection.isVideoStabilizationSupported {
             let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
             if connection.preferredVideoStabilizationMode != expected {
@@ -3522,12 +3612,13 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let supportedKeys = Set(movieOutput.supportedOutputSettingsKeys(for: connection))
-        let preferred: AVVideoCodecType = activeVideoCodec == "H264" ? .h264 : .hevc
+        let preferred: AVVideoCodecType = effectiveCodec == "H264" ? .h264 : .hevc
         let codecAvailable = movieOutputSupportsCodec(preferred, on: connection, supportedKeys: supportedKeys)
         let message: String? = codecAvailable ? nil : (preferred == .h264 && movieOutput.availableVideoCodecTypes.contains(.hevc)
             ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
             : "The selected codec is unavailable for this camera configuration.")
         publish {
+            if requestedCodec != nil, self.selectedVideoCodec != effectiveCodec { return }
             if self.codecAvailabilityMessage != message {
                 self.codecAvailabilityMessage = message
             }
@@ -3535,9 +3626,9 @@ final class CameraManager: NSObject, ObservableObject {
         guard codecAvailable else { return false }
 
         var settings: [String: Any] = [AVVideoCodecKey: preferred]
-        if videoCompression != .high, supportedKeys.contains(AVVideoCompressionPropertiesKey) {
+        if effectiveCompression != .high, supportedKeys.contains(AVVideoCompressionPropertiesKey) {
             settings[AVVideoCompressionPropertiesKey] = [
-                AVVideoAverageBitRateKey: Int(estimatedVideoBitsPerSecond)
+                AVVideoAverageBitRateKey: Int(expectedBitRate)
             ]
         }
 
@@ -3550,6 +3641,7 @@ final class CameraManager: NSObject, ObservableObject {
                 ? "This camera configuration requires HEVC / H.265. Select HEVC, or lower the resolution or frame rate to use H.264."
                 : "The selected codec is unavailable for this camera configuration."
             publish {
+                if requestedCodec != nil, self.selectedVideoCodec != effectiveCodec { return }
                 if self.codecAvailabilityMessage != message {
                     self.codecAvailabilityMessage = message
                 }
@@ -3561,15 +3653,20 @@ final class CameraManager: NSObject, ObservableObject {
             let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
             if connection.preferredVideoStabilizationMode != expected { return false }
         }
-        if videoCompression != .high,
+        if effectiveCompression != .high,
            let compression = applied[AVVideoCompressionPropertiesKey] as? [String: Any],
            let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber {
-            let expected = estimatedVideoBitsPerSecond
-            if abs(bitrate.doubleValue - expected) > max(expected * 0.20, 1_000_000) {
+            if abs(bitrate.doubleValue - expectedBitRate) > max(expectedBitRate * 0.20, 1_000_000) {
                 return false
             }
         }
-        logMovieOutputConfigurationReadback(connection: connection, settings: applied)
+        logMovieOutputConfigurationReadback(
+            connection: connection,
+            settings: applied,
+            mode: effectiveMode,
+            position: effectivePosition,
+            compression: effectiveCompression
+        )
         return true
     }
 
@@ -3584,16 +3681,19 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func logMovieOutputConfigurationReadback(
         connection: AVCaptureConnection,
-        settings: [String: Any]
+        settings: [String: Any],
+        mode: CaptureMode,
+        position: CameraPosition,
+        compression configuredCompression: VideoCompression
     ) {
         let codec = settings[AVVideoCodecKey] as? String ?? "system default"
         let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
         let bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
         let bitRateText = bitRate.map { "\($0)" } ?? "default"
         AppEventLog.event(
-            "MOVIE OUTPUT READBACK: mode=\(captureMode.rawValue), " +
-            "position=\(cameraPosition == .back ? "back" : "front"), codec=\(codec), " +
-            "compression=\(videoCompression.rawValue), averageBitrate=\(bitRateText), " +
+            "MOVIE OUTPUT READBACK: mode=\(mode.rawValue), " +
+            "position=\(position == .back ? "back" : "front"), codec=\(codec), " +
+            "compression=\(configuredCompression.rawValue), averageBitrate=\(bitRateText), " +
             "mirrored=\(connection.isVideoMirrored), " +
             "stabilization=\(String(describing: connection.preferredVideoStabilizationMode))"
         )
