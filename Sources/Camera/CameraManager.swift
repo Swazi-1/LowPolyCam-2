@@ -1275,7 +1275,9 @@ final class CameraManager: NSObject, ObservableObject {
     private func applyZoomSubmission(_ submission: ZoomSubmission) {
             let requestID = submission.requestID
             guard zoomRequests.isLatest(requestID),
-                  let currentDevice = videoInput?.device else { return }
+                  let currentDevice = videoInput?.device,
+                  session.isRunning,
+                  !session.isInterrupted else { return }
 
             let requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
             if !lensTransitionCoordinator.hasActiveTransition,
@@ -2476,6 +2478,23 @@ final class CameraManager: NSObject, ObservableObject {
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
         var replacementInput: AVCaptureDeviceInput?
+        var torchRestoreDevice: AVCaptureDevice?
+
+        func restoreSuspendedTorchIfPossible() {
+            guard let device = torchRestoreDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                guard device.hasTorch, device.isTorchAvailable else {
+                    AppEventLog.event("Torch could not be restored after camera input switch: unavailable on \(device.localizedName)")
+                    return
+                }
+                device.torchMode = .on
+                AppEventLog.event("Torch restored after camera input switch on \(device.localizedName)")
+            } catch {
+                AppEventLog.event("Torch could not be restored after camera input switch: \(error.localizedDescription)")
+            }
+        }
 
         if isSwitchingInput {
             if let preparedReplacementInput,
@@ -2491,6 +2510,24 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
+        // Keeping the old device's torch active while removing that input can leave the physical
+        // camera resource occupied as the replacement input starts. Device logs showed that exact
+        // sequence interrupting the session during rear 4K60 lens handoffs. Suspend the torch
+        // before the transaction and restore it only after commit, on whichever input survived.
+        if isSwitchingInput, shouldPreserveTorch, let oldDevice = oldInput?.device {
+            do {
+                try oldDevice.lockForConfiguration()
+                defer { oldDevice.unlockForConfiguration() }
+                oldDevice.torchMode = .off
+                torchRestoreDevice = oldDevice
+                AppEventLog.event("Torch suspended before camera input switch from \(oldDevice.localizedName) to \(desiredDevice.localizedName)")
+            } catch {
+                AppEventLog.event("Camera input switch cancelled because the active torch could not be suspended: \(error.localizedDescription)")
+                showError("Couldn’t safely switch cameras while the torch is on.")
+                return nil
+            }
+        }
+
         session.beginConfiguration()
         var committed = false
         if refreshAuxiliaryOutputs {
@@ -2498,6 +2535,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         defer {
             if !committed { session.commitConfiguration() }
+            restoreSuspendedTorchIfPossible()
         }
 
         if isSwitchingInput {
@@ -2506,6 +2544,8 @@ final class CameraManager: NSObject, ObservableObject {
                 if let oldInput, session.canAddInput(oldInput) {
                     session.addInput(oldInput)
                     videoInput = oldInput
+                } else {
+                    torchRestoreDevice = nil
                 }
                 return nil
             }
@@ -2538,7 +2578,8 @@ final class CameraManager: NSObject, ObservableObject {
 
                 desiredDevice.cancelVideoZoomRamp()
                 desiredDevice.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: desiredDevice)
-                if shouldPreserveTorch, desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
+                if shouldPreserveTorch, !isSwitchingInput,
+                   desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
                     desiredDevice.torchMode = .on
                 }
             }
@@ -2554,6 +2595,9 @@ final class CameraManager: NSObject, ObservableObject {
             setLiveMetricsConnectionEnabled(recordingState.requestsRecording && movieOutput.isRecording)
             rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
             requestedZoom = displayedZoom
+            if shouldPreserveTorch, isSwitchingInput {
+                torchRestoreDevice = desiredDevice
+            }
             return displayedZoom
         } catch {
             if isSwitchingInput {
@@ -2563,6 +2607,8 @@ final class CameraManager: NSObject, ObservableObject {
                 if let oldInput, session.canAddInput(oldInput) {
                     session.addInput(oldInput)
                     videoInput = oldInput
+                } else {
+                    torchRestoreDevice = nil
                 }
             }
             showError("Couldn’t configure the selected camera format.")
