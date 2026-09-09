@@ -2110,7 +2110,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.queueStarted(switchQueueTicket)
             guard let self else { return }
             guard self.cameraSwitchRequests.isLatest(requestID) else {
-                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch", traceID: switchTraceID)
+                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current(), operation: "camera switch", traceID: switchTraceID)
                 return
             }
             self.invalidatePendingVideoConfiguration()
@@ -2119,7 +2119,7 @@ final class CameraManager: NSObject, ObservableObject {
                 AppEventLog.event("CAMERA SWITCH FORMAT/APPLY FAILED", category: .device, level: .warning, traceID: switchTraceID,
                                   fields: ["elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - switchStartedAt) * 1000)])
                 guard self.cameraSwitchRequests.isLatest(requestID) else {
-                    AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch rollback", traceID: switchTraceID)
+                    AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current(), operation: "camera switch rollback", traceID: switchTraceID)
                     return
                 }
                 self.publish {
@@ -2147,7 +2147,7 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
             guard self.cameraSwitchRequests.isLatest(requestID) else {
-                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current, operation: "camera switch post-apply", traceID: switchTraceID)
+                AppEventLog.staleRequest(token: "cameraSwitchRequests", requestID: requestID, latestID: self.cameraSwitchRequests.current(), operation: "camera switch post-apply", traceID: switchTraceID)
                 return
             }
             self.synchronizeTorchState()
@@ -2199,7 +2199,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.queueStarted(modeQueueTicket)
             guard let self else { return }
             guard self.modeChangeRequests.isLatest(requestID) else {
-                AppEventLog.staleRequest(token: "modeChangeRequests", requestID: requestID, latestID: self.modeChangeRequests.current, operation: "capture mode change", traceID: modeTraceID)
+                AppEventLog.staleRequest(token: "modeChangeRequests", requestID: requestID, latestID: self.modeChangeRequests.current(), operation: "capture mode change", traceID: modeTraceID)
                 return
             }
             self.invalidatePendingVideoConfiguration()
@@ -2648,7 +2648,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.queueStarted(ticket)
             guard let self else { return }
             guard self.whiteBalanceRequests.isLatest(requestID) else {
-                AppEventLog.staleRequest(token: "whiteBalanceRequests", requestID: requestID, latestID: self.whiteBalanceRequests.current,
+                AppEventLog.staleRequest(token: "whiteBalanceRequests", requestID: requestID, latestID: self.whiteBalanceRequests.current(),
                                          operation: "white balance selection", traceID: traceID)
                 return
             }
@@ -2725,7 +2725,7 @@ final class CameraManager: NSObject, ObservableObject {
               !movieOutput.isRecording, !recordingState.requestsRecording,
               !lensTransitionCoordinator.hasActiveTransition else {
             AppEventLog.guardRejected("applyWhiteBalanceRequest", reason: "stale or camera busy", traceID: traceID, fields: [
-                "latestID": String(whiteBalanceRequests.current), "requestID": String(requestID),
+                "latestID": String(whiteBalanceRequests.current()), "requestID": String(requestID),
                 "movieRecording": String(movieOutput.isRecording), "recordingRequested": String(recordingState.requestsRecording),
                 "lensTransition": String(lensTransitionCoordinator.hasActiveTransition)
             ])
@@ -5340,7 +5340,7 @@ final class CameraManager: NSObject, ObservableObject {
                       self.appLifecyclePhase == .active,
                       self.session.isRunning else {
                     AppEventLog.staleRequest(token: "recordingStartRequests", requestID: storageStartRequestID,
-                                                latestID: self.recordingStartRequests.current, operation: "recording storage completion", traceID: self.activeRecordingTraceID)
+                                                latestID: self.recordingStartRequests.current(), operation: "recording storage completion", traceID: self.activeRecordingTraceID)
                     return
                 }
                 guard let snapshot else {
@@ -5386,7 +5386,7 @@ final class CameraManager: NSObject, ObservableObject {
               recordingState.requestsRecording,
               !movieOutput.isRecording else {
             AppEventLog.guardRejected("startMovieOutputWhenReady", reason: "request/state changed", traceID: activeRecordingTraceID, fields: [
-                "requestID": String(storageStartRequestID), "latestID": String(recordingStartRequests.current),
+                "requestID": String(storageStartRequestID), "latestID": String(recordingStartRequests.current()),
                 "requestsRecording": String(recordingState.requestsRecording), "movieOutputRecording": String(movieOutput.isRecording)
             ])
             return
@@ -5406,7 +5406,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         guard recordingStartRequests.isLatest(storageStartRequestID), recordingState.requestsRecording else {
             AppEventLog.staleRequest(token: "recordingStartRequests", requestID: storageStartRequestID,
-                                     latestID: recordingStartRequests.current, operation: "movie output start", traceID: activeRecordingTraceID)
+                                     latestID: recordingStartRequests.current(), operation: "movie output start", traceID: activeRecordingTraceID)
             return
         }
         let filename = nextMediaFilename(fileExtension: "mov")
