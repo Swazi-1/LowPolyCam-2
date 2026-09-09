@@ -328,7 +328,7 @@ struct PhotoCaptureSettingsView: View {
                 Text("Hold the shutter to start a burst and release it to stop early.")
             }
 
-            Section("FLASH") {
+            Section {
                 ForEach(CameraManager.PhotoFlashMode.allCases) { mode in
                     Button {
                         camera.photoFlashMode = mode
@@ -336,6 +336,8 @@ struct PhotoCaptureSettingsView: View {
                         SettingsCheckmarkRow(title: mode.rawValue, selected: camera.photoFlashMode == mode)
                     }
                 }
+            } header: {
+                Text("FLASH")
             } footer: {
                 Text("Flash is applied when the selected camera supports still-photo flash.")
             }
