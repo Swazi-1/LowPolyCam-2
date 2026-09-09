@@ -130,12 +130,12 @@ struct VideoSettingsView: View {
             }
 
             NavigationLink {
-                ViewfinderHUDSettingsView(camera: camera)
+                CameraHUDSettingsView(camera: camera)
             } label: {
                 SettingsNavigationLabel(
                     symbol: "rectangle.inset.filled",
                     color: .blue,
-                    title: "Viewfinder & HUD"
+                    title: "Camera HUD"
                 )
             }
 
@@ -238,16 +238,10 @@ struct VideoSettingsView: View {
             PhotoCaptureSettingsView(camera: camera)
         case .quickControls:
             QuickControlsSettingsView(camera: camera)
-        case .shutter:
-            ShutterSettingsView()
         case .preferences:
             CapturePreferencesView(camera: camera)
-        case .zoomRecording:
-            ZoomRecordingSettingsView(camera: camera)
-        case .cameraControls:
-            CameraControlsSettingsView(camera: camera)
-        case .viewfinderHUD:
-            ViewfinderHUDSettingsView(camera: camera)
+        case .cameraHUD:
+            CameraHUDSettingsView(camera: camera)
         case .advancedRecording:
             AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)
         case .liveStats:
@@ -280,14 +274,10 @@ struct VideoSettingsView: View {
 
     private static let searchEntries: [SettingsSearchEntry] = {
         var entries: [SettingsSearchEntry] = [
-            .init("Camera Setup", "Settings › Camera Setup", "capture mode camera rear front selfie setup", "video.fill", .blue, .cameraSetup),
+            .init("Camera Setup", "Settings › Camera Setup", "capture mode remember setup screen awake", "video.fill", .blue, .cameraSetup),
             .init("Capture Mode", "Settings › Camera Setup", "video photo slo mo slow motion mode", "video.fill", .blue, .cameraSetup),
-            .init("Rear Camera", "Settings › Camera Setup", "back rear main camera", "video.fill", .blue, .cameraSetup),
-            .init("Front Camera", "Settings › Camera Setup", "front selfie camera", "video.fill", .blue, .cameraSetup),
-            .init("Remember Camera Setup", "Settings › Camera Setup › Preferences", "remember restore startup launch last capture mode front rear camera", "arrow.counterclockwise.circle.fill", .green, .cameraSetup),
-            .init("Haptic Capture", "Settings › Camera Setup › Preferences", "haptic feedback shutter vibration", "waveform.path.ecg", .orange, .cameraSetup),
-            .init("Haptic Strength", "Settings › Camera Setup › Preferences", "haptic low medium strong feedback strength", "waveform.path.ecg", .orange, .cameraSetup),
-            .init("Countdown Haptics", "Settings › Camera Setup › Preferences", "timer countdown haptic feedback vibration", "timer", .orange, .cameraSetup),
+            .init("Remember Camera Setup", "Settings › Camera Setup", "remember restore startup launch last capture mode camera setup", "arrow.counterclockwise.circle.fill", .green, .cameraSetup),
+            .init("Keep Screen Awake", "Settings › Camera Setup", "keep screen awake auto lock display", "sun.max.fill", .orange, .cameraSetup),
 
             .init("Appearance", "Settings › Appearance", "app appearance system light dark theme", "sun.max.fill", .gray, .appearance),
             .init("Camera Accent", "Settings › Appearance", "accent color ice sunset mint lavender coral custom preview", "sun.max.fill", .purple, .appearance),
@@ -314,7 +304,7 @@ struct VideoSettingsView: View {
             .init("HEIC", "Settings › Photo Capture › Format", "heic photo format", "camera.fill", .green, .photoCapture),
             .init("JPEG", "Settings › Photo Capture › Format", "jpeg jpg photo format", "camera.fill", .green, .photoCapture),
             .init("Aspect Ratio", "Settings › Photo Capture › Aspect Ratio", "4 3 1 1 square aspect ratio", "camera.fill", .green, .photoCapture),
-            .init("Photos per Burst", "Settings › Photo Capture › Extras", "burst photos count 5 10 15", "camera.fill", .green, .photoCapture),
+            .init("Photos per Burst", "Settings › Photo Capture › Extras", "burst photos count 15 10 5", "camera.fill", .green, .photoCapture),
             .init("Photo Flash", "Settings › Photo Capture › Extras › Flash", "flash auto on off still photo", "camera.fill", .green, .photoCapture),
 
             .init("Quick Controls", "Settings › Quick Controls", "camera composition controls", "slider.horizontal.3", .gray, .quickControls),
@@ -323,28 +313,30 @@ struct VideoSettingsView: View {
             .init("Level", "Settings › Quick Controls", "horizon level meter gyroscope", "gyroscope", .orange, .quickControls),
             .init("Center Crosshair", "Settings › Quick Controls", "center marker crosshair", "plus", .gray, .quickControls),
 
-            .init("Preferences", "Settings › Preferences", "capture preferences shutter zoom recording camera controls", "gearshape.fill", .purple, .preferences),
-            .init("Timer", "Settings › Preferences › Shutter", "timer shutter delay off 3 seconds 10 seconds", "timer", .orange, .shutter),
-            .init("Zoom Speed", "Settings › Preferences › Zoom & Recording", "zoom speed slow normal fast", "plus.magnifyingglass", .blue, .zoomRecording),
-            .init("Tap Zoom to Reset", "Settings › Preferences › Zoom & Recording", "tap zoom reset", "plus.magnifyingglass", .blue, .zoomRecording),
-            .init("Lock Recording Controls", "Settings › Preferences › Zoom & Recording", "lock recording controls safeguard", "plus.magnifyingglass", .blue, .zoomRecording),
-            .init("Low Storage Warning", "Settings › Preferences › Zoom & Recording", "low storage warning 1 gb", "externaldrive.fill.badge.checkmark", .blue, .zoomRecording),
-            .init("Mirror Saved Selfies", "Settings › Preferences › Camera Controls", "mirror saved selfie front camera", "slider.horizontal.3", .gray, .cameraControls),
-            .init("Reset Exposure & White Balance", "Settings › Preferences › Camera Controls", "reset exposure ev white balance wb auto", "slider.horizontal.3", .gray, .cameraControls),
+            .init("Preferences", "Settings › Preferences", "capture preferences shutter timer zoom recording haptics camera controls", "gearshape.fill", .purple, .preferences),
+            .init("Timer", "Settings › Preferences", "timer shutter delay off 3 seconds 10 seconds", "timer", .orange, .preferences),
+            .init("Zoom Speed", "Settings › Preferences", "zoom speed slow normal fast", "plus.magnifyingglass", .blue, .preferences),
+            .init("Tap Zoom to Reset", "Settings › Preferences", "tap zoom reset", "plus.magnifyingglass", .blue, .preferences),
+            .init("Lock Recording Controls", "Settings › Preferences", "lock recording controls safeguard", "lock.fill", .blue, .preferences),
+            .init("Low Storage Warning", "Settings › Preferences", "low storage warning 1 gb", "externaldrive.fill.badge.checkmark", .blue, .preferences),
+            .init("Haptic Capture", "Settings › Preferences", "haptic feedback shutter vibration", "waveform.path.ecg", .orange, .preferences),
+            .init("Haptic Strength", "Settings › Preferences", "haptic low medium strong feedback strength", "waveform.path.ecg", .orange, .preferences),
+            .init("Countdown Haptics", "Settings › Preferences", "timer countdown haptic feedback vibration", "timer", .orange, .preferences),
+            .init("Mirror Saved Selfies", "Settings › Preferences", "mirror saved selfie front camera", "camera.metering.center.weighted", .gray, .preferences),
+            .init("Reset Exposure & White Balance", "Settings › Preferences", "reset exposure ev white balance wb auto", "arrow.counterclockwise", .gray, .preferences),
 
-            .init("Viewfinder & HUD", "Settings › Viewfinder & HUD", "viewfinder hud display camera", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("Keep Screen Awake", "Settings › Viewfinder & HUD", "keep screen awake auto lock", "sun.max.fill", .orange, .viewfinderHUD),
-            .init("Show Camera HUD", "Settings › Viewfinder & HUD", "show camera hud capsule", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("HUD Content & Style", "Settings › Viewfinder & HUD › Camera HUD", "hud content style", "text.line.first.and.arrowtriangle.forward", .purple, .viewfinderHUD),
-            .init("HUD Resolution", "Settings › Viewfinder & HUD › Camera HUD", "resolution hud main info", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("HUD FPS", "Settings › Viewfinder & HUD › Camera HUD", "fps frame rate hud", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("Photos / Time Remaining", "Settings › Viewfinder & HUD › Camera HUD", "photos remaining time remaining hud", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("HUD White Balance", "Settings › Viewfinder & HUD › Camera HUD", "white balance wb hud", "rectangle.inset.filled", .blue, .viewfinderHUD),
-            .init("Battery HUD", "Settings › Viewfinder & HUD › Camera HUD", "battery device info hud", "battery.100percent", .green, .viewfinderHUD),
-            .init("Free Storage HUD", "Settings › Viewfinder & HUD › Camera HUD", "free storage device info hud", "externaldrive.fill.badge.checkmark", .blue, .viewfinderHUD),
-            .init("Thermal Status HUD", "Settings › Viewfinder & HUD › Camera HUD", "thermal temperature status hud", "waveform.path.ecg", .orange, .viewfinderHUD),
-            .init("Frame Gaps HUD", "Settings › Viewfinder & HUD › Camera HUD", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .viewfinderHUD),
-            .init("HUD Text Size", "Settings › Viewfinder & HUD › Camera HUD", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .viewfinderHUD),
+            .init("Camera HUD", "Settings › Camera HUD", "hud display camera capsule", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("Show Camera HUD", "Settings › Camera HUD", "show camera hud capsule", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("HUD Content & Style", "Settings › Camera HUD", "hud content style", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD),
+            .init("HUD Resolution", "Settings › Camera HUD", "resolution hud main info", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("HUD FPS", "Settings › Camera HUD", "fps frame rate hud", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("Photos / Time Remaining", "Settings › Camera HUD", "photos remaining time remaining hud", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("HUD White Balance", "Settings › Camera HUD", "white balance wb hud", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("Battery HUD", "Settings › Camera HUD", "battery device info hud", "battery.100percent", .green, .cameraHUD),
+            .init("Free Storage HUD", "Settings › Camera HUD", "free storage device info hud", "externaldrive.fill.badge.checkmark", .blue, .cameraHUD),
+            .init("Thermal Status HUD", "Settings › Camera HUD", "thermal temperature status hud", "waveform.path.ecg", .orange, .cameraHUD),
+            .init("Frame Gaps HUD", "Settings › Camera HUD", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .cameraHUD),
+            .init("HUD Text Size", "Settings › Camera HUD", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD),
 
             .init("Advanced Recording", "Settings › Advanced Recording", "recording advanced live stats split longevity safety", "waveform.path.ecg", .purple, .advancedRecording),
             .init("Live Recording Stats", "Settings › Advanced Recording", "live stats fps bitrate frame drops", "chart.bar.fill", .blue, .advancedRecording),
@@ -410,7 +402,7 @@ struct VideoSettingsView: View {
             }
         }
 
-        for megapixels in stride(from: 12, through: 1, by: -1) {
+        for megapixels in CameraManager.photoMegapixelPresets {
             entries.append(
                 .init(
                     "\(megapixels) MP",
@@ -423,7 +415,7 @@ struct VideoSettingsView: View {
             )
         }
 
-        for count in [5, 10, 15] {
+        for count in CameraManager.photoBurstCountOptions {
             entries.append(
                 .init(
                     "\(count) Photos per Burst",
@@ -440,10 +432,10 @@ struct VideoSettingsView: View {
             entries.append(.init("Photo Flash: \(mode)", "Settings › Photo Capture › Extras › Flash", "flash \(mode)", "camera.fill", .green, .photoCapture))
         }
         for timer in ["Off", "3 seconds", "10 seconds"] {
-            entries.append(.init("Timer: \(timer)", "Settings › Preferences › Shutter", "photo shutter timer delay \(timer)", "timer", .orange, .shutter))
+            entries.append(.init("Timer: \(timer)", "Settings › Preferences", "photo shutter timer delay \(timer)", "timer", .orange, .preferences))
         }
         for strength in ["Low", "Medium", "Strong"] {
-            entries.append(.init("Haptic Strength: \(strength)", "Settings › Camera Setup › Preferences", "haptic strength \(strength)", "waveform.path.ecg", .orange, .cameraSetup))
+            entries.append(.init("Haptic Strength: \(strength)", "Settings › Preferences", "haptic strength \(strength)", "waveform.path.ecg", .orange, .preferences))
         }
         for appearance in ["System", "Light", "Dark"] {
             entries.append(.init("Appearance: \(appearance)", "Settings › Appearance", "theme app appearance \(appearance)", "sun.max.fill", .gray, .appearance))
@@ -452,10 +444,10 @@ struct VideoSettingsView: View {
             entries.append(.init("Camera Accent: \(accent)", "Settings › Appearance", "camera accent color \(accent)", "sun.max.fill", .purple, .appearance))
         }
         for zoom in ["Slow", "Normal", "Fast"] {
-            entries.append(.init("Zoom Speed: \(zoom)", "Settings › Preferences › Zoom & Recording", "zoom speed \(zoom)", "plus.magnifyingglass", .blue, .zoomRecording))
+            entries.append(.init("Zoom Speed: \(zoom)", "Settings › Preferences", "zoom speed \(zoom)", "plus.magnifyingglass", .blue, .preferences))
         }
         for size in ["Compact", "Large"] {
-            entries.append(.init("HUD Text Size: \(size)", "Settings › Viewfinder & HUD › Camera HUD", "hud text size \(size)", "text.line.first.and.arrowtriangle.forward", .purple, .viewfinderHUD))
+            entries.append(.init("HUD Text Size: \(size)", "Settings › Camera HUD", "hud text size \(size)", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD))
         }
         for size in ["Compact", "Normal"] {
             entries.append(.init("Live Stats Panel Size: \(size)", "Settings › Advanced Recording › Live Stats", "live stats panel size \(size)", "chart.bar.fill", .blue, .liveStats))
@@ -516,11 +508,8 @@ private enum SettingsSearchDestination: Hashable {
     case slowMotion
     case photoCapture
     case quickControls
-    case shutter
     case preferences
-    case zoomRecording
-    case cameraControls
-    case viewfinderHUD
+    case cameraHUD
     case advancedRecording
     case liveStats
     case videoPresets
@@ -601,4 +590,3 @@ private struct SettingsSearchEntry: Identifiable {
             .joined(separator: " ")
     }
 }
-

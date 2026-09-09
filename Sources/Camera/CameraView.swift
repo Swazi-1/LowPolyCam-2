@@ -11,6 +11,7 @@ struct CameraView: View {
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @State private var isShowingSettings = false
@@ -134,7 +135,7 @@ struct CameraView: View {
                 restoreBrightness = nil
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .tint(accent.color)
         .task {
             camera.start()

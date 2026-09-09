@@ -557,7 +557,10 @@ struct CameraLevelMeterHost: View {
                     isAvailable: monitor.isAvailable,
                     isLevel: monitor.isLevel
                 )
-                .offset(y: -8)
+                // Keep the level clearly below the center crosshair. The fixed offset is
+                // relative to the camera canvas, so it follows rotation without drifting into
+                // the bottom shutter controls in landscape.
+                .offset(y: 24)
                 .allowsHitTesting(false)
             }
         }

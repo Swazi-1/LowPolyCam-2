@@ -3,77 +3,55 @@ import SwiftUI
 struct CameraSetupSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("rememberCaptureMode") private var rememberCameraSetup = false
-    @AppStorage("hapticCaptureEnabled") private var hapticCaptureEnabled = true
-    @AppStorage("hapticStrength") private var hapticStrength = "Medium"
-    @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
-            Section("CAPTURE MODE") {
-                ForEach(CameraManager.CaptureMode.allCases) { mode in
-                    Button {
-                        camera.selectCaptureMode(mode)
-                    } label: {
-                        SettingsCheckmarkRow(
-                            title: displayName(for: mode),
-                            selected: camera.captureMode == mode,
-                            enabled: camera.isCaptureModeSupported(mode)
-                        )
-                    }
-                    .disabled(!camera.isCaptureModeSupported(mode) || !cameraControlsEnabled)
-                }
-            }
-
-            Section("CAMERA") {
-                cameraPositionButton(.back, title: "Rear Camera")
-                cameraPositionButton(.front, title: "Front Camera")
-            }
-
             Section {
                 Toggle(isOn: $rememberCameraSetup) {
                     SettingsToggleLabel(
                         symbol: "arrow.counterclockwise.circle.fill",
                         color: .green,
                         title: "Remember Camera Setup",
-                        subtitle: "Restore the last capture mode and front/rear camera when LowPolyCam opens."
+                        subtitle: "Restore your camera setup when LowPolyCam opens."
                     )
                 }
                 .onChange(of: rememberCameraSetup) { _, enabled in
                     camera.setRememberCameraSetupEnabled(enabled)
                 }
+                Text("Enable this to reveal the setup options that can be changed and remembered below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-                Toggle(isOn: $hapticCaptureEnabled) {
+            if rememberCameraSetup {
+                Section("CAPTURE MODE") {
+                    ForEach(CameraManager.CaptureMode.allCases) { mode in
+                        Button {
+                            camera.selectCaptureMode(mode)
+                        } label: {
+                            SettingsCheckmarkRow(
+                                title: displayName(for: mode),
+                                selected: camera.captureMode == mode,
+                                enabled: camera.isCaptureModeSupported(mode)
+                            )
+                        }
+                        .disabled(!camera.isCaptureModeSupported(mode) || !cameraControlsEnabled)
+                    }
+                }
+            }
+
+            Section("DISPLAY") {
+                Toggle(isOn: $keepScreenAwakeEnabled) {
                     SettingsToggleLabel(
-                        symbol: "waveform.path.ecg",
+                        symbol: "sun.max.fill",
                         color: .orange,
-                        title: "Haptic Capture",
-                        subtitle: "Feel feedback when the shutter starts or stops."
+                        title: "Keep Screen Awake",
+                        subtitle: "Prevent Auto-Lock while LowPolyCam is open."
                     )
                 }
-
-                Picker("Haptic Strength", selection: $hapticStrength) {
-                    Text("Low").tag("Low")
-                    Text("Medium").tag("Medium")
-                    Text("Strong").tag("Strong")
-                }
-                .pickerStyle(.menu)
-                .disabled(!hapticCaptureEnabled)
-                .onChange(of: hapticStrength) { _, newValue in
-                    guard hapticCaptureEnabled else { return }
-                    CameraHaptics.fire(strength: newValue)
-                }
-
-                Toggle(isOn: $countdownHaptics) {
-                    SettingsToggleLabel(
-                        symbol: "timer",
-                        color: .orange,
-                        title: "Countdown Haptics",
-                        subtitle: "Add haptic feedback during the photo timer countdown."
-                    )
-                }
-            } header: {
-                Text("PREFERENCES")
             }
         }
         .listStyle(.insetGrouped)
@@ -81,21 +59,6 @@ struct CameraSetupSettingsView: View {
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
-    }
-
-    @ViewBuilder
-    private func cameraPositionButton(_ position: CameraManager.CameraPosition, title: String) -> some View {
-        Button {
-            guard camera.cameraPosition != position else { return }
-            camera.switchCamera()
-        } label: {
-            SettingsCheckmarkRow(
-                title: title,
-                selected: camera.cameraPosition == position,
-                enabled: cameraControlsEnabled
-            )
-        }
-        .disabled(!cameraControlsEnabled)
     }
 
     private var cameraControlsEnabled: Bool {
@@ -220,7 +183,19 @@ struct SlowMotionSettingsView: View {
     private var formatOptions: [SlowMotionFormatOption] {
         camera.supportedSlowMotionFormatPairs().map {
             SlowMotionFormatOption(resolution: $0.0, frameRate: $0.1)
+        }.sorted { lhs, rhs in
+            slowMotionSortKey(lhs) > slowMotionSortKey(rhs)
         }
+    }
+
+    private func slowMotionSortKey(_ option: SlowMotionFormatOption) -> Int {
+        let resolutionRank: Int
+        switch option.resolution {
+        case .p1080: resolutionRank = 3
+        case .p720: resolutionRank = 2
+        case .p4k: resolutionRank = 1
+        }
+        return resolutionRank * 1_000 + option.frameRate.rawValue
     }
 
     var body: some View {
@@ -318,7 +293,7 @@ struct PhotoCaptureSettingsView: View {
                 SettingsFixedOptionPicker(
                     title: "Photos per Burst",
                     selection: $burstCount,
-                    options: [5, 10, 15].map {
+                    options: CameraManager.photoBurstCountOptions.map {
                         SettingsPickerOption(value: $0, title: "\($0)")
                     }
                 )

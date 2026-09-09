@@ -31,6 +31,9 @@ final class CameraManager: NSObject, ObservableObject {
         var accessibilityLabel: String { "Photo Flash \(rawValue)" }
     }
 
+    static let photoMegapixelPresets = [12, 8, 4, 2, 1]
+    static let photoBurstCountOptions = [15, 10, 5]
+
     enum SlowMotionFrameRate: Int, CaseIterable, Identifiable {
         case fps120 = 120
         case fps240 = 240
@@ -217,7 +220,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var currentPhotoResolutionLabel = "12 MP"
     @Published private(set) var currentPhotoPixelCount: Int64 = 12_000_000
     @Published private(set) var selectedPhotoMegapixels = 12
-    @Published private(set) var supportedPhotoMegapixels = Array((1...12).reversed())
+    @Published private(set) var supportedPhotoMegapixels = CameraManager.photoMegapixelPresets
     @Published private(set) var supportedResolutions: [VideoResolution] = []
     @Published private(set) var supportedFrameRates: [VideoFrameRate] = []
     @Published private(set) var isVideoAvailabilityKnown = false
@@ -554,7 +557,8 @@ final class CameraManager: NSObject, ObservableObject {
         super.init()
 
         let savedPhotoMegapixels = defaults.integer(forKey: Self.photoMegapixelsKey)
-        preferredPhotoMegapixels = (1...12).contains(savedPhotoMegapixels) ? savedPhotoMegapixels : 12
+        preferredPhotoMegapixels = Self.normalizedPhotoMegapixels(savedPhotoMegapixels)
+        defaults.set(preferredPhotoMegapixels, forKey: Self.photoMegapixelsKey)
         selectedPhotoMegapixels = preferredPhotoMegapixels
         currentPhotoResolutionLabel = "\(selectedPhotoMegapixels) MP"
         currentPhotoPixelCount = Int64(selectedPhotoMegapixels) * 1_000_000
@@ -2283,7 +2287,7 @@ final class CameraManager: NSObject, ObservableObject {
     func captureBurst() {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else { return }
         let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
-        let count = [5, 10, 15].contains(savedCount) ? savedCount : 5
+        let count = Self.photoBurstCountOptions.contains(savedCount) ? savedCount : (Self.photoBurstCountOptions.last ?? 5)
         AppEventLog.event("Burst capture requested: count=\(count)")
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
@@ -3582,7 +3586,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func photoMegapixelOptions(for dimensions: CMVideoDimensions, aspect: String) -> [Int] {
         let width = Double(dimensions.width)
         let height = Double(dimensions.height)
-        guard width > 0, height > 0 else { return Array((1...12).reversed()) }
+        guard width > 0, height > 0 else { return Self.photoMegapixelPresets }
 
         let pixels: Double
         if aspect == "1:1" {
@@ -3602,8 +3606,13 @@ final class CameraManager: NSObject, ObservableObject {
         let megapixels = pixels / 1_000_000.0
         let rounded = megapixels.rounded()
         let maximumNative = abs(megapixels - rounded) < 0.35 ? Int(rounded) : Int(megapixels.rounded(.down))
-        let maximum = max(1, min(12, maximumNative))
-        return Array((1...maximum).reversed())
+        let maximum = max(1, min(Self.photoMegapixelPresets.first ?? 12, maximumNative))
+        return Self.photoMegapixelPresets.filter { $0 <= maximum }
+    }
+
+    private static func normalizedPhotoMegapixels(_ value: Int) -> Int {
+        guard value > 0 else { return photoMegapixelPresets.first ?? 12 }
+        return photoMegapixelPresets.first(where: { $0 <= value }) ?? photoMegapixelPresets.last ?? 1
     }
 
     private func updatePhotoMegapixelAvailability(for dimensions: CMVideoDimensions, aspect: String) {

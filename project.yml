@@ -19,7 +19,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.swazi.LowPolyCam
         MARKETING_VERSION: "4.3.0.11"
-        CURRENT_PROJECT_VERSION: "43011"
+        CURRENT_PROJECT_VERSION: "512"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist

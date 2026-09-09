@@ -143,10 +143,10 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 
 ### Photo
 
-* Megapixels
+* Megapixels: 12 / 8 / 4 / 2 / 1 where supported
 * HEIC / JPEG
 * Aspect ratio
-* Burst count
+* Burst count: 15 / 10 / 5
 * Photo flash: Off / Auto / On where supported
 * Timer
 
@@ -157,7 +157,21 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 * Compression settings
 * Camera-specific compatibility
 
-### Viewfinder & HUD
+### Camera Setup
+
+* Remember Camera Setup
+* Capture mode selection when setup memory is enabled
+* Keep Screen Awake
+
+### Preferences
+
+* Shutter timer
+* Zoom speed and tap-to-reset
+* Recording safeguards
+* Haptic capture and countdown feedback
+* Selfie mirroring and exposure/white-balance reset
+
+### Camera HUD
 
 * Camera HUD
 * Resolution

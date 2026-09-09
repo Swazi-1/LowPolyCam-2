@@ -1,25 +1,13 @@
 import SwiftUI
 
-struct ViewfinderHUDSettingsView: View {
+struct CameraHUDSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
-            Section("VIEWFINDER") {
-                Toggle(isOn: $keepScreenAwakeEnabled) {
-                    SettingsToggleLabel(
-                        symbol: "sun.max.fill",
-                        color: .orange,
-                        title: "Keep Screen Awake",
-                        subtitle: "Prevent Auto-Lock while LowPolyCam is open."
-                    )
-                }
-            }
-
-            Section("CAMERA HUD") {
+            Section("HUD") {
                 Toggle(isOn: $isHUDEnabled) {
                     SettingsToggleLabel(
                         symbol: "capsule.fill",
@@ -30,7 +18,7 @@ struct ViewfinderHUDSettingsView: View {
                 }
 
                 NavigationLink {
-                    CameraHUDSettingsView(camera: camera)
+                    CameraHUDContentSettingsView(camera: camera)
                 } label: {
                     SettingsNavigationLabel(
                         symbol: "text.line.first.and.arrowtriangle.forward",
@@ -43,14 +31,14 @@ struct ViewfinderHUDSettingsView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Viewfinder & HUD")
+        .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }
 
-private struct CameraHUDSettingsView: View {
+private struct CameraHUDContentSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true

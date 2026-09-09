@@ -28,10 +28,18 @@ struct AppearanceSettingsView: View {
                         Button {
                             appearance = name
                         } label: {
-                            if appearance == name {
-                                Label(name, systemImage: "checkmark")
-                            } else {
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(color(for: name))
+                                    .frame(width: 14, height: 14)
+                                    .overlay {
+                                        Circle().stroke(.white.opacity(0.28), lineWidth: 0.5)
+                                    }
                                 Text(name)
+                                if appearance == name {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.blue)
+                                }
                             }
                         }
                     }
