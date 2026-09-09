@@ -12,15 +12,17 @@ struct AppearanceSettingsView: View {
 
     var body: some View {
         List {
-            Section("APP APPEARANCE") {
+            Section {
                 appearanceRow("system", title: "System")
                 appearanceRow("light", title: "Light")
                 appearanceRow("dark", title: "Dark")
+            } header: {
+                Text("APP APPEARANCE")
             } footer: {
                 Text("System follows your iPhone's current appearance.")
             }
 
-            Section("CAMERA ACCENT") {
+            Section {
                 ForEach(accentNames, id: \.self) { name in
                     Button {
                         appearance = name
@@ -45,6 +47,8 @@ struct AppearanceSettingsView: View {
                 if appearance == "Custom" {
                     ColorPicker("Custom Accent", selection: customColorBinding, supportsOpacity: false)
                 }
+            } header: {
+                Text("CAMERA ACCENT")
             } footer: {
                 Text("Accent color changes LowPolyCam's camera controls. Settings itself stays system-styled for readability.")
             }
@@ -115,7 +119,7 @@ struct VideoPresetsView: View {
                 }
             }
 
-            Section("SELECTED PRESET") {
+            Section {
                 HStack {
                     Text("Resolution")
                     Spacer()
@@ -152,6 +156,8 @@ struct VideoPresetsView: View {
                     }
                 }
                 .disabled(camera.captureMode != .video || camera.isPreviewTransitioning || camera.isLensTransitioning)
+            } header: {
+                Text("SELECTED PRESET")
             } footer: {
                 Text(camera.captureMode == .video
                      ? "Applying a preset changes Video resolution, frame rate, codec and compression together."

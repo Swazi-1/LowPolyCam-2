@@ -141,7 +141,7 @@ private struct ShutterHapticsSettingsView: View {
                 }
             }
 
-            Section("HAPTICS") {
+            Section {
                 Toggle("Haptic Capture", isOn: $haptics)
                 Toggle("Countdown Haptics", isOn: $countdownHaptics)
                 Picker("Strength", selection: $strength) {
@@ -154,6 +154,8 @@ private struct ShutterHapticsSettingsView: View {
                     guard haptics else { return }
                     CameraHaptics.fire(strength: newValue)
                 }
+            } header: {
+                Text("HAPTICS")
             } footer: {
                 Text("Capture haptics provide feedback when the shutter starts or stops.")
             }
@@ -185,9 +187,11 @@ private struct ZoomRecordingSettingsView: View {
                 Toggle("Tap Zoom to Reset", isOn: $tapZoomReset)
             }
 
-            Section("RECORDING SAFEGUARDS") {
+            Section {
                 Toggle("Lock Recording Controls", isOn: $recordingLock)
                 Toggle("Low Storage Warning", isOn: $lowStorageWarning)
+            } header: {
+                Text("RECORDING SAFEGUARDS")
             } footer: {
                 Text("The optional warning appears below 1 GB. Critical low-storage protection remains active even when the warning is off.")
             }
@@ -215,13 +219,15 @@ private struct CameraControlsSettingsView: View {
                 Toggle("Mirror Saved Selfies", isOn: $mirrorSelfies)
             }
 
-            Section("RESET") {
+            Section {
                 Button {
                     camera.setExposureBias(0)
                     camera.selectWhiteBalancePreset(.auto)
                 } label: {
                     Label("Reset Exposure & White Balance", systemImage: "arrow.counterclockwise")
                 }
+            } header: {
+                Text("RESET")
             } footer: {
                 Text("Restores automatic exposure compensation and white balance.")
             }

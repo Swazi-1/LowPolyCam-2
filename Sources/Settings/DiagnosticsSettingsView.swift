@@ -16,7 +16,7 @@ struct DiagnosticsSettingsView: View {
 
     var body: some View {
         List {
-            Section("DIAGNOSTIC LOGGING") {
+            Section {
                 Toggle(isOn: loggingBinding) {
                     SettingsToggleLabel(
                         symbol: "doc.text.fill",
@@ -25,6 +25,8 @@ struct DiagnosticsSettingsView: View {
                         subtitle: "Record detailed camera, settings, storage, save and session events for bug reports."
                     )
                 }
+            } header: {
+                Text("DIAGNOSTIC LOGGING")
             } footer: {
                 Text("Logging is off by default. When enabled, every app session creates a new numbered log. Older logs are never deleted automatically.")
             }

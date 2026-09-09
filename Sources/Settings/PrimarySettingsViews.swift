@@ -90,7 +90,7 @@ struct RecordVideoSettingsView: View {
 
     var body: some View {
         List {
-            Section("VIDEO QUALITY") {
+            Section {
                 ForEach(formatOptions) { option in
                     Button {
                         camera.selectVideoFormat(resolution: option.resolution, frameRate: option.frameRate)
@@ -103,6 +103,8 @@ struct RecordVideoSettingsView: View {
                     }
                     .disabled(!formatControlsEnabled)
                 }
+            } header: {
+                Text("VIDEO QUALITY")
             } footer: {
                 Text("Only combinations supported by the current front or rear camera are shown.")
             }
@@ -183,7 +185,7 @@ struct SlowMotionSettingsView: View {
 
     var body: some View {
         List {
-            Section("SLO-MO QUALITY") {
+            Section {
                 if formatOptions.isEmpty {
                     Text("Slo-Mo isn’t available on this camera.")
                         .foregroundStyle(.secondary)
@@ -201,6 +203,8 @@ struct SlowMotionSettingsView: View {
                         .disabled(!formatControlsEnabled)
                     }
                 }
+            } header: {
+                Text("SLO-MO QUALITY")
             } footer: {
                 Text("Slo-Mo uses HEVC automatically. Available resolutions and frame rates depend on the selected camera and lens.")
             }
@@ -237,7 +241,7 @@ struct PhotoCaptureSettingsView: View {
 
     var body: some View {
         List {
-            Section("PHOTO QUALITY") {
+            Section {
                 ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
                     Button {
                         camera.selectPhotoMegapixels(megapixels)
@@ -248,6 +252,8 @@ struct PhotoCaptureSettingsView: View {
                         )
                     }
                 }
+            } header: {
+                Text("PHOTO QUALITY")
             } footer: {
                 Text("LowPolyCam keeps full sensor quality and saves at the selected megapixel count.")
             }
@@ -278,17 +284,19 @@ struct PhotoCaptureSettingsView: View {
                 }
             }
 
-            Section("BURST") {
+            Section {
                 Picker("Photos per Burst", selection: $burstCount) {
                     Text("5").tag(5)
                     Text("10").tag(10)
                     Text("15").tag(15)
                 }
+            } header: {
+                Text("BURST")
             } footer: {
                 Text("Hold the shutter to start a burst and release it to stop early.")
             }
 
-            Section("PHOTO FLASH") {
+            Section {
                 ForEach(CameraManager.PhotoFlashMode.allCases) { mode in
                     Button {
                         camera.photoFlashMode = mode
@@ -296,6 +304,8 @@ struct PhotoCaptureSettingsView: View {
                         SettingsCheckmarkRow(title: mode.rawValue, selected: camera.photoFlashMode == mode)
                     }
                 }
+            } header: {
+                Text("PHOTO FLASH")
             } footer: {
                 Text("Flash is applied when the selected camera supports still-photo flash.")
             }
@@ -315,14 +325,16 @@ struct CodecCompressionSettingsView: View {
 
     var body: some View {
         List {
-            Section("CODEC") {
+            Section {
                 codecRow("HEVC", title: "HEVC")
                 codecRow("H264", title: "H.264")
+            } header: {
+                Text("CODEC")
             } footer: {
                 Text("HEVC saves space efficiently and is required for some high-resolution or high-frame-rate combinations.")
             }
 
-            Section("COMPRESSION") {
+            Section {
                 ForEach(VideoCompression.allCases) { compression in
                     Button {
                         camera.videoCompression = compression
@@ -334,6 +346,8 @@ struct CodecCompressionSettingsView: View {
                         )
                     }
                 }
+            } header: {
+                Text("COMPRESSION")
             } footer: {
                 Text("Data Saver creates smaller files. High uses more data to preserve detail.")
             }

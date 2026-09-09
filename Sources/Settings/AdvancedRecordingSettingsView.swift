@@ -48,7 +48,7 @@ struct AdvancedRecordingSettingsView: View {
             }
 
             if camera.captureMode != .photo {
-                Section("RECORDING") {
+                Section {
                     Picker("Split Recording", selection: $splitMinutes) {
                         Text("Off").tag(0)
                         Text("Every 15 minutes").tag(15)
@@ -56,13 +56,15 @@ struct AdvancedRecordingSettingsView: View {
                         Text("Every hour").tag(60)
                         Text("Every 2 hours").tag(120)
                     }
+                } header: {
+                    Text("RECORDING")
                 } footer: {
                     Text("Split clips save separately with a brief gap between files.")
                 }
             }
 
             if camera.captureMode == .video {
-                Section("LONG RECORDINGS") {
+                Section {
                     Toggle(
                         isOn: Binding(
                             get: { longevity },
@@ -76,6 +78,8 @@ struct AdvancedRecordingSettingsView: View {
                             subtitle: "Uses 720p, 30 fps, HEVC and Data Saver, then dims the screen while recording."
                         )
                     }
+                } header: {
+                    Text("LONG RECORDINGS")
                 } footer: {
                     Text("Your previous Video setup returns when Longevity Mode is turned off.")
                 }

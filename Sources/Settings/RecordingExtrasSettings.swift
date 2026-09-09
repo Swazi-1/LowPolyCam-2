@@ -114,29 +114,35 @@ struct LiveStatsSettings: View {
 
     var body: some View {
         List {
-            Section("APPEARANCE") {
+            Section {
                 Picker("Panel Size", selection: $size) {
                     Text("Compact").tag("Compact")
                     Text("Normal").tag("Normal")
                 }
+            } header: {
+                Text("APPEARANCE")
             } footer: {
                 Text("Compact uses shorter labels and less screen space.")
             }
 
-            Section("INFORMATION") {
+            Section {
                 Toggle("Capture FPS", isOn: $showFPS)
                 Toggle("File Bitrate", isOn: $showBitrate)
                 Toggle("Capture Drops", isOn: $showDrops)
+            } header: {
+                Text("INFORMATION")
             } footer: {
                 Text("Capture Drops are gaps observed by the monitoring output; they are not a direct encoder-drop count.")
             }
 
-            Section("POSITION") {
+            Section {
                 Button {
                     positionStats()
                 } label: {
                     Label("Position Live Stats", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                 }
+            } header: {
+                Text("POSITION")
             } footer: {
                 Text("The Settings sheet closes so you can drag the stats panel directly on the camera screen.")
             }
