@@ -388,7 +388,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let zoomSubmissionLock = NSLock()
     private var pendingZoomSubmission: ZoomSubmission?
     private var isZoomSubmissionScheduled = false
-    private var didWarnAboutRecordingLensSwitch = false
+    private var didLogRecordingLensClamp = false
     private let zoomRequests = RequestToken()
     private let cameraSwitchRequests = RequestToken()
     private let whiteBalanceRequests = RequestToken()
@@ -1503,13 +1503,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     func beginZoomInteraction() {
         sessionQueue.async { [weak self] in
-            self?.didWarnAboutRecordingLensSwitch = false
+            self?.didLogRecordingLensClamp = false
         }
     }
 
     func endZoomInteraction() {
-        // Kept as a gesture boundary for diagnostics and future zoom policies. The warning flag
-        // resets at the beginning of the next interaction so late queued samples cannot re-spam it.
+        // Kept as a gesture boundary for diagnostics and future zoom policies. The diagnostic flag
+        // resets at the beginning of the next interaction so late queued samples stay quiet.
     }
 
     private func drainZoomSubmissions() {
@@ -1536,7 +1536,7 @@ final class CameraManager: NSObject, ObservableObject {
                   session.isRunning,
                   !session.isInterrupted else { return }
 
-            let requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
+            var requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
             if !lensTransitionCoordinator.hasActiveTransition,
                abs(requested - requestedZoom) < 0.0005 {
                 return
@@ -1642,17 +1642,29 @@ final class CameraManager: NSObject, ObservableObject {
                 if wantsDifferentLens {
                     let recordingOrStarting = self.movieOutput.isRecording || self.recordingState.requestsRecording || self.isRecordingStarting
                     if recordingOrStarting && self.captureMode != .video {
-                        if !self.didWarnAboutRecordingLensSwitch {
-                            self.didWarnAboutRecordingLensSwitch = true
-                            self.showError("Stop recording to switch physical lenses.")
+                        // HFR recording must keep its physical input for the whole file. Do not
+                        // reject the zoom gesture when it crosses the optical boundary; keep the
+                        // active sensor and apply the part of the request that it can provide
+                        // digitally. This is what lets rear Slo-Mo zoom from 0.5× while recording
+                        // without rebuilding the 120/240 fps capture input mid-file.
+                        let currentLensMinimum = self.minimumSupportedZoom(for: currentDevice)
+                        let currentLensMaximum = self.maximumSupportedZoom(for: currentDevice)
+                        let fixedLensZoom = min(max(requested, currentLensMinimum), currentLensMaximum)
+                        if !self.didLogRecordingLensClamp {
+                            self.didLogRecordingLensClamp = true
+                            AppEventLog.event(
+                                "Recording zoom kept on current physical lens: " +
+                                "requested=\(String(format: "%.2f", requested))×, " +
+                                "applied=\(String(format: "%.2f", fixedLensZoom))×, " +
+                                "device=\(currentDevice.localizedName)"
+                            )
                         }
-                        return
+                        requested = fixedLensZoom
                     }
 
-                    // While recording normal Video, keep the physical input fixed and digitally
-                    // zoom that sensor. Rebuilding AVCaptureDeviceInput mid-file can interrupt the
-                    // recording. Idle 4K60 and rear Slo-Mo instead use the covered physical-lens
-                    // handoff below.
+                    // While recording, keep the physical input fixed and digitally zoom that
+                    // sensor. Rebuilding AVCaptureDeviceInput mid-file can interrupt recording.
+                    // Idle 4K60 and rear Slo-Mo use the covered physical-lens handoff below.
                     if !recordingOrStarting {
                         if self.lensTransitionCoordinator.shouldUseCoveredPhysicalHandoff(
                             captureMode: self.captureMode,
