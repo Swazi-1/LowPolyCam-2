@@ -208,7 +208,7 @@ struct CameraView: View {
     private var levelMeterOverlay: some View {
         GeometryReader { proxy in
             let levelHalfExtent: CGFloat = 54
-            let topControlsBottom = 14 + 116
+            let topControlsBottom: CGFloat = 14 + 116
             let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
             let preferredY = proxy.size.height / 2 + 72
             let minimumY = topControlsBottom + levelHalfExtent
