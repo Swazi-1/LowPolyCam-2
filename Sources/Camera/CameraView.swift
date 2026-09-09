@@ -46,115 +46,15 @@ struct CameraView: View {
 
     var body: some View {
         ZStack {
-            CameraPreview(
-                session: camera.session,
-                isFocusExposureLocked: camera.isFocusExposureLocked,
-                focusExposureLockLabel: camera.focusExposureLockLabel,
-                stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
-                isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
-                reservesTopHUDSpace: isHUDEnabled,
-                fitsPhoto: camera.captureMode == .photo,
-                onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
-                onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
-            )
-            .ignoresSafeArea()
-
-            if camera.captureMode == .photo && photoAspect == "1:1" {
-                GeometryReader { proxy in
-                    let side = min(proxy.size.width, proxy.size.height)
-                    VStack(spacing: 0) {
-                        Color.black.opacity(0.7)
-                        Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
-                        Color.black.opacity(0.7)
-                    }
-                }.ignoresSafeArea().allowsHitTesting(false)
-            }
-
-            LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-            if isGridEnabled {
-                CameraGridOverlay()
-                    .opacity(gridOpacity)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
-
-            if crosshair {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .ultraLight))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .allowsHitTesting(false)
-            }
-
-            if countdown > 0 {
-                Button { cancelCountdown() } label: {
-                    VStack {
-                        Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
-                        Text("Tap to cancel").font(.caption)
-                    }
-                    .padding(24)
-                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
-                }.foregroundStyle(.white).zIndex(10)
-            }
-
-            GeometryReader { proxy in
-                let levelHalfExtent: CGFloat = 54
-                let topControlsBottom = 14 + 116
-                let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
-                let preferredY = proxy.size.height / 2 + 72
-                let minimumY = topControlsBottom + levelHalfExtent
-                let maximumY = lowerControlsTop - levelHalfExtent
-                let hasSafeSpace = maximumY >= minimumY
-                let levelY = hasSafeSpace
-                    ? min(max(preferredY, minimumY), maximumY)
-                    : max(levelHalfExtent, maximumY)
-
-                CameraLevelMeterHost(
-                    enabled: isLevelMeterEnabled && !isShowingSettings && hasSafeSpace
-                )
-                .position(x: proxy.size.width / 2, y: levelY)
-            }
-            .allowsHitTesting(false)
-
-            VStack {
-                topControls
-                Spacer()
-                VStack(spacing: 8) {
-                    statusToast
-                    bottomControls
-                }
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: CameraLowerControlsHeightKey.self,
-                            value: proxy.size.height
-                        )
-                    }
-                }
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 14)
-            .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning)
-
-            if isShowingProTools {
-                Color.black.opacity(0.001)
-                    .ignoresSafeArea()
-                    .onTapGesture { isShowingProTools = false }
-
-                VStack {
-                    Spacer()
-                    HStack {
-                        ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
-                        Spacer()
-                    }
-                }
-                .padding(.leading, 14)
-                .padding(.bottom, 132)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
-            }
-
+            cameraPreviewLayer
+            photoAspectOverlay
+            previewGradient
+            gridOverlay
+            crosshairOverlay
+            countdownOverlay
+            levelMeterOverlay
+            controlsLayer
+            proToolsOverlay
         }
         .overlay {
             if editingStats || (liveStats && camera.isRecording) {
@@ -225,6 +125,146 @@ struct CameraView: View {
         }
         .onChange(of: isShowingProTools) { _, showing in
             AppEventLog.event("Camera UI: Pro controls \(showing ? "opened" : "closed")")
+        }
+    }
+
+    private var cameraPreviewLayer: some View {
+        CameraPreview(
+            session: camera.session,
+            isFocusExposureLocked: camera.isFocusExposureLocked,
+            focusExposureLockLabel: camera.focusExposureLockLabel,
+            stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
+            isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
+            reservesTopHUDSpace: isHUDEnabled,
+            fitsPhoto: camera.captureMode == .photo,
+            onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
+            onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
+        )
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var photoAspectOverlay: some View {
+        if camera.captureMode == .photo && photoAspect == "1:1" {
+            GeometryReader { proxy in
+                let side = min(proxy.size.width, proxy.size.height)
+                VStack(spacing: 0) {
+                    Color.black.opacity(0.7)
+                    Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
+                    Color.black.opacity(0.7)
+                }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var previewGradient: some View {
+        LinearGradient(
+            colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var gridOverlay: some View {
+        if isGridEnabled {
+            CameraGridOverlay()
+                .opacity(gridOpacity)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var crosshairOverlay: some View {
+        if crosshair {
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .ultraLight))
+                .foregroundStyle(.white.opacity(0.7))
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var countdownOverlay: some View {
+        if countdown > 0 {
+            Button { cancelCountdown() } label: {
+                VStack {
+                    Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
+                    Text("Tap to cancel").font(.caption)
+                }
+                .padding(24)
+                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
+            }
+            .foregroundStyle(.white)
+            .zIndex(10)
+        }
+    }
+
+    private var levelMeterOverlay: some View {
+        GeometryReader { proxy in
+            let levelHalfExtent: CGFloat = 54
+            let topControlsBottom = 14 + 116
+            let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
+            let preferredY = proxy.size.height / 2 + 72
+            let minimumY = topControlsBottom + levelHalfExtent
+            let maximumY = lowerControlsTop - levelHalfExtent
+            let hasSafeSpace = maximumY >= minimumY
+            let levelY = hasSafeSpace
+                ? min(max(preferredY, minimumY), maximumY)
+                : max(levelHalfExtent, maximumY)
+
+            CameraLevelMeterHost(
+                enabled: isLevelMeterEnabled && !isShowingSettings && hasSafeSpace
+            )
+            .position(x: proxy.size.width / 2, y: levelY)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var controlsLayer: some View {
+        VStack {
+            topControls
+            Spacer()
+            VStack(spacing: 8) {
+                statusToast
+                bottomControls
+            }
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: CameraLowerControlsHeightKey.self,
+                        value: proxy.size.height
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning)
+    }
+
+    @ViewBuilder
+    private var proToolsOverlay: some View {
+        if isShowingProTools {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture { isShowingProTools = false }
+
+            VStack {
+                Spacer()
+                HStack {
+                    ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
+                    Spacer()
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.bottom, 132)
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
         }
     }
 

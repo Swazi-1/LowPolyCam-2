@@ -382,7 +382,7 @@ struct CodecCompressionSettingsView: View {
                 Text("HEVC saves space efficiently and is required for some high-resolution or high-frame-rate combinations.")
             }
 
-            Section("COMPRESSION") {
+            Section {
                 Picker("Compression", selection: compressionBinding) {
                     ForEach(VideoCompression.allCases) { compression in
                         Text(compression.rawValue).tag(compression.rawValue)
@@ -390,6 +390,8 @@ struct CodecCompressionSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .disabled(!codecControlsEnabled)
+            } header: {
+                Text("COMPRESSION")
             } footer: {
                 Text("Data Saver creates smaller files. High uses more data to preserve detail.")
             }
