@@ -1,48 +1,52 @@
 import SwiftUI
 
 struct ViewfinderHUDSettingsView: View {
-    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
-        SettingsPage {
-            SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
-                SettingsToggleRow(
-                    title: "Keep Screen Awake",
-                    subtitle: "Prevent Auto-Lock while LowPolyCam is open",
-                    symbol: "sun.max.fill",
-                    isOn: $keepScreenAwakeEnabled
-                )
+        List {
+            Section("VIEWFINDER") {
+                Toggle(isOn: $keepScreenAwakeEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "sun.max.fill",
+                        color: .orange,
+                        title: "Keep Screen Awake",
+                        subtitle: "Prevent Auto-Lock while LowPolyCam is open."
+                    )
+                }
             }
 
-            SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
-                SettingsToggleRow(
-                    title: "Show Camera HUD",
-                    subtitle: "Show the in-camera info capsule",
-                    symbol: "capsule.fill",
-                    isOn: $isHUDEnabled
-                )
-                SettingsDivider()
+            Section("CAMERA HUD") {
+                Toggle(isOn: $isHUDEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "capsule.fill",
+                        color: .blue,
+                        title: "Show Camera HUD",
+                        subtitle: "Show the in-camera information capsule."
+                    )
+                }
+
                 NavigationLink {
                     CameraHUDSettingsView(camera: camera)
                 } label: {
-                    SettingsNavigationRow(
+                    SettingsNavigationLabel(
+                        symbol: "text.line.first.and.arrowtriangle.forward",
+                        color: .purple,
                         title: "HUD Content & Style",
-                        subtitle: "Choose the info and text size",
-                        symbol: "text.line.first.and.arrowtriangle.forward"
+                        subtitle: "Choose information and text size"
                     )
                 }
-                .buttonStyle(.plain)
+                .disabled(!isHUDEnabled)
             }
         }
-        .tint(theme)
-        .accentColor(theme)
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .listStyle(.insetGrouped)
         .navigationTitle("Viewfinder & HUD")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }
 
@@ -57,52 +61,39 @@ private struct CameraHUDSettingsView: View {
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
-        SettingsPage {
-            SettingsCard(title: "Main Info", symbol: "viewfinder") {
-                SettingsToggleRow(
-                    title: "Resolution",
-                    subtitle: camera.captureMode == .photo ? "Selected photo resolution" : "Selected video resolution",
-                    isOn: $hudResolution
-                )
-
+        List {
+            Section("MAIN INFO") {
+                Toggle("Resolution", isOn: $hudResolution)
                 if camera.captureMode != .photo {
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title: "FPS",
-                        subtitle: camera.captureMode == .sloMo ? "Selected Slo-Mo frame rate" : "Selected video frame rate",
-                        isOn: $hudFPS
-                    )
+                    Toggle("FPS", isOn: $hudFPS)
                 }
-
-                SettingsDivider()
-                SettingsToggleRow(
-                    title: camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining",
-                    subtitle: camera.captureMode == .photo ? "Estimated photos left" : "Estimated recording time left",
-                    isOn: $hudRemaining
-                )
-                SettingsDivider()
-                SettingsToggleRow(title: "White Balance", subtitle: "Active white-balance preset", isOn: $hudWhiteBalance)
+                Toggle(camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining", isOn: $hudRemaining)
+                Toggle("White Balance", isOn: $hudWhiteBalance)
             }
 
-            SettingsCard(title: "Device Info", symbol: "iphone") {
-                SettingsToggleRow(title: "Battery", subtitle: "Current battery percentage", isOn: $hudBattery)
-                SettingsDivider()
-                SettingsToggleRow(title: "Free Storage", subtitle: "Available space on this iPhone", isOn: $hudStorage)
-                SettingsDivider()
-                SettingsToggleRow(title: "Thermal Status", subtitle: "Current device temperature state", isOn: $hudThermal)
+            Section("DEVICE INFO") {
+                Toggle("Battery", isOn: $hudBattery)
+                Toggle("Free Storage", isOn: $hudStorage)
+                Toggle("Thermal Status", isOn: $hudThermal)
                 if camera.captureMode != .photo {
-                    SettingsDivider()
-                    SettingsToggleRow(title: "Frame Gaps", subtitle: "Missing intervals in the last saved clip", isOn: $hudDroppedFrames)
+                    Toggle("Frame Gaps", isOn: $hudDroppedFrames)
                 }
             }
 
-            SettingsCard(title: "HUD Appearance", symbol: "textformat.size") {
-                ThemeMenu(title: "Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
+            Section("HUD APPEARANCE") {
+                Picker("Text Size", selection: $hudTextSize) {
+                    Text("Compact").tag(10.0)
+                    Text("Large").tag(12.0)
+                }
             }
         }
+        .listStyle(.insetGrouped)
         .navigationTitle("Camera HUD")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

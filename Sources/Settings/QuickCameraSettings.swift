@@ -1,46 +1,78 @@
 import SwiftUI
 
-struct QuickCameraSettings: View {
+struct QuickControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraGridEnabled") private var grid = false
-    @AppStorage("gridOpacity") private var opacity = 1.0
+    @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("levelMeterEnabled") private var level = true
-    @Environment(\.cameraTint) private var theme
+    @AppStorage("centerCrosshair") private var crosshair = false
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
-        SettingsCard(title: "Quick Controls", symbol: "slider.horizontal.3") {
-            if camera.captureMode == .video {
-                SettingsToggleRow(
-                    title: "Stabilization",
-                    subtitle: "Reduce camera shake",
-                    symbol: "dot.radiowaves.left.and.right",
-                    isOn: Binding(get: { camera.isVideoStabilizationEnabled }, set: camera.setVideoStabilizationEnabled)
-                )
-                SettingsDivider()
-            }
-
-            SettingsToggleRow(title: "Grid", subtitle: "Show composition grid", symbol: "grid", isOn: $grid)
-
-            if grid {
-                SettingsSubRow {
-                    HStack {
-                        Text("Grid Opacity")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(Int(opacity * 100))%")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    Slider(value: $opacity, in: 0.2...1)
-                        .tint(theme)
-                        .accessibilityLabel("Grid opacity")
+        List {
+            Section("CAMERA") {
+                Toggle(
+                    isOn: Binding(
+                        get: { camera.isVideoStabilizationEnabled },
+                        set: { camera.setVideoStabilizationEnabled($0) }
+                    )
+                ) {
+                    SettingsToggleLabel(
+                        symbol: "dot.radiowaves.left.and.right",
+                        color: .green,
+                        title: "Stabilization",
+                        subtitle: "Reduce camera shake in Video mode."
+                    )
                 }
             }
 
-            SettingsDivider()
+            Section("COMPOSITION") {
+                Toggle(isOn: $grid) {
+                    SettingsToggleLabel(
+                        symbol: "grid",
+                        color: .blue,
+                        title: "Grid",
+                        subtitle: "Show composition guides in the viewfinder."
+                    )
+                }
 
-            SettingsToggleRow(title: "Level", subtitle: "Show horizon level", symbol: "gyroscope", isOn: $level)
+                if grid {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Grid Opacity")
+                            Spacer()
+                            Text("\(Int(gridOpacity * 100))%")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $gridOpacity, in: 0.2...1)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Toggle(isOn: $level) {
+                    SettingsToggleLabel(
+                        symbol: "gyroscope",
+                        color: .orange,
+                        title: "Level",
+                        subtitle: "Show the horizon level meter."
+                    )
+                }
+
+                Toggle(isOn: $crosshair) {
+                    SettingsToggleLabel(
+                        symbol: "plus",
+                        color: .gray,
+                        title: "Center Crosshair",
+                        subtitle: "Show a marker at the center of the frame."
+                    )
+                }
+            }
         }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Quick Controls")
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }

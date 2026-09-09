@@ -2445,6 +2445,197 @@ final class CameraManager: NSObject, ObservableObject {
 
 
 
+    /// Returns whether a specific resolution/FPS pair is available on the currently selected
+    /// front/rear camera. The Settings UI uses this instead of combining two independent support
+    /// lists, which could otherwise display a pair that no single AVCaptureDevice.Format supports.
+    func supportedVideoFormatPairs() -> [(VideoResolution, VideoFrameRate)] {
+        let devices = capabilityDevices(for: cameraPosition.avPosition)
+        let resolutions: [VideoResolution] = [.p720, .p1080, .p4k]
+        return resolutions.flatMap { resolution in
+            VideoFrameRate.allCases.compactMap { frameRate in
+                let needsHEVCPromotion = isKnownUnsupportedH264VideoSelection(
+                    codec: selectedVideoCodec,
+                    resolution: resolution,
+                    frameRate: frameRate
+                )
+                let effectiveCodec = needsHEVCPromotion ? "HEVC" : selectedVideoCodec
+                let selector = CameraFormatSelector(
+                    selectedVideoCodec: effectiveCodec,
+                    selectedResolution: resolution,
+                    selectedFrameRate: frameRate
+                )
+                let supported = devices.contains { device in
+                    selector.preferredRecordingFormat(
+                        for: device,
+                        resolution: resolution,
+                        rate: frameRate
+                    ) != nil
+                }
+                return supported ? (resolution, frameRate) : nil
+            }
+        }
+    }
+
+    func isVideoFormatSupported(resolution: VideoResolution, frameRate: VideoFrameRate) -> Bool {
+        supportedVideoFormatPairs().contains {
+            $0.0 == resolution && $0.1 == frameRate
+        }
+    }
+
+    /// Applies a Video resolution and FPS as one user request. This prevents the new Settings list
+    /// from producing an unnecessary intermediate camera configuration (for example 4K30 before
+    /// the requested 4K60). When Video is not the active capture mode, the choice is saved for the
+    /// next time Video is opened without reconfiguring the active Photo/Slo-Mo pipeline.
+    func selectVideoFormat(resolution: VideoResolution, frameRate: VideoFrameRate) {
+        guard !isRecording,
+              !isRecordingStarting,
+              !isFinalizingRecording,
+              !isCapturingPhoto,
+              !isLensTransitioning else { return }
+        guard isVideoFormatSupported(resolution: resolution, frameRate: frameRate) else { return }
+
+        var promotedCodec = false
+        if isKnownUnsupportedH264VideoSelection(
+            codec: selectedVideoCodec,
+            resolution: resolution,
+            frameRate: frameRate
+        ) {
+            let wasSuppressing = suppressAutomaticReconfiguration
+            suppressAutomaticReconfiguration = true
+            selectedVideoCodec = "HEVC"
+            suppressAutomaticReconfiguration = wasSuppressing
+            codecAvailabilityMessage = nil
+            promotedCodec = true
+            AppEventLog.event("Video codec promoted automatically: H264 -> HEVC for Settings format selection \(resolution.rawValue) \(frameRate.rawValue) fps")
+        }
+
+        guard selectedResolution != resolution || selectedFrameRate != frameRate || promotedCodec else { return }
+        AppEventLog.event(
+            "Video format requested from Settings: \(selectedResolution.rawValue)/\(selectedFrameRate.rawValue) fps -> \(resolution.rawValue)/\(frameRate.rawValue) fps"
+        )
+        codecAvailabilityMessage = nil
+
+        let wasSuppressingPersistence = suppressPreferencePersistence
+        suppressPreferencePersistence = true
+        selectedResolution = resolution
+        selectedFrameRate = frameRate
+        suppressPreferencePersistence = wasSuppressingPersistence
+        persistCameraPreferences()
+
+        guard captureMode == .video else {
+            AppEventLog.event("Video format saved for later; active mode=\(captureMode.rawValue)")
+            return
+        }
+
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
+        scheduleVideoConfiguration(
+            formatAffecting: true,
+            qualityRequestID: qualityRequests.next(),
+            compressionRequestID: compressionRequests.current(),
+            transitionID: transitionID
+        )
+    }
+
+    /// Pair-aware Slo-Mo capability check used by the Settings UI. Slo-Mo always uses HEVC in
+    /// LowPolyCam, so this deliberately ignores the saved normal-Video codec preference.
+    func supportedSlowMotionFormatPairs() -> [(VideoResolution, SlowMotionFrameRate)] {
+        let devices = capabilityDevices(for: cameraPosition.avPosition)
+        let selector = CameraFormatSelector(
+            selectedVideoCodec: "HEVC",
+            selectedResolution: selectedResolution,
+            selectedFrameRate: selectedFrameRate
+        )
+        let resolutions: [VideoResolution] = [.p720, .p1080, .p4k]
+        return resolutions.flatMap { resolution in
+            SlowMotionFrameRate.allCases.compactMap { frameRate in
+                let selection = selector.slowMotionFormatSelection(
+                    for: devices,
+                    requestedResolution: resolution,
+                    requestedFrameRate: frameRate
+                )
+                let supported = selection.resolution == resolution &&
+                    selection.frameRate == frameRate &&
+                    !selection.supportedDevices.isEmpty
+                return supported ? (resolution, frameRate) : nil
+            }
+        }
+    }
+
+    func isSlowMotionFormatSupported(
+        resolution: VideoResolution,
+        frameRate: SlowMotionFrameRate
+    ) -> Bool {
+        supportedSlowMotionFormatPairs().contains {
+            $0.0 == resolution && $0.1 == frameRate
+        }
+    }
+
+    /// Applies a Slo-Mo resolution/FPS pair as a single request. Like the Video equivalent, this
+    /// only touches active capture hardware when Slo-Mo is currently open; otherwise it persists
+    /// the preference for the next Slo-Mo session.
+    func selectSlowMotionFormat(
+        resolution: VideoResolution,
+        frameRate: SlowMotionFrameRate
+    ) {
+        guard !isRecording,
+              !isRecordingStarting,
+              !isFinalizingRecording,
+              !isCapturingPhoto,
+              !isLensTransitioning else { return }
+        guard isSlowMotionFormatSupported(resolution: resolution, frameRate: frameRate) else { return }
+        guard selectedSlowMotionResolution != resolution || selectedSlowMotionFrameRate != frameRate else { return }
+
+        AppEventLog.event(
+            "Slo-Mo format requested from Settings: \(selectedSlowMotionResolution.rawValue)/\(selectedSlowMotionFrameRate.rawValue) fps -> \(resolution.rawValue)/\(frameRate.rawValue) fps"
+        )
+
+        let wasSuppressingPersistence = suppressPreferencePersistence
+        suppressPreferencePersistence = true
+        selectedSlowMotionResolution = resolution
+        selectedSlowMotionFrameRate = frameRate
+        suppressPreferencePersistence = wasSuppressingPersistence
+        persistCameraPreferences()
+
+        guard captureMode == .sloMo else {
+            AppEventLog.event("Slo-Mo format saved for later; active mode=\(captureMode.rawValue)")
+            return
+        }
+
+        let transitionID = qualityPreviewTransitions.next()
+        isPreviewTransitioning = true
+        let request = SlowMotionQualityRequest(
+            id: qualityRequests.next(),
+            resolution: resolution,
+            frameRate: frameRate,
+            position: cameraPosition,
+            codec: selectedVideoCodec
+        )
+        sessionQueue.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            guard let self else { return }
+            guard self.qualityRequests.isLatest(request.id),
+                  self.captureMode == .sloMo,
+                  self.cameraPosition == request.position,
+                  self.selectedVideoCodec == request.codec,
+                  !self.recordingState.requestsRecording,
+                  !self.recordingState.isFinalizing,
+                  !self.movieOutput.isRecording else {
+                self.finishQualityPreviewTransition(transitionID)
+                return
+            }
+            self.lensTransitionCoordinator.cancel()
+            _ = self.applySlowMotionFormat(
+                requestedResolution: request.resolution,
+                requestedFrameRate: request.frameRate,
+                qualityRequestID: request.id,
+                requestedPosition: request.position
+            )
+            self.finishQualityPreviewTransition(transitionID)
+        }
+    }
+
+
+
     func selectResolution(_ resolution: VideoResolution) {
         guard captureMode == .video, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isLensTransitioning else { return }
         guard isVideoResolutionSupported(resolution) else { return }

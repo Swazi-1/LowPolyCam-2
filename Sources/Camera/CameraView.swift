@@ -173,8 +173,8 @@ struct CameraView: View {
                 cancelCountdown()
                 editingStats = true
             }
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
         }
         .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
         .onChange(of: isShowingSettings) { _, showing in

@@ -15,29 +15,43 @@ struct DiagnosticsSettingsView: View {
     }
 
     var body: some View {
-        SettingsPage {
-            SettingsCard(title: "Diagnostic Logging", symbol: "doc.text.magnifyingglass") {
-                SettingsToggleRow(
-                    title: "Save Diagnostic Logs",
-                    subtitle: "Saves detailed camera and app events to Files. Logs remain until you delete them manually.",
-                    isOn: loggingBinding
-                )
-                SettingsDivider()
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Location")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Files > On My iPhone > LowPolyCam > LowPolyCam Logs")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(loggingEnabled ? "A new numbered log is created for each enabled app session." : "Off by default. No diagnostic file is created while this is off.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        List {
+            Section("DIAGNOSTIC LOGGING") {
+                Toggle(isOn: loggingBinding) {
+                    SettingsToggleLabel(
+                        symbol: "doc.text.fill",
+                        color: .red,
+                        title: "Save Diagnostic Logs",
+                        subtitle: "Record detailed camera, settings, storage, save and session events for bug reports."
+                    )
                 }
+            } footer: {
+                Text("Logging is off by default. When enabled, every app session creates a new numbered log. Older logs are never deleted automatically.")
+            }
+
+            Section("LOG FILES") {
+                SettingsInfoRow(
+                    symbol: "folder.fill",
+                    color: .blue,
+                    title: "Location",
+                    detail: "Files > On My iPhone > LowPolyCam > LowPolyCam Logs"
+                )
+
+                SettingsInfoRow(
+                    symbol: "number",
+                    color: .gray,
+                    title: "Numbered Sessions",
+                    detail: loggingEnabled
+                        ? "Each enabled launch keeps its own log so reopening the app never destroys the previous bug report."
+                        : "No diagnostic file is created while logging is turned off."
+                )
             }
         }
-        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .listStyle(.insetGrouped)
         .navigationTitle("Diagnostics")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .onAppear { loggingEnabled = AppEventLog.diagnosticsEnabled }
     }
 }
