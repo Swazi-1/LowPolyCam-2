@@ -57,6 +57,83 @@ final class CameraManager: NSObject, ObservableObject {
         let transitionID: UInt64?
     }
 
+    private struct HighOutputReadbackSignature: Equatable {
+        let codec: String
+        let compressionPropertiesPresent: Bool
+        let averageBitrate: Double?
+    }
+
+    private final class VerifiedHighOutputProvenance {
+        weak var videoInput: AVCaptureDeviceInput?
+        weak var movieConnection: AVCaptureConnection?
+        weak var activeFormat: AVCaptureDevice.Format?
+        let epoch: UInt64
+        let deviceUniqueID: String
+        let mode: String
+        let isBackCamera: Bool
+        let resolution: String
+        let frameRate: Double
+        let codec: String
+        let dimensions: CMVideoDimensions
+        let minFrameDuration: CMTime
+        let maxFrameDuration: CMTime
+        let mirroringSupported: Bool
+        let mirrored: Bool
+        let stabilizationSupported: Bool
+        let stabilizationModeRawValue: Int
+        let readback: HighOutputReadbackSignature
+
+        init(
+            videoInput: AVCaptureDeviceInput,
+            movieConnection: AVCaptureConnection,
+            activeFormat: AVCaptureDevice.Format,
+            epoch: UInt64,
+            deviceUniqueID: String,
+            mode: String,
+            isBackCamera: Bool,
+            resolution: String,
+            frameRate: Double,
+            codec: String,
+            dimensions: CMVideoDimensions,
+            minFrameDuration: CMTime,
+            maxFrameDuration: CMTime,
+            mirroringSupported: Bool,
+            mirrored: Bool,
+            stabilizationSupported: Bool,
+            stabilizationModeRawValue: Int,
+            readback: HighOutputReadbackSignature
+        ) {
+            self.videoInput = videoInput
+            self.movieConnection = movieConnection
+            self.activeFormat = activeFormat
+            self.epoch = epoch
+            self.deviceUniqueID = deviceUniqueID
+            self.mode = mode
+            self.isBackCamera = isBackCamera
+            self.resolution = resolution
+            self.frameRate = frameRate
+            self.codec = codec
+            self.dimensions = dimensions
+            self.minFrameDuration = minFrameDuration
+            self.maxFrameDuration = maxFrameDuration
+            self.mirroringSupported = mirroringSupported
+            self.mirrored = mirrored
+            self.stabilizationSupported = stabilizationSupported
+            self.stabilizationModeRawValue = stabilizationModeRawValue
+            self.readback = readback
+        }
+    }
+
+    private struct OutputConfigurationRequestSnapshot {
+        let qualityRequestID: UInt64
+        let compressionRequestID: UInt64
+        let captureConfigurationGenerationID: UInt64
+        let videoConfigurationRequestID: UInt64
+        let cameraSwitchRequestID: UInt64
+        let modeChangeRequestID: UInt64
+        let whiteBalanceRequestID: UInt64
+    }
+
     private struct CodecSupportKey: Equatable {
         let isBackCamera: Bool
         let resolution: String
@@ -230,6 +307,10 @@ final class CameraManager: NSObject, ObservableObject {
     private let sessionQueue = DispatchQueue(label: "com.swazi.lowpolycam.camera")
     private let storageQueue = DispatchQueue(label: "com.swazi.lowpolycam.storage", qos: .utility)
     private let movieOutput = AVCaptureMovieFileOutput()
+    // Owned only on sessionQueue. The epoch is separate from desired-request and recording-state
+    // generations so a normal Record transition cannot invalidate settled hardware proof.
+    private var highOutputProvenanceEpoch: UInt64 = 0
+    private var verifiedHighOutputProvenance: VerifiedHighOutputProvenance?
     private let photoOutput = AVCapturePhotoOutput()
     private let liveMetrics = LiveCaptureMetrics()
     let liveStats = LiveRecordingStatsState()
@@ -924,6 +1005,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionRuntimeError(_ notification: Notification) {
+        invalidateVerifiedHighOutputProvenance()
         invalidatePendingVideoConfiguration()
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
@@ -946,6 +1028,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func handleSessionInterrupted(_ notification: Notification) {
+        invalidateVerifiedHighOutputProvenance()
         let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
         AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         invalidatePendingVideoConfiguration()
@@ -1114,6 +1197,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             AppEventLog.event("Camera stop requested")
+            self.invalidateVerifiedHighOutputProvenance()
             self.invalidatePendingVideoConfiguration()
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
@@ -1155,6 +1239,7 @@ final class CameraManager: NSObject, ObservableObject {
 
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
+            self.invalidateVerifiedHighOutputProvenance()
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
@@ -2409,6 +2494,7 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
+        invalidateVerifiedHighOutputProvenance()
         invalidateCodecSupportCache()
         AppEventLog.event("Configuring camera session\(forceRebuild ? " rebuild" : "")")
 
@@ -2508,6 +2594,9 @@ final class CameraManager: NSObject, ObservableObject {
         refreshAuxiliaryOutputs: Bool = true,
         requestedCodec: String? = nil
     ) -> CGFloat? {
+        // Any input/format transaction makes proof from the previous capture graph unusable,
+        // including attempts that fail before AVFoundation accepts the replacement.
+        invalidateVerifiedHighOutputProvenance()
         let effectiveCodec = requestedCodec ?? activeVideoCodec
         let oldInput = videoInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
@@ -3538,7 +3627,193 @@ final class CameraManager: NSObject, ObservableObject {
 
 
 
-    private func movieOutputSettingsMatchCurrentConfiguration() -> Bool {
+    private func currentOutputConfigurationRequestSnapshot() -> OutputConfigurationRequestSnapshot {
+        OutputConfigurationRequestSnapshot(
+            qualityRequestID: qualityRequests.current(),
+            compressionRequestID: compressionRequests.current(),
+            captureConfigurationGenerationID: captureConfigurationGeneration.current(),
+            videoConfigurationRequestID: videoConfigurationRequests.current(),
+            cameraSwitchRequestID: cameraSwitchRequests.current(),
+            modeChangeRequestID: modeChangeRequests.current(),
+            whiteBalanceRequestID: whiteBalanceRequests.current()
+        )
+    }
+
+    private func outputConfigurationRequestIsUnchanged(
+        _ snapshot: OutputConfigurationRequestSnapshot
+    ) -> Bool {
+        qualityRequests.isLatest(snapshot.qualityRequestID) &&
+            compressionRequests.isLatest(snapshot.compressionRequestID) &&
+            captureConfigurationGeneration.isLatest(snapshot.captureConfigurationGenerationID) &&
+            videoConfigurationRequests.isLatest(snapshot.videoConfigurationRequestID) &&
+            cameraSwitchRequests.isLatest(snapshot.cameraSwitchRequestID) &&
+            modeChangeRequests.isLatest(snapshot.modeChangeRequestID) &&
+            whiteBalanceRequests.isLatest(snapshot.whiteBalanceRequestID)
+    }
+
+    private func invalidateVerifiedHighOutputProvenance() {
+        highOutputProvenanceEpoch &+= 1
+        verifiedHighOutputProvenance = nil
+    }
+
+    private func highOutputReadbackSignature(
+        from settings: [String: Any]
+    ) -> HighOutputReadbackSignature? {
+        let codec = settings[AVVideoCodecKey] as? String ?? ""
+        guard !codec.isEmpty else { return nil }
+
+        guard let compressionValue = settings[AVVideoCompressionPropertiesKey] else {
+            return HighOutputReadbackSignature(
+                codec: codec,
+                compressionPropertiesPresent: false,
+                averageBitrate: nil
+            )
+        }
+        guard let compression = compressionValue as? [String: Any] else { return nil }
+        guard let bitrateValue = compression[AVVideoAverageBitRateKey] else {
+            return HighOutputReadbackSignature(
+                codec: codec,
+                compressionPropertiesPresent: true,
+                averageBitrate: nil
+            )
+        }
+        guard let bitrate = bitrateValue as? NSNumber,
+              bitrate.doubleValue.isFinite else {
+            return nil
+        }
+        return HighOutputReadbackSignature(
+            codec: codec,
+            compressionPropertiesPresent: true,
+            averageBitrate: bitrate.doubleValue
+        )
+    }
+
+    private func frameDurationMatchesFPS(_ duration: CMTime, fps: Double) -> Bool {
+        let seconds = duration.seconds
+        guard seconds.isFinite, seconds > 0, fps > 0 else { return false }
+        let tolerance = fps >= 100 ? 1.0 : 0.5
+        return abs((1.0 / seconds) - fps) < tolerance
+    }
+
+    private func installVerifiedHighOutputProvenance(
+        requestSnapshot: OutputConfigurationRequestSnapshot,
+        connection: AVCaptureConnection,
+        settings: [String: Any],
+        mode: CaptureMode,
+        position: CameraPosition,
+        resolution: VideoResolution,
+        frameRate: Double,
+        codec: String,
+        shouldMirror: Bool,
+        expectedStabilization: AVCaptureVideoStabilizationMode
+    ) {
+        guard outputConfigurationRequestIsUnchanged(requestSnapshot),
+              !session.isInterrupted,
+              session.outputs.contains(where: { $0 === movieOutput }),
+              let input = videoInput,
+              session.inputs.contains(where: { $0 === input }),
+              let device = videoInput?.device,
+              device.position == position.avPosition,
+              let currentConnection = movieOutput.connection(with: .video),
+              currentConnection === connection,
+              let readback = highOutputReadbackSignature(from: settings),
+              readback.codec == codec else { return }
+
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard dimensions.width == resolution.dimensions.width,
+              dimensions.height == resolution.dimensions.height,
+              frameDurationMatchesFPS(device.activeVideoMinFrameDuration, fps: frameRate),
+              frameDurationMatchesFPS(device.activeVideoMaxFrameDuration, fps: frameRate),
+              connection.isVideoMirroringSupported == false ||
+                  connection.isVideoMirrored == shouldMirror,
+              connection.isVideoStabilizationSupported == false ||
+                  connection.preferredVideoStabilizationMode == expectedStabilization else {
+            return
+        }
+
+        verifiedHighOutputProvenance = VerifiedHighOutputProvenance(
+            videoInput: input,
+            movieConnection: connection,
+            activeFormat: device.activeFormat,
+            epoch: highOutputProvenanceEpoch,
+            deviceUniqueID: device.uniqueID,
+            mode: mode.rawValue,
+            isBackCamera: position == .back,
+            resolution: resolution.rawValue,
+            frameRate: frameRate,
+            codec: codec,
+            dimensions: dimensions,
+            minFrameDuration: device.activeVideoMinFrameDuration,
+            maxFrameDuration: device.activeVideoMaxFrameDuration,
+            mirroringSupported: connection.isVideoMirroringSupported,
+            mirrored: connection.isVideoMirrored,
+            stabilizationSupported: connection.isVideoStabilizationSupported,
+            stabilizationModeRawValue: connection.preferredVideoStabilizationMode.rawValue,
+            readback: readback
+        )
+    }
+
+    private func verifiedHighOutputProvenanceMatchesCurrentConfiguration(
+        connection: AVCaptureConnection,
+        applied: [String: Any],
+        preferredCodec: AVVideoCodecType
+    ) -> Bool {
+        guard let provenance = verifiedHighOutputProvenance,
+              provenance.epoch == highOutputProvenanceEpoch,
+              !session.isInterrupted,
+              session.outputs.contains(where: { $0 === movieOutput }),
+              let input = videoInput,
+              session.inputs.contains(where: { $0 === input }),
+              let device = videoInput?.device,
+              let provenInput = provenance.videoInput,
+              provenInput === input,
+              let provenConnection = provenance.movieConnection,
+              provenConnection === connection,
+              let provenFormat = provenance.activeFormat,
+              provenFormat === device.activeFormat,
+              device.uniqueID == provenance.deviceUniqueID,
+              device.position == (provenance.isBackCamera ? .back : .front),
+              provenance.mode == captureMode.rawValue,
+              provenance.isBackCamera == (cameraPosition == .back),
+              provenance.resolution == (captureMode == .sloMo
+                  ? selectedSlowMotionResolution.rawValue
+                  : selectedResolution.rawValue),
+              abs(provenance.frameRate - (captureMode == .sloMo
+                  ? Double(selectedSlowMotionFrameRate.rawValue)
+                  : Double(selectedFrameRate.rawValue))) < 0.0001,
+              provenance.codec == activeVideoCodec,
+              videoCompression == .high else {
+            return false
+        }
+
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard dimensions.width == provenance.dimensions.width,
+              dimensions.height == provenance.dimensions.height,
+              CMTimeCompare(device.activeVideoMinFrameDuration, provenance.minFrameDuration) == 0,
+              CMTimeCompare(device.activeVideoMaxFrameDuration, provenance.maxFrameDuration) == 0,
+              connection.isVideoMirroringSupported == provenance.mirroringSupported,
+              connection.isVideoStabilizationSupported == provenance.stabilizationSupported else {
+            return false
+        }
+        if provenance.mirroringSupported, connection.isVideoMirrored != provenance.mirrored {
+            return false
+        }
+        if provenance.stabilizationSupported,
+           connection.preferredVideoStabilizationMode.rawValue != provenance.stabilizationModeRawValue {
+            return false
+        }
+
+        guard let readback = highOutputReadbackSignature(from: applied),
+              readback == provenance.readback,
+              readback.codec == preferredCodec.rawValue else {
+            return false
+        }
+        return true
+    }
+
+    private func movieOutputSettingsMatchCurrentConfiguration(
+        allowVerifiedHighDefault: Bool = false
+    ) -> Bool {
         guard let connection = movieOutput.connection(with: .video) else { return false }
         let preferred: AVVideoCodecType = activeVideoCodec == "H264" ? .h264 : .hevc
         let applied = movieOutput.outputSettings(for: connection)
@@ -3557,9 +3832,15 @@ final class CameraManager: NSObject, ObservableObject {
                   let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber else { return false }
             let expected = estimatedVideoBitsPerSecond
             if abs(bitrate.doubleValue - expected) > max(expected * 0.20, 1_000_000) { return false }
+        } else if allowVerifiedHighDefault {
+            guard verifiedHighOutputProvenanceMatchesCurrentConfiguration(
+                connection: connection,
+                applied: applied,
+                preferredCodec: preferred
+            ) else { return false }
         } else if applied[AVVideoCompressionPropertiesKey] != nil {
             // High means the system/default compression path. A previous custom bitrate must
-            // not be mistaken for the current setting when Record reconciles pending work.
+            // not be mistaken for the current setting when a non-Record caller reconciles work.
             return false
         }
         return true
@@ -3574,6 +3855,8 @@ final class CameraManager: NSObject, ObservableObject {
         requestedPosition: CameraPosition? = nil,
         requestedMode: CaptureMode? = nil
     ) -> Bool {
+        invalidateVerifiedHighOutputProvenance()
+        let requestSnapshot = currentOutputConfigurationRequestSnapshot()
         guard let connection = movieOutput.connection(with: .video) else { return false }
 
         let effectiveMode = requestedMode ?? captureMode
@@ -3604,10 +3887,10 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let shouldStabilize = effectiveMode == .video && isVideoStabilizationEnabled
+        let expectedStabilization: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
         if connection.isVideoStabilizationSupported {
-            let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
-            if connection.preferredVideoStabilizationMode != expected {
-                connection.preferredVideoStabilizationMode = expected
+            if connection.preferredVideoStabilizationMode != expectedStabilization {
+                connection.preferredVideoStabilizationMode = expectedStabilization
             }
         }
 
@@ -3667,6 +3950,20 @@ final class CameraManager: NSObject, ObservableObject {
             position: effectivePosition,
             compression: effectiveCompression
         )
+        if effectiveCompression == .high {
+            installVerifiedHighOutputProvenance(
+                requestSnapshot: requestSnapshot,
+                connection: connection,
+                settings: applied,
+                mode: effectiveMode,
+                position: effectivePosition,
+                resolution: effectiveResolution,
+                frameRate: effectiveFPS,
+                codec: preferred.rawValue,
+                shouldMirror: shouldMirror,
+                expectedStabilization: expectedStabilization
+            )
+        }
         return true
     }
 
@@ -3810,7 +4107,8 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
-        guard movieOutputSettingsMatchCurrentConfiguration() || configureMovieOutputSettings() else {
+        guard movieOutputSettingsMatchCurrentConfiguration(allowVerifiedHighDefault: true) ||
+              configureMovieOutputSettings() else {
             transitionRecordingState(to: .idle, resetClock: true)
             showError("\(activeVideoCodec == "H264" ? "H.264" : "HEVC") isn’t available at this resolution/FPS on this lens.")
             return
