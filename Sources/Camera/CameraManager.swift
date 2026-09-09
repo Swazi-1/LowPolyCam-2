@@ -369,6 +369,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let videoConfigurationRequests = RequestToken()
     private let qualityPreviewTransitions = RequestToken()
     private let exposureRequests = RequestToken()
+    private let torchRequests = RequestToken()
     private let codecSupportCacheLock = NSLock()
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
@@ -1029,6 +1030,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func handleSessionInterrupted(_ notification: Notification) {
         invalidateVerifiedHighOutputProvenance()
+        _ = torchRequests.next()
         let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
         AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         invalidatePendingVideoConfiguration()
@@ -1198,6 +1200,7 @@ final class CameraManager: NSObject, ObservableObject {
             guard let self else { return }
             AppEventLog.event("Camera stop requested")
             self.invalidateVerifiedHighOutputProvenance()
+            _ = self.torchRequests.next()
             self.invalidatePendingVideoConfiguration()
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
@@ -1240,6 +1243,7 @@ final class CameraManager: NSObject, ObservableObject {
             _ = self.qualityRequests.next()
             _ = self.captureConfigurationGeneration.next()
             self.invalidateVerifiedHighOutputProvenance()
+            _ = self.torchRequests.next()
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
@@ -1295,7 +1299,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     func toggleTorch() {
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.videoInput?.device, device.hasTorch else { return }
+            guard let self else { return }
+            _ = self.torchRequests.next()
+            guard let device = self.videoInput?.device, device.hasTorch else { return }
             if device.torchMode != .on && !device.isTorchAvailable {
                 self.synchronizeTorchState()
                 self.showError("Torch is temporarily unavailable.")
@@ -1797,6 +1803,51 @@ final class CameraManager: NSObject, ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    private func scheduleTorchRestoreAfterLensHandoff(
+        on device: AVCaptureDevice,
+        requestID: UInt64,
+        attempt: Int = 0
+    ) {
+        let delay = attempt == 0 ? 0.02 : 0.04
+        sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self, weak device] in
+            guard let self, let device,
+                  self.torchRequests.isLatest(requestID),
+                  self.videoInput?.device.uniqueID == device.uniqueID,
+                  self.session.isRunning,
+                  !self.session.isInterrupted,
+                  self.captureMode == .video,
+                  self.cameraPosition == .back,
+                  self.selectedResolution == .p4k,
+                  self.selectedFrameRate == .fps60,
+                  !self.recordingState.requestsRecording,
+                  !self.movieOutput.isRecording else { return }
+
+            guard device.hasTorch else {
+                self.synchronizeTorchState()
+                return
+            }
+            if device.torchMode == .on {
+                self.synchronizeTorchState()
+                return
+            }
+            guard attempt <= 3 else {
+                self.synchronizeTorchState()
+                AppEventLog.event("Torch remained off after rear 4K60 lens handoff")
+                return
+            }
+
+            self.setTorchEnabledOnCurrentDevice(true)
+            guard self.torchRequests.isLatest(requestID),
+                  self.videoInput?.device.uniqueID == device.uniqueID,
+                  device.torchMode != .on else { return }
+            self.scheduleTorchRestoreAfterLensHandoff(
+                on: device,
+                requestID: requestID,
+                attempt: attempt + 1
+            )
         }
     }
 
@@ -2601,6 +2652,15 @@ final class CameraManager: NSObject, ObservableObject {
         let oldInput = videoInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
+        let torchRequestID = torchRequests.next()
+        let shouldRetryTorchAfterPreviewHandoff = shouldPreserveTorch &&
+            isSwitchingInput &&
+            captureMode == .video &&
+            cameraPosition == .back &&
+            selectedResolution == .p4k &&
+            selectedFrameRate == .fps60 &&
+            !recordingState.requestsRecording &&
+            !movieOutput.isRecording
         var replacementInput: AVCaptureDeviceInput?
         var torchRestoreDevice: AVCaptureDevice?
 
@@ -2660,6 +2720,9 @@ final class CameraManager: NSObject, ObservableObject {
         defer {
             if !committed { session.commitConfiguration() }
             restoreSuspendedTorchIfPossible()
+            if committed, shouldRetryTorchAfterPreviewHandoff {
+                scheduleTorchRestoreAfterLensHandoff(on: desiredDevice, requestID: torchRequestID)
+            }
         }
 
         if isSwitchingInput {
