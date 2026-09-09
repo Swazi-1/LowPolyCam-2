@@ -39,7 +39,7 @@ final class CameraManager: NSObject, ObservableObject {
         var label: String { "\(rawValue) fps" }
     }
 
-    enum CameraPosition {
+    enum CameraPosition: String {
         case back
         case front
 
@@ -529,24 +529,42 @@ final class CameraManager: NSObject, ObservableObject {
     private static let mediaSequenceKey = "lowPolyCamMediaSequence"
 
     override init() {
-        let savedResolution = UserDefaults.standard.string(forKey: Self.resolutionKey)
+        let defaults = UserDefaults.standard
+        let rememberCameraSetup = defaults.bool(forKey: "rememberCaptureMode")
+        let restoredPosition: CameraPosition
+        if rememberCameraSetup,
+           let savedPosition = defaults.string(forKey: "lastCameraPosition"),
+           let position = CameraPosition(rawValue: savedPosition) {
+            restoredPosition = position
+        } else {
+            restoredPosition = .back
+        }
+        cameraPosition = restoredPosition
+
+        let positionSuffix = restoredPosition == .front ? ".front" : ""
+        let savedResolution = defaults.string(forKey: Self.resolutionKey + positionSuffix)
         selectedResolution = VideoResolution(rawValue: savedResolution ?? "") ?? .p1080
-        let savedFrameRate = UserDefaults.standard.integer(forKey: Self.frameRateKey)
+        let savedFrameRate = defaults.integer(forKey: Self.frameRateKey + positionSuffix)
         selectedFrameRate = VideoFrameRate(rawValue: savedFrameRate) ?? .fps30
-        let savedSlowMotionResolution = UserDefaults.standard.string(forKey: Self.slowMotionResolutionKey)
+        let savedSlowMotionResolution = defaults.string(forKey: Self.slowMotionResolutionKey + positionSuffix)
         selectedSlowMotionResolution = VideoResolution(rawValue: savedSlowMotionResolution ?? "") ?? .p1080
-        let savedSlowMotionFrameRate = UserDefaults.standard.integer(forKey: Self.slowMotionFrameRateKey)
-        selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? .fps240
-        isVideoStabilizationEnabled = UserDefaults.standard.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
+        let savedSlowMotionFrameRate = defaults.integer(forKey: Self.slowMotionFrameRateKey + positionSuffix)
+        selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? (restoredPosition == .front ? .fps120 : .fps240)
+        isVideoStabilizationEnabled = defaults.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
         super.init()
-        let savedPhotoMegapixels = UserDefaults.standard.integer(forKey: Self.photoMegapixelsKey)
+
+        let savedPhotoMegapixels = defaults.integer(forKey: Self.photoMegapixelsKey)
         preferredPhotoMegapixels = (1...12).contains(savedPhotoMegapixels) ? savedPhotoMegapixels : 12
         selectedPhotoMegapixels = preferredPhotoMegapixels
         currentPhotoResolutionLabel = "\(selectedPhotoMegapixels) MP"
         currentPhotoPixelCount = Int64(selectedPhotoMegapixels) * 1_000_000
-        if UserDefaults.standard.bool(forKey: "rememberCaptureMode"),
-           let saved = UserDefaults.standard.string(forKey: "lastCaptureMode"),
-           let mode = CaptureMode(rawValue: saved) { captureMode = mode }
+
+        if rememberCameraSetup,
+           let saved = defaults.string(forKey: "lastCaptureMode"),
+           let mode = CaptureMode(rawValue: saved) {
+            captureMode = mode
+        }
+
         installSessionObservers()
         if captureMode == .video {
             _ = autoPromoteH264ForUnsupportedVideoSelection(
@@ -555,6 +573,9 @@ final class CameraManager: NSObject, ObservableObject {
                 frameRate: selectedFrameRate
             )
         }
+        AppEventLog.event(
+            "CAMERA SETUP INITIALIZED: remember=\(rememberCameraSetup), mode=\(captureMode.rawValue), position=\(cameraPosition.rawValue)"
+        )
     }
 
     deinit {
@@ -1841,6 +1862,24 @@ final class CameraManager: NSObject, ObservableObject {
 
 
 
+    func setRememberCameraSetupEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "rememberCaptureMode")
+        if enabled {
+            persistRememberedCameraSetup()
+            AppEventLog.event(
+                "CAMERA SETUP MEMORY ENABLED: mode=\(captureMode.rawValue), position=\(cameraPosition.rawValue)"
+            )
+        } else {
+            AppEventLog.event("CAMERA SETUP MEMORY DISABLED")
+        }
+    }
+
+    private func persistRememberedCameraSetup() {
+        guard UserDefaults.standard.bool(forKey: "rememberCaptureMode") else { return }
+        UserDefaults.standard.set(captureMode.rawValue, forKey: "lastCaptureMode")
+        UserDefaults.standard.set(cameraPosition.rawValue, forKey: "lastCameraPosition")
+    }
+
     func switchCamera() {
         guard !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto, !isLensTransitioning else { return }
         let previous = cameraPosition
@@ -1910,6 +1949,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             guard self.cameraSwitchRequests.isLatest(requestID) else { return }
             self.synchronizeTorchState()
+            self.persistRememberedCameraSetup()
             AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")")
         }
     }
@@ -1944,7 +1984,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.publish {
                 self.isPreviewTransitioning = false
                 if success {
-                    UserDefaults.standard.set(mode.rawValue, forKey: "lastCaptureMode")
+                    self.persistRememberedCameraSetup()
                 } else {
                     self.captureMode = previousMode
                     self.sessionQueue.async {

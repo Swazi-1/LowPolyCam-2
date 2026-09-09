@@ -83,13 +83,13 @@ struct CapturePreferencesView: View {
         List {
             Section("CAPTURE") {
                 NavigationLink {
-                    ShutterHapticsSettingsView()
+                    ShutterSettingsView()
                 } label: {
                     SettingsNavigationLabel(
                         symbol: "timer",
                         color: .orange,
-                        title: "Shutter & Haptics",
-                        subtitle: "Timer, capture feedback and strength"
+                        title: "Shutter",
+                        subtitle: "Photo timer"
                     )
                 }
 
@@ -111,24 +111,21 @@ struct CapturePreferencesView: View {
                         symbol: "slider.horizontal.3",
                         color: .gray,
                         title: "Camera Controls",
-                        subtitle: "Mode memory, guides and selfie behavior"
+                        subtitle: "Selfie behavior and capture reset"
                     )
                 }
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Capture Preferences")
+        .navigationTitle("Preferences")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
     }
 }
 
-struct ShutterHapticsSettingsView: View {
+struct ShutterSettingsView: View {
     @AppStorage("shutterDelay") private var shutterDelay = 0
-    @AppStorage("hapticCaptureEnabled") private var haptics = true
-    @AppStorage("hapticStrength") private var strength = "Medium"
-    @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
@@ -140,28 +137,9 @@ struct ShutterHapticsSettingsView: View {
                     Text("10 seconds").tag(10)
                 }
             }
-
-            Section {
-                Toggle("Haptic Capture", isOn: $haptics)
-                Toggle("Countdown Haptics", isOn: $countdownHaptics)
-                Picker("Strength", selection: $strength) {
-                    Text("Low").tag("Low")
-                    Text("Medium").tag("Medium")
-                    Text("Strong").tag("Strong")
-                }
-                .disabled(!haptics)
-                .onChange(of: strength) { _, newValue in
-                    guard haptics else { return }
-                    CameraHaptics.fire(strength: newValue)
-                }
-            } header: {
-                Text("HAPTICS")
-            } footer: {
-                Text("Capture haptics provide feedback when the shutter starts or stops.")
-            }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Shutter & Haptics")
+        .navigationTitle("Shutter")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
         .preferredColorScheme(resolvedColorScheme(appColorScheme))
@@ -206,16 +184,12 @@ struct ZoomRecordingSettingsView: View {
 
 struct CameraControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
-    @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
         List {
             Section("BEHAVIOR") {
-                Toggle("Remember Camera Mode", isOn: $rememberCaptureMode)
-                Toggle("Center Crosshair", isOn: $crosshair)
                 Toggle("Mirror Saved Selfies", isOn: $mirrorSelfies)
             }
 

@@ -173,3 +173,78 @@ struct SettingsInfoRow: View {
         }
     }
 }
+
+
+// MARK: - Fixed option popover
+
+/// A compact Settings-style picker that opens a fixed popover instead of a scroll-tracking Menu.
+/// This is used for short option lists where dragging the system Menu would make the whole list move.
+struct SettingsPickerOption<Value: Hashable>: Identifiable {
+    let value: Value
+    let title: String
+    var id: Value { value }
+}
+
+struct SettingsFixedOptionPicker<Value: Hashable>: View {
+    let title: String
+    @Binding var selection: Value
+    let options: [SettingsPickerOption<Value>]
+    @State private var isPresented = false
+
+    private var selectedTitle: String {
+        options.first(where: { $0.value == selection })?.title ?? "—"
+    }
+
+    var body: some View {
+        Button {
+            isPresented = true
+        } label: {
+            HStack(spacing: 10) {
+                Text(title)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 12)
+                Text(selectedTitle)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+            VStack(spacing: 0) {
+                ForEach(options.indices, id: \.self) { index in
+                    let option = options[index]
+                    Button {
+                        selection = option.value
+                        isPresented = false
+                    } label: {
+                        HStack(spacing: 12) {
+                            Text(option.title)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 16)
+                            if option.value == selection {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        .frame(minHeight: 42)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if index < options.count - 1 {
+                        Divider().padding(.leading, 16)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+            .frame(width: 250)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}

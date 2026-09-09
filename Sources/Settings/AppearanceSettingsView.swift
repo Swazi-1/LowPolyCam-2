@@ -120,7 +120,7 @@ private struct CameraAccentPreview: View {
 
             VStack {
                 HStack(spacing: 18) {
-                    Image(systemName: "gearshape.fill")
+                    Image(systemName: "bolt.fill")
                     Spacer()
                     Text("4K · 60")
                         .font(.caption.weight(.semibold))
@@ -129,7 +129,7 @@ private struct CameraAccentPreview: View {
                         .background(.black.opacity(0.55), in: Capsule())
                         .overlay(Capsule().stroke(accent.opacity(0.75)))
                     Spacer()
-                    Image(systemName: "bolt.fill")
+                    Image(systemName: "gearshape.fill")
                 }
                 .foregroundStyle(accent)
                 .padding(.horizontal, 18)
@@ -196,6 +196,7 @@ struct VideoPresetsView: View {
                         }
                         .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             }
 

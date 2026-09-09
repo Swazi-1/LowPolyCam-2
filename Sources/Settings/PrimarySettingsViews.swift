@@ -2,7 +2,10 @@ import SwiftUI
 
 struct CameraSetupSettingsView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
+    @AppStorage("rememberCaptureMode") private var rememberCameraSetup = false
+    @AppStorage("hapticCaptureEnabled") private var hapticCaptureEnabled = true
+    @AppStorage("hapticStrength") private var hapticStrength = "Medium"
+    @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
@@ -27,15 +30,50 @@ struct CameraSetupSettingsView: View {
                 cameraPositionButton(.front, title: "Front Camera")
             }
 
-            Section("PREFERENCES") {
-                Toggle(isOn: $rememberCaptureMode) {
+            Section {
+                Toggle(isOn: $rememberCameraSetup) {
                     SettingsToggleLabel(
                         symbol: "arrow.counterclockwise.circle.fill",
                         color: .green,
-                        title: "Remember Camera Mode",
-                        subtitle: "Open LowPolyCam in the last used capture mode."
+                        title: "Remember Camera Setup",
+                        subtitle: "Restore the last capture mode and front/rear camera when LowPolyCam opens."
                     )
                 }
+                .onChange(of: rememberCameraSetup) { _, enabled in
+                    camera.setRememberCameraSetupEnabled(enabled)
+                }
+
+                Toggle(isOn: $hapticCaptureEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "waveform.path.ecg",
+                        color: .orange,
+                        title: "Haptic Capture",
+                        subtitle: "Feel feedback when the shutter starts or stops."
+                    )
+                }
+
+                Picker("Haptic Strength", selection: $hapticStrength) {
+                    Text("Low").tag("Low")
+                    Text("Medium").tag("Medium")
+                    Text("Strong").tag("Strong")
+                }
+                .pickerStyle(.menu)
+                .disabled(!hapticCaptureEnabled)
+                .onChange(of: hapticStrength) { _, newValue in
+                    guard hapticCaptureEnabled else { return }
+                    CameraHaptics.fire(strength: newValue)
+                }
+
+                Toggle(isOn: $countdownHaptics) {
+                    SettingsToggleLabel(
+                        symbol: "timer",
+                        color: .orange,
+                        title: "Countdown Haptics",
+                        subtitle: "Add haptic feedback during the photo timer countdown."
+                    )
+                }
+            } header: {
+                Text("PREFERENCES")
             }
         }
         .listStyle(.insetGrouped)
@@ -163,8 +201,7 @@ struct RecordVideoSettingsView: View {
         !camera.isRecording &&
         !camera.isRecordingStarting &&
         !camera.isFinalizingRecording &&
-        !camera.isLensTransitioning &&
-        !camera.isPreviewTransitioning
+        !camera.isLensTransitioning
     }
 
     private func formatName(_ resolution: VideoResolution, _ frameRate: VideoFrameRate) -> String {
@@ -223,8 +260,7 @@ struct SlowMotionSettingsView: View {
         !camera.isRecording &&
         !camera.isRecordingStarting &&
         !camera.isFinalizingRecording &&
-        !camera.isLensTransitioning &&
-        !camera.isPreviewTransitioning
+        !camera.isLensTransitioning
     }
 
     private func formatName(_ resolution: VideoResolution, _ frameRate: CameraManager.SlowMotionFrameRate) -> String {
@@ -245,23 +281,17 @@ struct PhotoCaptureSettingsView: View {
     var body: some View {
         List {
             Section {
-                Picker("Megapixels", selection: megapixelBinding) {
-                    ForEach(camera.supportedPhotoMegapixels, id: \.self) { megapixels in
-                        Text("\(megapixels) MP").tag(megapixels)
+                SettingsFixedOptionPicker(
+                    title: "Megapixels",
+                    selection: megapixelBinding,
+                    options: camera.supportedPhotoMegapixels.map {
+                        SettingsPickerOption(value: $0, title: "\($0) MP")
                     }
-                }
-                .pickerStyle(.menu)
-
-                Picker("Photos per Burst", selection: $burstCount) {
-                    Text("5").tag(5)
-                    Text("10").tag(10)
-                    Text("15").tag(15)
-                }
-                .pickerStyle(.menu)
+                )
             } header: {
                 Text("PHOTO QUALITY")
             } footer: {
-                Text("LowPolyCam keeps full sensor quality and saves at the selected megapixel count. Hold the shutter to start a burst and release it to stop early.")
+                Text("LowPolyCam keeps full sensor quality and saves at the selected megapixel count.")
             }
 
             Section("FORMAT") {
@@ -285,6 +315,20 @@ struct PhotoCaptureSettingsView: View {
             }
 
             Section {
+                SettingsFixedOptionPicker(
+                    title: "Photos per Burst",
+                    selection: $burstCount,
+                    options: [5, 10, 15].map {
+                        SettingsPickerOption(value: $0, title: "\($0)")
+                    }
+                )
+            } header: {
+                Text("EXTRAS")
+            } footer: {
+                Text("Hold the shutter to start a burst and release it to stop early.")
+            }
+
+            Section("FLASH") {
                 ForEach(CameraManager.PhotoFlashMode.allCases) { mode in
                     Button {
                         camera.photoFlashMode = mode
@@ -292,8 +336,6 @@ struct PhotoCaptureSettingsView: View {
                         SettingsCheckmarkRow(title: mode.rawValue, selected: camera.photoFlashMode == mode)
                     }
                 }
-            } header: {
-                Text("PHOTO FLASH")
             } footer: {
                 Text("Flash is applied when the selected camera supports still-photo flash.")
             }

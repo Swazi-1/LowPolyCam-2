@@ -120,6 +120,8 @@ enum AppEventLog {
         ("recordingLock", "false"),
         ("lowStorageWarning", "true"),
         ("rememberCaptureMode", "false"),
+        ("lastCaptureMode", "VIDEO"),
+        ("lastCameraPosition", "back"),
         ("mirrorSelfies", "false"),
         ("centerCrosshair", "false"),
         ("cameraGridEnabled", "false"),
@@ -351,12 +353,50 @@ enum AppEventLog {
         settingsSnapshot = current
     }
 
+    private static let booleanSettingKeys: Set<String> = [
+        "diagnosticLoggingEnabled", "videoStabilizationEnabled", "hapticCaptureEnabled",
+        "countdownHaptics", "tapZoomReset", "recordingLock", "lowStorageWarning",
+        "rememberCaptureMode", "mirrorSelfies", "centerCrosshair", "cameraGridEnabled",
+        "levelMeterEnabled", "keepScreenAwakeEnabled", "cameraHUDEnabled", "cameraHUDResolution",
+        "cameraHUDFPS", "cameraHUDRemaining", "cameraHUDWhiteBalance", "cameraHUDBattery",
+        "cameraHUDStorage", "cameraHUDDroppedFrames", "thermalHUD", "longevityMode",
+        "liveRecordingStats", "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops"
+    ]
+
+    private static let decimalSettingKeys: Set<String> = [
+        "iconCustomRed", "iconCustomGreen", "iconCustomBlue", "zoomSpeed", "gridOpacity",
+        "hudTextSize", "liveStatsX", "liveStatsY"
+    ]
+
     private static func currentSettingsLocked() -> [String: String] {
         let defaults = UserDefaults.standard
         return Dictionary(uniqueKeysWithValues: diagnosticSettings.map { setting in
             let value = defaults.object(forKey: setting.key)
-            return (setting.key, value.map { String(describing: $0) } ?? setting.defaultValue)
+            return (setting.key, formattedSettingValue(value, setting: setting))
         })
+    }
+
+    private static func formattedSettingValue(
+        _ value: Any?,
+        setting: (key: String, defaultValue: String)
+    ) -> String {
+        guard let value else { return setting.defaultValue }
+
+        if booleanSettingKeys.contains(setting.key) {
+            if let bool = value as? Bool { return bool ? "true" : "false" }
+            if let number = value as? NSNumber { return number.boolValue ? "true" : "false" }
+        }
+
+        if decimalSettingKeys.contains(setting.key), let number = value as? NSNumber {
+            var text = String(format: "%.4f", number.doubleValue)
+            while text.last == "0" { text.removeLast() }
+            if text.last == "." { text.append("0") }
+            return text
+        }
+
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return String(describing: number) }
+        return String(describing: value)
     }
 
     private static func authorizationName(_ status: AVAuthorizationStatus) -> String {
