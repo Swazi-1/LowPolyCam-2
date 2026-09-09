@@ -4332,7 +4332,47 @@ final class CameraManager: NSObject, ObservableObject {
               device.hasFlash else { return .off }
         let supportedModes = photoOutput.supportedFlashModes
         guard supportedModes.contains(photoFlashMode.avMode) else { return .off }
-        return photoFlashMode.avMode
+        guard photoFlashMode == .auto, cameraPosition == .front else {
+            return photoFlashMode.avMode
+        }
+
+        // Front-camera Auto is resolved from the current preview scene instead of delegating
+        // the final decision to the capture moment. The extra exposure gate keeps ordinary
+        // rooms and a nearby lamp from being treated as flash-dark by the front sensor.
+        let sceneNeedsFlash = photoOutput.isFlashScene
+        let shouldUseFlash = shouldUseFrontAutoFlash(on: device)
+        let resolved = shouldUseFlash ? AVCaptureDevice.FlashMode.on : .off
+        AppEventLog.event(
+            "Front Auto flash decision: sceneNeedsFlash=\(sceneNeedsFlash), " +
+            "applied=\(shouldUseFlash), ISO=\(String(format: "%.0f", device.iso)), " +
+            "exposure=\(String(format: "%.4f", device.exposureDuration.seconds))s"
+        )
+        return supportedModes.contains(resolved) ? resolved : .off
+    }
+
+    private func shouldUseFrontAutoFlash(on device: AVCaptureDevice) -> Bool {
+        guard photoOutput.isFlashScene else { return false }
+
+        let isoThreshold = max(device.activeFormat.minISO * 8, 500)
+        let iso = device.iso
+        guard iso.isFinite else { return true }
+        if iso >= isoThreshold { return true }
+
+        let exposureSeconds = device.exposureDuration.seconds
+        let maximumExposureSeconds = device.activeMaxExposureDuration.seconds
+        let isNearAutoExposureLimit = exposureSeconds.isFinite &&
+            exposureSeconds >= (1.0 / 30.0) &&
+            (!maximumExposureSeconds.isFinite || maximumExposureSeconds <= 0 ||
+             exposureSeconds >= maximumExposureSeconds * 0.9)
+        return isNearAutoExposureLimit && iso >= isoThreshold * 0.7
+    }
+
+    private func configurePhotoSceneMonitoring() {
+        guard photoOutput.supportedFlashModes.contains(.auto) else { return }
+        let monitoringSettings = AVCapturePhotoSettings()
+        monitoringSettings.flashMode = .auto
+        monitoringSettings.isAutoStillImageStabilizationEnabled = true
+        photoOutput.photoSettingsForSceneMonitoring = monitoringSettings
     }
 
     private func beginPhotoCapture() {
@@ -4589,6 +4629,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
         let torchAvailable = device.hasTorch && device.isTorchAvailable
+        configurePhotoSceneMonitoring()
         let flashAvailable = device.hasFlash && !photoOutput.supportedFlashModes.isEmpty
         publish {
             if self.torchAvailable != torchAvailable {
