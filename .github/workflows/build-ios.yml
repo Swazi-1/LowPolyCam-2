@@ -63,13 +63,20 @@ jobs:
 
       - name: Run unit tests
         run: |
-          set -o pipefail
-          SIMULATOR_ID=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ {print $2; exit}')
+          set -euo pipefail
+          DESTINATION_OUTPUT=$(xcodebuild \
+            -project LowPolyCam.xcodeproj \
+            -scheme LowPolyCam \
+            -configuration Debug \
+            -showdestinations 2>&1)
+          DESTINATION_LINE=$(printf '%s\n' "$DESTINATION_OUTPUT" | awk '/platform:iOS Simulator/ && /name:iPhone/ && /id:/ {print; exit}')
+          SIMULATOR_ID=$(printf '%s\n' "$DESTINATION_LINE" | awk -F'id:' '{split($2, parts, ","); gsub(/^[[:space:]]+/, "", parts[1]); gsub(/[[:space:]}]+$/, "", parts[1]); print parts[1]; exit}')
           if [ -z "$SIMULATOR_ID" ]; then
-            echo "No available iPhone simulator was found." >&2
-            xcrun simctl list devices available
+            echo "No Xcode-compatible iPhone simulator destination was found." >&2
+            printf '%s\n' "$DESTINATION_OUTPUT" >&2
             exit 1
           fi
+          echo "Testing on iOS Simulator destination: $DESTINATION_LINE"
           xcodebuild \
             -project LowPolyCam.xcodeproj \
             -scheme LowPolyCam \

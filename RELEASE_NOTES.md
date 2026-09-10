@@ -15,6 +15,7 @@ This archive is the v5.0.11 beta source with the v5 release-closure pass applied
 - Motion usage description required by the horizon level meter.
 - Native launch-screen background asset and dead declaration cleanup.
 - Xcode 26/Swift 6 CoreMedia format-description cast fix.
+- CI test destination selection now uses an Xcode-compatible iPhone simulator ID.
 
 ## Version
 
