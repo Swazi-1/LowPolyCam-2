@@ -230,7 +230,7 @@ struct VideoPresetsView: View {
 
     @ViewBuilder
     private var customPresetsSection: some View {
-        Section("CUSTOM PRESETS") {
+        Section {
             if customPresets.isEmpty {
                 Text("Save the current camera setup to create a reusable preset.")
                     .font(.subheadline)
@@ -247,6 +247,8 @@ struct VideoPresetsView: View {
             } label: {
                 Label("Save Current Setup", systemImage: "plus.circle.fill")
             }
+        } header: {
+            Text("CUSTOM PRESETS")
         } footer: {
             Text("Presets store capture mode, formats, codec, independent compression, bitrate, zoom, stabilization, white balance and camera position. Applying one uses a single coordinated camera configuration.")
         }
