@@ -36,7 +36,7 @@ struct CameraHUDSettingsView: View {
     }
 }
 
-private struct CameraHUDContentSettingsView: View {
+struct CameraHUDContentSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
@@ -77,7 +77,7 @@ private struct CameraHUDContentSettingsView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Camera HUD")
+        .navigationTitle("HUD Content & Style")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
     }

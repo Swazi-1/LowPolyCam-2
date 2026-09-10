@@ -241,6 +241,8 @@ struct VideoSettingsView: View {
             CapturePreferencesView(camera: camera)
         case .cameraHUD:
             CameraHUDSettingsView(camera: camera)
+        case .cameraHUDContent:
+            CameraHUDContentSettingsView(camera: camera)
         case .advancedRecording:
             AdvancedRecordingSettingsView(camera: camera, positionStats: positionStats)
         case .liveStats:
@@ -349,13 +351,13 @@ struct VideoSettingsView: View {
             .init("Slo-Mo Frame Rate", "Settings › Record Slo-Mo", "120 240 fps slow motion frame rate", "slowmo", .orange, .slowMotion),
 
             .init("Photo Capture", "Settings › Photo Capture", "photo camera megapixels format aspect extras", "camera.fill", .green, .photoCapture),
-            .init("Megapixels", "Settings › Photo Capture › Photo Quality", "mp photo resolution quality megapixel", "camera.fill", .green, .photoCapture),
-            .init("Photo Format", "Settings › Photo Capture › Format", "heic jpeg jpg photo format", "camera.fill", .green, .photoCapture),
-            .init("HEIC", "Settings › Photo Capture › Format", "heic photo format", "camera.fill", .green, .photoCapture),
-            .init("JPEG", "Settings › Photo Capture › Format", "jpeg jpg photo format", "camera.fill", .green, .photoCapture),
-            .init("Aspect Ratio", "Settings › Photo Capture › Aspect Ratio", "4 3 1 1 square aspect ratio", "camera.fill", .green, .photoCapture),
-            .init("Photos per Burst", "Settings › Photo Capture › Extras", "burst photos count 15 10 5", "camera.fill", .green, .photoCapture),
-            .init("Photo Flash", "Settings › Photo Capture › Extras › Flash", "flash auto on off still photo", "camera.fill", .green, .photoCapture),
+            .init("Megapixels", "Settings › Photo Capture", "mp photo resolution quality megapixel", "camera.fill", .green, .photoCapture),
+            .init("Photo Format", "Settings › Photo Capture", "heic jpeg jpg photo format", "camera.fill", .green, .photoCapture),
+            .init("HEIC", "Settings › Photo Capture", "heic photo format", "camera.fill", .green, .photoCapture),
+            .init("JPEG", "Settings › Photo Capture", "jpeg jpg photo format", "camera.fill", .green, .photoCapture),
+            .init("Aspect Ratio", "Settings › Photo Capture", "4 3 1 1 square aspect ratio", "camera.fill", .green, .photoCapture),
+            .init("Photos per Burst", "Settings › Photo Capture", "burst photos count 15 10 5", "camera.fill", .green, .photoCapture),
+            .init("Photo Flash", "Settings › Photo Capture", "flash auto on off still photo", "camera.fill", .green, .photoCapture),
 
             .init("Quick Controls", "Settings › Quick Controls", "camera composition controls", "slider.horizontal.3", .gray, .quickControls),
             .init("Grid", "Settings › Quick Controls", "composition grid guides", "grid", .blue, .quickControls),
@@ -377,16 +379,16 @@ struct VideoSettingsView: View {
 
             .init("Camera HUD", "Settings › Camera HUD", "hud display camera capsule", "rectangle.inset.filled", .blue, .cameraHUD),
             .init("Show Camera HUD", "Settings › Camera HUD", "show camera hud capsule", "rectangle.inset.filled", .blue, .cameraHUD),
-            .init("HUD Content & Style", "Settings › Camera HUD", "hud content style", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD),
-            .init("HUD Resolution", "Settings › Camera HUD", "resolution hud main info", "rectangle.inset.filled", .blue, .cameraHUD),
-            .init("HUD FPS", "Settings › Camera HUD", "fps frame rate hud", "rectangle.inset.filled", .blue, .cameraHUD),
-            .init("Photos / Time Remaining", "Settings › Camera HUD", "photos remaining time remaining hud", "rectangle.inset.filled", .blue, .cameraHUD),
-            .init("HUD White Balance", "Settings › Camera HUD", "white balance wb hud", "rectangle.inset.filled", .blue, .cameraHUD),
-            .init("Battery HUD", "Settings › Camera HUD", "battery device info hud", "battery.100percent", .green, .cameraHUD),
-            .init("Free Storage HUD", "Settings › Camera HUD", "free storage device info hud", "externaldrive.fill.badge.checkmark", .blue, .cameraHUD),
-            .init("Thermal Status HUD", "Settings › Camera HUD", "thermal temperature status hud", "waveform.path.ecg", .orange, .cameraHUD),
-            .init("Frame Gaps HUD", "Settings › Camera HUD", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .cameraHUD),
-            .init("HUD Text Size", "Settings › Camera HUD", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD),
+            .init("HUD Content & Style", "Settings › Camera HUD › HUD Content & Style", "hud content style", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUDContent),
+            .init("HUD Resolution", "Settings › Camera HUD › HUD Content & Style", "resolution hud main info", "rectangle.inset.filled", .blue, .cameraHUDContent),
+            .init("HUD FPS", "Settings › Camera HUD › HUD Content & Style", "fps frame rate hud", "rectangle.inset.filled", .blue, .cameraHUDContent),
+            .init("Photos / Time Remaining", "Settings › Camera HUD › HUD Content & Style", "photos remaining time remaining hud", "rectangle.inset.filled", .blue, .cameraHUDContent),
+            .init("HUD White Balance", "Settings › Camera HUD › HUD Content & Style", "white balance wb hud", "rectangle.inset.filled", .blue, .cameraHUDContent),
+            .init("Battery HUD", "Settings › Camera HUD › HUD Content & Style", "battery device info hud", "battery.100percent", .green, .cameraHUDContent),
+            .init("Free Storage HUD", "Settings › Camera HUD › HUD Content & Style", "free storage device info hud", "externaldrive.fill.badge.checkmark", .blue, .cameraHUDContent),
+            .init("Thermal Status HUD", "Settings › Camera HUD › HUD Content & Style", "thermal temperature status hud", "waveform.path.ecg", .orange, .cameraHUDContent),
+            .init("Frame Gaps HUD", "Settings › Camera HUD › HUD Content & Style", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .cameraHUDContent),
+            .init("HUD Text Size", "Settings › Camera HUD › HUD Content & Style", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUDContent),
 
             .init("Advanced Recording", "Settings › Advanced Recording", "recording advanced live stats split longevity safety", "waveform.path.ecg", .purple, .advancedRecording),
             .init("Live Recording Stats", "Settings › Advanced Recording", "live stats fps bitrate frame drops", "chart.bar.fill", .blue, .advancedRecording),
@@ -399,8 +401,8 @@ struct VideoSettingsView: View {
             .init("Split Recording", "Settings › Advanced Recording", "split recording off 15 30 60 120 minutes hour 2 hours", "waveform.path.ecg", .purple, .advancedRecording),
             .init("Longevity Mode", "Settings › Advanced Recording", "longevity long recording battery 720p 30 fps hevc data saver dim", "battery.100percent", .green, .advancedRecording),
             .init("Recording Recovery", "Settings › Advanced Recording", "recovery retry failed photos import recordings", "arrow.counterclockwise.circle.fill", .purple, .advancedRecording),
-            .init("Low-Storage Protection", "Settings › Advanced Recording › Safety", "critical low storage protection safely finalize clip", "externaldrive.fill.badge.checkmark", .blue, .advancedRecording),
-            .init("Background Save Protection", "Settings › Advanced Recording › Safety", "background save protection pending photo video saves", "square.and.arrow.down.fill", .green, .advancedRecording),
+            .init("Low-Storage Protection", "Settings › Advanced Recording", "critical low storage protection safely finalize clip", "externaldrive.fill.badge.checkmark", .blue, .advancedRecording),
+            .init("Background Save Protection", "Settings › Advanced Recording", "background save protection pending photo video saves", "square.and.arrow.down.fill", .green, .advancedRecording),
 
             .init("Video Presets", "Settings › Video Presets", "video presets balanced high quality all rounder all day social", "star.fill", .yellow, .videoPresets),
             .init("Balanced Preset", "Settings › Video Presets", "balanced 1080p medium 30 fps hevc", "slider.horizontal.3", .blue, .videoPresets),
@@ -411,6 +413,7 @@ struct VideoSettingsView: View {
 
             .init("Diagnostics", "Settings › Diagnostics", "diagnostics logs logging bug report", "waveform.path.ecg", .red, .diagnostics),
             .init("Save Diagnostic Logs", "Settings › Diagnostics", "save diagnostic logs logging bug report", "doc.text.fill", .red, .diagnostics),
+            .init("Extreme Bug Trace", "Settings › Diagnostics", "extreme max diagnostics trace zoom lens request timing guard hardware readback", "waveform.path.ecg.rectangle.fill", .orange, .diagnostics),
             .init("Diagnostic Log Location", "Settings › Diagnostics", "files on my iphone lowpolycam logs location folder", "folder.fill", .blue, .diagnostics),
             .init("Numbered Sessions", "Settings › Diagnostics", "numbered sessions separate log each launch", "number", .gray, .diagnostics),
             .init("About LowPolyCam", "Settings › About", "about version build app", "info.circle.fill", .gray, .about)
@@ -456,7 +459,7 @@ struct VideoSettingsView: View {
             entries.append(
                 .init(
                     "\(megapixels) MP",
-                    "Settings › Photo Capture › Photo Quality › Megapixels",
+                    "Settings › Photo Capture",
                     "\(megapixels)mp \(megapixels) megapixel photo resolution",
                     "camera.fill",
                     .green,
@@ -469,7 +472,7 @@ struct VideoSettingsView: View {
             entries.append(
                 .init(
                     "\(count) Photos per Burst",
-                    "Settings › Photo Capture › Extras",
+                    "Settings › Photo Capture",
                     "burst \(count) photos count",
                     "camera.fill",
                     .green,
@@ -479,7 +482,7 @@ struct VideoSettingsView: View {
         }
 
         for mode in ["Off", "Auto", "On"] {
-            entries.append(.init("Photo Flash: \(mode)", "Settings › Photo Capture › Extras › Flash", "flash \(mode)", "camera.fill", .green, .photoCapture))
+            entries.append(.init("Photo Flash: \(mode)", "Settings › Photo Capture", "flash \(mode)", "camera.fill", .green, .photoCapture))
         }
         for timer in ["Off", "3 seconds", "10 seconds"] {
             entries.append(.init("Timer: \(timer)", "Settings › Preferences", "photo shutter timer delay \(timer)", "timer", .orange, .preferences))
@@ -497,7 +500,7 @@ struct VideoSettingsView: View {
             entries.append(.init("Zoom Speed: \(zoom)", "Settings › Preferences", "zoom speed \(zoom)", "plus.magnifyingglass", .blue, .preferences))
         }
         for size in ["Compact", "Large"] {
-            entries.append(.init("HUD Text Size: \(size)", "Settings › Camera HUD", "hud text size \(size)", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD))
+            entries.append(.init("HUD Text Size: \(size)", "Settings › Camera HUD › HUD Content & Style", "hud text size \(size)", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUDContent))
         }
         for size in ["Compact", "Normal"] {
             entries.append(.init("Live Stats Panel Size: \(size)", "Settings › Advanced Recording › Live Stats", "live stats panel size \(size)", "chart.bar.fill", .blue, .liveStats))
@@ -560,6 +563,7 @@ private enum SettingsSearchDestination: Hashable {
     case quickControls
     case preferences
     case cameraHUD
+    case cameraHUDContent
     case advancedRecording
     case liveStats
     case videoPresets

@@ -190,9 +190,9 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             let anomaly = zoomAnomaly || brightnessFlicker
             if anomaly { probeAnomalyFrames += 1 }
             let gapMs = previousFrameTimestamp.map { max(0, timestamp - $0) * 1000 }
-            // Log every frame for the first 20 frames and every anomalous frame after that. This is
-            // intentionally temporary and bounded to the transition window.
-            if probeFrameIndex <= 20 || anomaly {
+            // Extreme Bug Trace logs every observed frame while the bounded transition probe is
+            // active. Normal diagnostics keep the original first-20/anomaly-only behavior.
+            if AppEventLog.extremeDiagnosticsEnabled || probeFrameIndex <= 20 || anomaly {
                 probeRecord = (trace, probeFrameIndex, device.localizedName, actual, expected,
                                probeExpectedDisplayedZoom, probeHUDZoom, delta, gapMs, luma, lumaDelta,
                                zoomAnomaly, brightnessFlicker, anomaly)
@@ -300,7 +300,9 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         }
         lock.unlock()
 
-        if AppEventLog.extremeDiagnosticsEnabled && (trace != nil || dropNumber <= 5 || dropNumber % 25 == 0) {
+        // Extreme mode records every dropped callback so short drop bursts cannot disappear
+        // between the old first-five/every-25 sampling points. Normal mode is unchanged.
+        if AppEventLog.extremeDiagnosticsEnabled && (trace != nil || dropNumber > 0) {
             AppEventLog.deepEvent("CAPTURE CALLBACK FRAME DROPPED", category: .performance, level: .warning, traceID: trace, fields: [
                 "dropNumber": String(dropNumber),
                 "pts": timestamp.isFinite ? String(format: "%.6f", timestamp) : "invalid"

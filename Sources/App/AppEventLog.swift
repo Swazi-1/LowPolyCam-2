@@ -5,7 +5,8 @@ import UIKit
 
 /// Opt-in, ordered bug-forensics diagnostics. Callers never perform file I/O; records are formatted
 /// at the call site, queued on a utility queue, and batch-written so camera/session work is not held
-/// up by diagnostics. Extreme mode adds trace IDs, state/guard breadcrumbs and transition probes.
+/// up by diagnostics. Extreme mode adds trace IDs, state/guard breadcrumbs, transition probes, and a
+/// received/committed timing envelope around every event without changing normal diagnostics.
 enum AppEventLog {
     enum Level: String {
         case trace = "TRACE"
@@ -39,6 +40,7 @@ enum AppEventLog {
         case settings = "SETTINGS"
         case request = "REQUEST"
         case performance = "PERFORMANCE"
+        case traceContext = "TRACE_CTX"
         case thermal = "THERMAL"
         case error = "ERROR"
     }
@@ -193,6 +195,8 @@ enum AppEventLog {
     private static var settingsSnapshot: [String: String] = [:]
     private static var settingsLogGeneration: UInt64 = 0
     private static var settingsLogScheduled = false
+    private static var settingsRevision: UInt64 = 0
+    private static var lastSettingsChangeUptime: TimeInterval?
     private static let settingsLogDebounceNanoseconds: UInt64 = 100_000_000
     private static var eventCounter: UInt64 = 0
     private static var warningCount: UInt64 = 0
@@ -534,8 +538,67 @@ enum AppEventLog {
         queue.async {
             guard loggingEnabledLocked else { return }
             beginNewSessionLocked()
+            let extreme = extremeDiagnosticsEnabled
+            let receivedAt = ProcessInfo.processInfo.systemUptime
+            if extreme {
+                appendExtremeRecordLocked(
+                    "EXTREME EVENT RECEIVED",
+                    source: record,
+                    fields: [
+                        "sourceLevel": record.level.rawValue,
+                        "sourceCategory": record.category.rawValue,
+                        "sourceMessage": record.message,
+                        "callToLoggerMs": String(format: "%.2f", (receivedAt - record.callUptime) * 1000),
+                        "settingsRevision": String(settingsRevision),
+                        "settingsAgeMs": settingsAgeMilliseconds(now: receivedAt),
+                        "thermal": thermalStateName(ProcessInfo.processInfo.thermalState),
+                        "lowPowerMode": String(ProcessInfo.processInfo.isLowPowerModeEnabled)
+                    ]
+                )
+            }
             appendStructuredLocked(record)
+            if extreme {
+                appendExtremeRecordLocked(
+                    "EXTREME EVENT COMMITTED",
+                    source: record,
+                    fields: [
+                        "sourceEventNumber": String(eventCounter),
+                        "loggerCommitMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - receivedAt) * 1000),
+                        "writeBufferBytes": String(writeBuffer.utf8.count),
+                        "flushScheduled": String(writeFlushScheduled),
+                        "settingsRevision": String(settingsRevision),
+                        "settingsAgeMs": settingsAgeMilliseconds(now: ProcessInfo.processInfo.systemUptime)
+                    ]
+                )
+            }
         }
+    }
+
+    /// Extreme mode deliberately writes a received/committed envelope around every event. This
+    /// triples event records without changing normal diagnostics, and exposes logger queue delay,
+    /// write-buffer pressure, thermal state, and settings freshness when a bug is reproduced.
+    private static func appendExtremeRecordLocked(
+        _ message: String,
+        source: PendingRecord,
+        fields: [String: String]
+    ) {
+        appendStructuredLocked(PendingRecord(
+            level: .trace,
+            category: .traceContext,
+            message: message,
+            traceID: source.traceID,
+            fields: fields,
+            function: "AppEventLog.structured",
+            file: "AppEventLog.swift",
+            line: 0,
+            callerThread: "event-log",
+            callUptime: ProcessInfo.processInfo.systemUptime
+        ))
+    }
+
+    private static func settingsAgeMilliseconds(now: TimeInterval) -> String {
+        guard let lastSettingsChangeUptime else { return "never" }
+        return String(format: "%.2f", max(0, now - lastSettingsChangeUptime) * 1000)
     }
 
     private static func beginNewSessionLocked() {
@@ -575,6 +638,8 @@ enum AppEventLog {
         invariantCount = 0
         staleRequestCount = 0
         categoryCounts = [:]
+        settingsRevision = 0
+        lastSettingsChangeUptime = nil
         writeBuffer = ""
         writeFlushScheduled = false
         installDefaultsObserverLocked()
@@ -729,7 +794,8 @@ enum AppEventLog {
         settingsLogGeneration &+= 1
         let generation = settingsLogGeneration
         settingsLogScheduled = true
-        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(settingsLogDebounceNanoseconds))) {
+        let debounceNanoseconds = extremeDiagnosticsEnabled ? 20_000_000 : settingsLogDebounceNanoseconds
+        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(debounceNanoseconds))) {
             guard loggingEnabledLocked, generation == settingsLogGeneration else { return }
             settingsLogScheduled = false
             logChangedSettingsLocked()
@@ -746,10 +812,12 @@ enum AppEventLog {
 
     private static func logChangedSettingsLocked() {
         let current = currentSettingsLocked()
+        var changedKeys: [String] = []
         for setting in diagnosticSettings {
             let oldValue = settingsSnapshot[setting.key] ?? setting.defaultValue
             let newValue = current[setting.key] ?? setting.defaultValue
             guard oldValue != newValue else { continue }
+            changedKeys.append(setting.key)
             appendStructuredLocked(PendingRecord(
                 level: .info, category: .settings, message: "SETTING CHANGED \(setting.key)", traceID: nil,
                 fields: ["before": oldValue, "after": newValue], function: "UserDefaults.didChange", file: "UserDefaults", line: 0,
@@ -757,6 +825,10 @@ enum AppEventLog {
             ))
         }
         settingsSnapshot = current
+        if !changedKeys.isEmpty {
+            settingsRevision &+= 1
+            lastSettingsChangeUptime = ProcessInfo.processInfo.systemUptime
+        }
     }
 
     private static let booleanSettingKeys: Set<String> = [

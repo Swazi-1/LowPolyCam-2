@@ -19,6 +19,10 @@ This archive is the v5.0.11 beta source with the v5 release-closure pass applied
 - CI initializes CoreSimulator and provisions a temporary iPhone simulator when the runner has no usable device.
 - CI compiles the test bundle for a generic iOS Simulator before executing it.
 - If a hosted runner has no simulator runtime, CI reports the environment limitation and skips only execution after compilation.
+- Settings search routes now match the consolidated Photo Capture, Advanced Recording, and Camera HUD screens.
+- HUD search results open the current content screen directly, and Extreme Bug Trace is indexed with the diagnostics settings.
+- Extreme Bug Trace now adds received/committed timing envelopes around every event; normal diagnostics are unchanged.
+- Extreme-only sampling is denser for settings changes, zoom-probe frames, dropped callbacks, and storage ticks.
 
 ## Version
 

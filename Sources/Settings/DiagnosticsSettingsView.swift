@@ -52,7 +52,7 @@ struct DiagnosticsSettingsView: View {
             } header: {
                 Text("DIAGNOSTIC LOGGING")
             } footer: {
-                Text("Extreme Bug Trace is enabled by default with diagnostics in this build. It records far more detail while keeping disk I/O off the camera queues and rate-limiting frame-level probes.")
+                Text("Extreme Bug Trace is enabled by default with diagnostics in this build. It records roughly three times as many event records, including logger timing, buffer pressure, thermal state and settings freshness. It also samples every active zoom-probe frame, dropped callback and storage tick while keeping disk I/O off the camera queues.")
             }
 
             Section("LOG FILES") {

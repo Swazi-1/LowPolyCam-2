@@ -122,13 +122,18 @@ final class StorageGuard {
             return
         }
         monitorTick &+= 1
-        let stateChanged = lastLoggedWarning != snapshot.isWarning || lastLoggedCritical != snapshot.isCritical
-        if AppEventLog.extremeDiagnosticsEnabled && (stateChanged || monitorTick == 1 || monitorTick % 5 == 0) {
+        let warningChanged = lastLoggedWarning != snapshot.isWarning
+        let criticalChanged = lastLoggedCritical != snapshot.isCritical
+        // Extreme mode keeps every one-second storage snapshot. Normal diagnostics retain the
+        // existing behavior because this deep snapshot remains extreme-only.
+        if AppEventLog.extremeDiagnosticsEnabled {
             AppEventLog.deepEvent("STORAGE MONITOR SNAPSHOT", category: .storage, fields: [
                 "tick": String(monitorTick),
                 "availableBytes": String(snapshot.availableBytes),
                 "warning": String(snapshot.isWarning),
                 "critical": String(snapshot.isCritical),
+                "warningChanged": String(warningChanged),
+                "criticalChanged": String(criticalChanged),
                 "reserveBytes": String(criticalReserveBytes)
             ])
         }
