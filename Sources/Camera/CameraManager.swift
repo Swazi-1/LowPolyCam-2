@@ -70,6 +70,8 @@ final class CameraManager: NSObject, ObservableObject {
         let slowMotionFrameRate: SlowMotionFrameRate
         let codec: String
         let compression: VideoCompression
+        let compressionMode: CompressionMode
+        let manualBitrateMbps: Double
         let position: CameraPosition
         let mode: CaptureMode
         let configurationGenerationID: UInt64
@@ -184,6 +186,7 @@ final class CameraManager: NSObject, ObservableObject {
         case cloudy = "Cloudy"
         case tungsten = "Tungsten"
         case fluorescent = "Fluorescent"
+        case custom = "Custom"
 
         var id: String { rawValue }
 
@@ -194,12 +197,14 @@ final class CameraManager: NSObject, ObservableObject {
             case .cloudy: return 6_500
             case .tungsten: return 3_200
             case .fluorescent: return 4_200
+            case .custom: return nil
             }
         }
 
         var tint: Float {
             switch self {
             case .fluorescent: return 8
+            case .custom: return 0
             default: return 0
             }
         }
@@ -209,6 +214,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isRecordingStarting = false
     @Published private(set) var isFinalizingRecording = false
+    @Published private(set) var recordingPauseState: RecordingPauseState = .idle
     @Published private(set) var isCapturingPhoto = false
     @Published private(set) var captureMode: CaptureMode = .video
     @Published private(set) var isFocusExposureLocked = false
@@ -246,7 +252,23 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var recoverablePhotoCount = 0
     @Published private(set) var recoverableRecordingFiles: [URL] = []
     @Published private(set) var recoverablePhotoFiles: [URL] = []
-    @Published private(set) var audioStatusLabel = "Audio —"
+    @Published private(set) var audioStatusLabel = "Checking microphone"
+    @Published private(set) var audioMeterSnapshot = AudioLevelMeterSnapshot.unavailable
+    @Published private(set) var audioLevelMeterMode: AudioLevelMeterMode = .bars
+    @Published private(set) var isZebraExposureWarningEnabled = false
+    @Published private(set) var isZebraAvailableForCurrentConfiguration = false
+    @Published private(set) var zebraExposureMask = ZebraMask.empty
+    @Published private(set) var captureOrientation: CaptureOrientationPreference = .auto
+    @Published private(set) var customWhiteBalanceTemperature = WhiteBalancePreferencePolicy.defaultTemperature
+    @Published private(set) var customWhiteBalanceTint = 0.0
+    @Published private(set) var torchBrightnessLevel = 0.35
+    @Published private(set) var torchBrightnessSupported = false
+    @Published private(set) var videoCompressionMode: CompressionMode = .auto
+    @Published private(set) var videoManualBitrateMbps = ManualBitratePolicy.defaultMbps
+    @Published private(set) var slowMotionCompression = VideoCompression.high
+    @Published private(set) var slowMotionCompressionMode: CompressionMode = .auto
+    @Published private(set) var slowMotionManualBitrateMbps = ManualBitratePolicy.defaultMbps
+    @Published private(set) var zoomShortcutValues = ZoomShortcutPolicy.defaultValues
     @Published private(set) var capabilitySnapshot = CameraCapabilitySnapshot.empty
     @Published private(set) var isCapabilitySnapshotLoading = false
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
@@ -355,6 +377,11 @@ final class CameraManager: NSObject, ObservableObject {
     private var verifiedHighOutputProvenance: VerifiedHighOutputProvenance?
     private let photoOutput = AVCapturePhotoOutput()
     private let liveMetrics = LiveCaptureMetrics()
+    let audioMeter = AudioLevelMeter()
+    let zebraExposureState = ZebraExposureState()
+    private var zebraAnalysisActive = false
+    private var zebraAvailabilityKnown = false
+    private var zebraAvailableForCurrentConfiguration = false
     let liveStats = LiveRecordingStatsState()
     let recordingClock = RecordingClockState()
     @Published private(set) var liveMetricsAvailable = false
@@ -436,12 +463,15 @@ final class CameraManager: NSObject, ObservableObject {
     private let focusExposureRequests = RequestToken("focusExposureRequests")
     private let torchRequests = RequestToken("torchRequests")
     private let recordingStartRequests = RequestToken("recordingStartRequests")
+    private let recordingPauseRequests = RequestToken("recordingPauseRequests")
     private let microphonePermissionRequests = RequestToken("microphonePermissionRequests")
     private let mediaSaveTaskRequests = RequestToken("mediaSaveTaskRequests")
     private let capabilityRequests = RequestToken("capabilityRequests")
     private let codecSupportCacheLock = NSLock()
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
+    private var audioMeterCancellable: AnyCancellable?
+    private var zebraMaskCancellable: AnyCancellable?
 
     private var activeVideoCodec: String {
         captureMode == .sloMo ? "HEVC" : selectedVideoCodec
@@ -531,7 +561,22 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private var recordingState: RecordingState = .idle
+    private var recordingPauseMachine = RecordingPauseMachine()
+    private struct RecordingPauseRequest {
+        enum Operation {
+            case pause
+            case resume
+        }
+
+        let id: UInt64
+        let operation: Operation
+        let stateBefore: RecordingPauseState
+        let traceID: String?
+        let requestedAt: TimeInterval
+    }
+    private var pendingRecordingPauseRequest: RecordingPauseRequest?
     private var segmentTimer: DispatchWorkItem?
+    private var segmentTimerGeneration: UInt64 = 0
     private var pendingVideoSaves = 0
     private var inFlightVideoSaves: Set<URL> = []
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
@@ -592,6 +637,52 @@ final class CameraManager: NSObject, ObservableObject {
         selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: savedSlowMotionFrameRate) ?? (restoredPosition == .front ? .fps120 : .fps240)
         isVideoStabilizationEnabled = defaults.object(forKey: Self.videoStabilizationKey) as? Bool ?? true
         super.init()
+
+        videoCompressionMode = CompressionMode(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.videoCompressionMode) ?? ""
+        ) ?? .auto
+        videoManualBitrateMbps = ManualBitratePolicy.validatedMbps(
+            (defaults.object(forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps) as? NSNumber)?.doubleValue
+                ?? ManualBitratePolicy.defaultMbps
+        )
+        slowMotionCompression = VideoCompression(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.slowMotionCompressionLevel) ?? ""
+        ) ?? .high
+        slowMotionCompressionMode = CompressionMode(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.slowMotionCompressionMode) ?? ""
+        ) ?? .auto
+        slowMotionManualBitrateMbps = ManualBitratePolicy.validatedMbps(
+            (defaults.object(forKey: LowPolyCamPreferences.Key.slowMotionManualBitrateMbps) as? NSNumber)?.doubleValue
+                ?? ManualBitratePolicy.defaultMbps
+        )
+        captureOrientation = CaptureOrientationPreference(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.captureOrientation) ?? ""
+        ) ?? .auto
+        customWhiteBalanceTemperature = WhiteBalancePreferencePolicy.validatedTemperature(
+            (defaults.object(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature) as? NSNumber)?.doubleValue
+                ?? WhiteBalancePreferencePolicy.defaultTemperature
+        )
+        customWhiteBalanceTint = WhiteBalancePreferencePolicy.validatedTint(
+            (defaults.object(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint) as? NSNumber)?.doubleValue
+                ?? 0
+        )
+        let storedTorchBrightness = (defaults.object(forKey: LowPolyCamPreferences.Key.torchBrightness) as? NSNumber)?.doubleValue ?? 0.35
+        torchBrightnessLevel = min(max(storedTorchBrightness, 0.05), 1.0)
+        requestedWhiteBalancePreset = WhiteBalancePreset(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.whiteBalancePreset) ?? ""
+        ) ?? .auto
+        whiteBalancePreset = requestedWhiteBalancePreset
+        audioLevelMeterMode = AudioLevelMeterMode(
+            rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.audioLevelMeter) ?? ""
+        ) ?? .bars
+        isZebraExposureWarningEnabled = defaults.bool(forKey: LowPolyCamPreferences.Key.zebraExposureWarning)
+        zoomShortcutValues = Self.loadZoomShortcutValues(from: defaults)
+        audioMeterCancellable = audioMeter.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] snapshot in self?.audioMeterSnapshot = snapshot }
+        zebraMaskCancellable = zebraExposureState.$mask
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] mask in self?.zebraExposureMask = mask }
 
         let savedPhotoMegapixels = defaults.integer(forKey: Self.photoMegapixelsKey)
         preferredPhotoMegapixels = Self.normalizedPhotoMegapixels(savedPhotoMegapixels)
@@ -953,9 +1044,19 @@ final class CameraManager: NSObject, ObservableObject {
     ) {
         let previousState = recordingState
         let previousFlags = recordingState.uiFlags
+        let resetPauseState = newState.isIdle
+        if resetPauseState {
+            let hadPauseActivity = pendingRecordingPauseRequest != nil || recordingPauseMachine.state != .idle
+            pendingRecordingPauseRequest = nil
+            if hadPauseActivity {
+                _ = recordingPauseRequests.next(reason: "recording state returned to idle")
+            }
+            recordingPauseMachine.reset()
+        }
         recordingState = newState
         if newState.isIdle {
             storageGuard.stopMonitoring()
+            cancelSplitTimer()
         }
         if previousState != newState {
             invalidatePendingVideoConfiguration()
@@ -967,7 +1068,7 @@ final class CameraManager: NSObject, ObservableObject {
         let flagsChanged = previousFlags.starting != flags.starting ||
             previousFlags.recording != flags.recording ||
             previousFlags.finalizing != flags.finalizing
-        guard flagsChanged || resetClock || startClock || clearLastFrameGaps else { return }
+        guard flagsChanged || resetClock || startClock || clearLastFrameGaps || resetPauseState else { return }
 
         publish {
             if resetClock {
@@ -978,6 +1079,9 @@ final class CameraManager: NSObject, ObservableObject {
             self.isRecordingStarting = flags.starting
             self.isRecording = flags.recording
             self.isFinalizingRecording = flags.finalizing
+            if resetPauseState {
+                self.recordingPauseState = .idle
+            }
             if clearLastFrameGaps {
                 self.lastFrameGaps = nil
             }
@@ -1000,6 +1104,8 @@ final class CameraManager: NSObject, ObservableObject {
             slowMotionFrameRate: selectedSlowMotionFrameRate,
             codec: selectedVideoCodec,
             compression: videoCompression,
+            compressionMode: videoCompressionMode,
+            manualBitrateMbps: videoManualBitrateMbps,
             position: cameraPosition,
             mode: captureMode,
             configurationGenerationID: captureConfigurationGeneration.current(),
@@ -1027,6 +1133,8 @@ final class CameraManager: NSObject, ObservableObject {
                     slowMotionFrameRate: request.slowMotionFrameRate,
                     codec: request.codec,
                     compression: request.compression,
+                    compressionMode: request.compressionMode,
+                    manualBitrateMbps: request.manualBitrateMbps,
                     position: request.position,
                     mode: request.mode,
                     configurationGenerationID: request.configurationGenerationID,
@@ -1078,6 +1186,8 @@ final class CameraManager: NSObject, ObservableObject {
             selectedFrameRate == request.frameRate &&
             selectedVideoCodec == request.codec &&
             videoCompression == request.compression &&
+            videoCompressionMode == request.compressionMode &&
+            abs(videoManualBitrateMbps - request.manualBitrateMbps) < 0.000_001 &&
             cameraPosition == request.position &&
             captureMode == request.mode &&
             request.mode == .video &&
@@ -1118,6 +1228,8 @@ final class CameraManager: NSObject, ObservableObject {
                     requestedFrameRate: request.frameRate,
                     requestedCodec: request.codec,
                     requestedCompression: request.compression,
+                    requestedCompressionMode: request.compressionMode,
+                    requestedManualBitrateMbps: request.manualBitrateMbps,
                     qualityRequestID: request.qualityRequestID,
                     requestedPosition: request.position,
                     requestValidation: { self.isCurrentVideoConfiguration(request) }
@@ -1136,6 +1248,8 @@ final class CameraManager: NSObject, ObservableObject {
             success = configureMovieOutputSettings(
                 requestedCodec: request.codec,
                 requestedCompression: request.compression,
+                requestedCompressionMode: request.compressionMode,
+                requestedManualBitrateMbps: request.manualBitrateMbps,
                 requestedResolution: request.resolution,
                 requestedFrameRate: request.frameRate,
                 requestedPosition: request.position,
@@ -1276,13 +1390,15 @@ final class CameraManager: NSObject, ObservableObject {
         }
         guard recordingState.requestsRecording || movieOutput.isRecording else { return }
 
-        segmentTimer?.cancel()
+        cancelSplitTimer()
 
         if movieOutput.isRecording {
+            requestNativeRecordingStop(reason: "session interruption")
             transitionRecordingToFinalizing(resetClock: true)
             postStatus("Recording interrupted · saving…")
             movieOutput.stopRecording()
         } else {
+            resetNativeRecordingPauseState(reason: "session interruption without active movie output")
             transitionRecordingToDiscard(resetClock: true)
         }
     }
@@ -1387,7 +1503,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = microphonePermissionRequests.next()
         awaitingMicrophonePermission = false
         microphonePermissionPromptLifecyclePending = false
-        segmentTimer?.cancel()
+        cancelSplitTimer()
         storageGuard.stopMonitoring()
         AppEventLog.event(
             "STORAGE CRITICAL: available=\(snapshot.availableBytes), reserve=\(activeCriticalStorageReserveBytes), " +
@@ -1395,10 +1511,12 @@ final class CameraManager: NSObject, ObservableObject {
         )
 
         if movieOutput.isRecording {
+            requestNativeRecordingStop(reason: "critical storage protection")
             transitionRecordingToFinalizing(resetClock: true)
             postStatus("Recording stopped to protect the file because storage is critically low.")
             movieOutput.stopRecording()
         } else if recordingState.requestsRecording {
+            resetNativeRecordingPauseState(reason: "critical storage before movie output start")
             transitionRecordingState(to: .idle, resetClock: true)
             restoreIdleCaptureConfigurationAfterRecording()
             postStatus("Not enough free storage to safely start recording.")
@@ -1424,11 +1542,15 @@ final class CameraManager: NSObject, ObservableObject {
         let fps: Double = captureMode == .sloMo
             ? Double(selectedSlowMotionFrameRate.rawValue)
             : Double(selectedFrameRate.rawValue)
+        let compression = compressionSelection(for: captureMode)
         return estimatedVideoBitsPerSecond(
             resolution: resolution,
             fps: fps,
             codec: activeVideoCodec,
-            compression: videoCompression
+            compression: compression.level,
+            compressionMode: compression.mode,
+            manualBitrateMbps: compression.manualBitrateMbps,
+            isSlowMotion: captureMode == .sloMo
         )
     }
 
@@ -1436,8 +1558,21 @@ final class CameraManager: NSObject, ObservableObject {
         resolution: VideoResolution,
         fps: Double,
         codec: String,
-        compression: VideoCompression
+        compression: VideoCompression,
+        compressionMode: CompressionMode = .auto,
+        manualBitrateMbps: Double = ManualBitratePolicy.defaultMbps,
+        isSlowMotion: Bool = false
     ) -> Double {
+        if compressionMode == .manual {
+            let effective = ManualBitratePolicy.effectiveMbps(
+                requested: manualBitrateMbps,
+                resolution: resolution,
+                fps: fps,
+                isSlowMotion: isSlowMotion,
+                codec: codec
+            )
+            return max(ManualBitratePolicy.bitsPerSecond(forMbps: effective), 2_000_000)
+        }
         let pixels = Double(resolution.dimensions.width) * Double(resolution.dimensions.height)
         let codecFactor = codec == "H264" ? 1.0 : 0.72
         return max(pixels * fps * compression.bitsPerPixel * codecFactor, 2_000_000)
@@ -1466,6 +1601,7 @@ final class CameraManager: NSObject, ObservableObject {
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
             self.applyDeferredWhiteBalanceIfPossible()
+            self.configureAudioMeterOutput()
             self.synchronizeTorchState()
             self.refreshAvailableStorage()
             self.storageQueue.async { [weak self] in
@@ -1492,11 +1628,13 @@ final class CameraManager: NSObject, ObservableObject {
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
             self.burstStopRequested = true
-            self.segmentTimer?.cancel()
+            self.cancelSplitTimer()
             if self.movieOutput.isRecording {
+                self.requestNativeRecordingStop(reason: "camera stop")
                 self.transitionRecordingToFinalizing(resetClock: true)
                 self.movieOutput.stopRecording()
             } else if self.recordingState.requestsRecording {
+                self.requestNativeRecordingStop(reason: "camera stop without active movie output")
                 self.transitionRecordingState(to: .idle, resetClock: true)
             }
             if self.session.isRunning {
@@ -1550,7 +1688,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.lensTransitionCoordinator.cancel()
             self.burstRemaining = 0
             self.burstStopRequested = true
-            self.segmentTimer?.cancel()
+            self.cancelSplitTimer()
 
             // Keep hardware and UI in sync when the app/phone becomes inactive. iOS normally
             // disables the torch itself, but doing it explicitly prevents a stale-on edge case.
@@ -1565,14 +1703,17 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             if self.movieOutput.isRecording {
+                self.requestNativeRecordingStop(reason: "app became inactive")
                 self.transitionRecordingToFinalizing(resetClock: true)
                 self.movieOutput.stopRecording()
             } else if self.recordingState.requestsRecording {
+                self.resetNativeRecordingPauseState(reason: "app became inactive without active movie output")
                 self.transitionRecordingState(to: .idle, resetClock: true)
             }
 
             self.publish {
                 if self.isTorchOn { self.isTorchOn = false }
+                if self.torchBrightnessSupported { self.torchBrightnessSupported = false }
             }
         }
     }
@@ -1645,6 +1786,7 @@ final class CameraManager: NSObject, ObservableObject {
             publish {
                 if self.torchAvailable { self.torchAvailable = false }
                 if self.isTorchOn { self.isTorchOn = false }
+                if self.torchBrightnessSupported { self.torchBrightnessSupported = false }
             }
             return
         }
@@ -1654,13 +1796,32 @@ final class CameraManager: NSObject, ObservableObject {
                 publish {
                     if self.torchAvailable { self.torchAvailable = false }
                     if self.isTorchOn { self.isTorchOn = false }
+                    if self.torchBrightnessSupported { self.torchBrightnessSupported = false }
                 }
                 if showErrorOnFailure { showError("Torch is temporarily unavailable.") }
                 return
             }
             try device.lockForConfiguration()
-            device.torchMode = enabled ? .on : .off
+            if enabled {
+                let maximumTorchLevel = max(device.maxAvailableTorchLevel, 0.05)
+                let requestedTorchLevel = min(
+                    max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
+                    maximumTorchLevel
+                )
+                do {
+                    try device.setTorchModeOn(level: requestedTorchLevel)
+                } catch {
+                    // Some compatible torch implementations expose only on/off. Preserve the
+                    // normal tap behavior while recording the level fallback for diagnostics.
+                    device.torchMode = .on
+                    AppEventLog.event("Torch brightness level unavailable; fell back to full on",
+                                      category: .torch, fields: ["requestedLevel": String(format: "%.3f", torchBrightnessLevel)])
+                }
+            } else {
+                device.torchMode = .off
+            }
             let actualState = device.torchMode == .on
+            let actualTorchLevel = device.torchLevel
             let torchAvailable = device.isTorchAvailable
             device.unlockForConfiguration()
             publish {
@@ -1670,8 +1831,18 @@ final class CameraManager: NSObject, ObservableObject {
                 if self.isTorchOn != actualState {
                     self.isTorchOn = actualState
                 }
+                let supportsIntensity = device.hasTorch && device.maxAvailableTorchLevel > 0
+                if self.torchBrightnessSupported != supportsIntensity {
+                    self.torchBrightnessSupported = supportsIntensity
+                }
             }
             AppEventLog.event("Torch applied: \(actualState ? "on" : "off") on \(device.localizedName)")
+            AppEventLog.event("TORCH BRIGHTNESS APPLIED", category: .torch, fields: [
+                "requestedLevel": String(format: "%.3f", torchBrightnessLevel),
+                "actualLevel": String(format: "%.3f", actualTorchLevel),
+                "maxAvailableLevel": String(format: "%.3f", device.maxAvailableTorchLevel),
+                "device": device.localizedName
+            ])
         } catch {
             synchronizeTorchState()
             if showErrorOnFailure { showError("Couldn’t change the torch.") }
@@ -2502,6 +2673,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.lensTransitionCoordinator.cancel()
             let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
             if success {
+                self.configureAudioMeterOutput()
                 if mode == .photo {
                     self.setTorchEnabledOnCurrentDevice(false)
                 }
@@ -2595,6 +2767,7 @@ final class CameraManager: NSObject, ObservableObject {
             // If the actual output state is already correct, synchronize only the published
             // snapshot. Do not open a no-op AVCaptureSession configuration transaction.
             if wanted == attached && !connectionNeedsDisable {
+                self.configureZebraAnalysis()
                 self.publish {
                     if self.liveMetricsAvailable != attached {
                         self.liveMetricsAvailable = attached
@@ -2613,12 +2786,16 @@ final class CameraManager: NSObject, ObservableObject {
     private func configureLiveMetrics() {
         let wanted = liveMetricsAttachmentWanted()
         let attached = liveMetricsOutputIsAttached()
+        let previewFramesWanted = (isZebraExposureWarningEnabled || AppEventLog.extremeDiagnosticsEnabled) &&
+            captureMode != .photo
         let connectionNeedsDisable = liveMetrics.output.connection(with: .video)?.isEnabled == true &&
             !recordingState.requestsRecording &&
             !movieOutput.isRecording &&
-            !AppEventLog.extremeDiagnosticsEnabled
+            !previewFramesWanted
 
         if wanted == attached && !connectionNeedsDisable {
+            configureZebraAnalysis()
+            setLiveMetricsConnectionEnabled(previewFramesWanted)
             publish {
                 if self.liveMetricsAvailable != attached {
                     self.liveMetricsAvailable = attached
@@ -2636,8 +2813,11 @@ final class CameraManager: NSObject, ObservableObject {
 
         let available = session.outputs.contains { $0 === liveMetrics.output }
         if available && !movieOutput.isRecording {
-            setLiveMetricsConnectionEnabled(AppEventLog.extremeDiagnosticsEnabled && captureMode != .photo)
+            setLiveMetricsConnectionEnabled(
+                previewFramesWanted
+            )
         }
+        configureZebraAnalysis()
         publish {
             if self.liveMetricsAvailable != available {
                 self.liveMetricsAvailable = available
@@ -2649,18 +2829,72 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func liveMetricsAttachmentWanted() -> Bool {
-        let isRear4K60 = captureMode == .video &&
-            cameraPosition == .back &&
-            selectedResolution == .p4k &&
-            selectedFrameRate == .fps60
+        let isRear4K60 = isProtectedRear4K60Configuration
         // A second video-data stream can push multi-camera 4K60 beyond the device's sustainable
         // capture budget and trigger a runtime-error rebuild loop. File bitrate remains available
         // without this optional output; only measured FPS/drop counters are omitted in rear 4K60.
         let requestedByUser = UserDefaults.standard.bool(forKey: "liveRecordingStats")
         let requestedByExtremeDiagnostics = AppEventLog.extremeDiagnosticsEnabled
-        return (requestedByUser || requestedByExtremeDiagnostics) &&
+        return (requestedByUser || requestedByExtremeDiagnostics || isZebraExposureWarningEnabled) &&
             captureMode != .photo &&
             !isRear4K60
+    }
+
+    private var isProtectedRear4K60Configuration: Bool {
+        captureMode == .video &&
+            cameraPosition == .back &&
+            selectedResolution == .p4k &&
+            selectedFrameRate == .fps60
+    }
+
+    private func zebraCapabilityForCurrentConfiguration() -> Bool {
+        guard ZebraAvailabilityPolicy.isAvailable(
+            isPhotoMode: captureMode == .photo,
+            isProtectedRear4K60: isProtectedRear4K60Configuration
+        ) else { return false }
+        return liveMetricsOutputIsAttached() || session.canAddOutput(liveMetrics.output)
+    }
+
+    private func updateZebraAvailability(_ available: Bool) {
+        let previous = zebraAvailabilityKnown ? zebraAvailableForCurrentConfiguration : nil
+        zebraAvailableForCurrentConfiguration = available
+        zebraAvailabilityKnown = true
+        publish {
+            if self.isZebraAvailableForCurrentConfiguration != available {
+                self.isZebraAvailableForCurrentConfiguration = available
+            }
+        }
+        guard let previous, previous != available else { return }
+        AppEventLog.event(
+            available ? "ZEBRA RESTORED" : "ZEBRA TEMPORARILY UNAVAILABLE",
+            category: .exposure,
+            fields: [
+                "mode": captureMode.rawValue,
+                "resolution": hudResolutionLabel,
+                "fps": hudFrameRateLabel ?? "none",
+                "protectedRear4K60": String(isProtectedRear4K60Configuration)
+            ]
+        )
+    }
+
+    private func configureZebraAnalysis() {
+        let available = zebraCapabilityForCurrentConfiguration()
+        updateZebraAvailability(available)
+        let enabled = ZebraAvailabilityPolicy.isActive(
+            requested: isZebraExposureWarningEnabled,
+            available: available
+        ) && liveMetricsOutputIsAttached()
+        if enabled != zebraAnalysisActive {
+            zebraAnalysisActive = enabled
+            AppEventLog.event(enabled ? "ZEBRA ANALYSIS START" : "ZEBRA ANALYSIS STOP", category: .exposure)
+        }
+        liveMetrics.setZebraAnalysis(enabled: enabled) { [weak self] mask in
+            self?.sessionQueue.async { [weak self] in
+                guard let self, self.zebraAnalysisActive else { return }
+                self.zebraExposureState.update(mask)
+            }
+        }
+        if !enabled { zebraExposureState.reset() }
     }
 
     private func liveMetricsOutputIsAttached() -> Bool {
@@ -2678,7 +2912,11 @@ final class CameraManager: NSObject, ObservableObject {
         metricsTimer?.cancel()
         metricsTimer = nil
         liveMetrics.setRunning(false)
-        setLiveMetricsConnectionEnabled(AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
+        configureZebraAnalysis()
+        setLiveMetricsConnectionEnabled(
+            ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+                liveMetricsOutputIsAttached() && captureMode != .photo)
+        )
         if wasRunning {
             AppEventLog.event("Live metrics stopped")
         }
@@ -2807,6 +3045,7 @@ final class CameraManager: NSObject, ObservableObject {
             selectedResolution = .p720
             selectedFrameRate = .fps30
             selectedVideoCodec = "HEVC"
+            videoCompressionMode = .auto
             videoCompression = .dataSaver
         } else {
             selectedResolution = VideoResolution(rawValue: defaults.string(forKey: "longevityPreviousResolution") ?? "") ?? .p1080
@@ -2970,6 +3209,7 @@ final class CameraManager: NSObject, ObservableObject {
 
             let previousPreset = self.requestedWhiteBalancePreset
             self.requestedWhiteBalancePreset = preset
+            UserDefaults.standard.set(preset.rawValue, forKey: LowPolyCamPreferences.Key.whiteBalancePreset)
 
             guard self.session.isRunning, !self.session.isInterrupted else {
                 self.deferWhiteBalanceRequest(
@@ -3473,6 +3713,640 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    func toggleRecordingPause() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.toggleRecordingPauseOnSessionQueue()
+        }
+    }
+
+    private func toggleRecordingPauseOnSessionQueue() {
+        guard captureMode == .video || captureMode == .sloMo else {
+            AppEventLog.guardRejected("toggleRecordingPause", reason: "capture mode is not recordable", traceID: activeRecordingTraceID)
+            return
+        }
+        guard case .recording(_) = recordingState, movieOutput.isRecording else {
+            AppEventLog.guardRejected("toggleRecordingPause", reason: "recording is not actively writing", traceID: activeRecordingTraceID, fields: [
+                "recordingState": String(describing: recordingState),
+                "movieOutput.isRecording": String(movieOutput.isRecording),
+                "movieOutput.isRecordingPaused": String(movieOutput.isRecordingPaused),
+                "pauseState": recordingPauseMachine.state.rawValue
+            ])
+            return
+        }
+
+        switch recordingPauseMachine.state {
+        case .recording:
+            guard !movieOutput.isRecordingPaused else {
+                AppEventLog.guardRejected("toggleRecordingPause", reason: "native output is already paused", traceID: activeRecordingTraceID)
+                return
+            }
+            guard recordingPauseMachine.requestPause() else {
+                AppEventLog.guardRejected("toggleRecordingPause", reason: "pause transition rejected", traceID: activeRecordingTraceID)
+                return
+            }
+            let requestID = recordingPauseRequests.next(reason: "native pause requested")
+            let requestedAt = ProcessInfo.processInfo.systemUptime
+            pendingRecordingPauseRequest = RecordingPauseRequest(
+                id: requestID,
+                operation: .pause,
+                stateBefore: .recording,
+                traceID: activeRecordingTraceID,
+                requestedAt: requestedAt
+            )
+            publish { self.recordingPauseState = .pausing }
+            AppEventLog.event(
+                "RECORDING PAUSE REQUEST",
+                category: .recording,
+                traceID: activeRecordingTraceID,
+                fields: recordingPauseLogFields(
+                    requestID: requestID,
+                    traceID: activeRecordingTraceID,
+                    stateBefore: .recording,
+                    stateAfter: recordingPauseMachine.state,
+                    recordingStateBefore: String(describing: recordingState),
+                    recordingStateAfter: String(describing: recordingState),
+                    recordedDuration: movieOutput.recordedDuration.seconds,
+                    recordingClockElapsed: recordingClock.elapsedSeconds,
+                    movieIsRecording: movieOutput.isRecording,
+                    movieIsPaused: movieOutput.isRecordingPaused,
+                    requestedAt: requestedAt
+                )
+            )
+            movieOutput.pauseRecording()
+
+        case .paused:
+            guard movieOutput.isRecordingPaused else {
+                AppEventLog.guardRejected("toggleRecordingPause", reason: "native output is not paused", traceID: activeRecordingTraceID)
+                return
+            }
+            guard recordingPauseMachine.requestResume() else {
+                AppEventLog.guardRejected("toggleRecordingPause", reason: "resume transition rejected", traceID: activeRecordingTraceID)
+                return
+            }
+            let requestID = recordingPauseRequests.next(reason: "native resume requested")
+            let requestedAt = ProcessInfo.processInfo.systemUptime
+            pendingRecordingPauseRequest = RecordingPauseRequest(
+                id: requestID,
+                operation: .resume,
+                stateBefore: .paused,
+                traceID: activeRecordingTraceID,
+                requestedAt: requestedAt
+            )
+            publish { self.recordingPauseState = .resuming }
+            AppEventLog.event(
+                "RECORDING RESUME REQUEST",
+                category: .recording,
+                traceID: activeRecordingTraceID,
+                fields: recordingPauseLogFields(
+                    requestID: requestID,
+                    traceID: activeRecordingTraceID,
+                    stateBefore: .paused,
+                    stateAfter: recordingPauseMachine.state,
+                    recordingStateBefore: String(describing: recordingState),
+                    recordingStateAfter: String(describing: recordingState),
+                    recordedDuration: movieOutput.recordedDuration.seconds,
+                    recordingClockElapsed: recordingClock.elapsedSeconds,
+                    movieIsRecording: movieOutput.isRecording,
+                    movieIsPaused: movieOutput.isRecordingPaused,
+                    requestedAt: requestedAt
+                )
+            )
+            movieOutput.resumeRecording()
+
+        case .idle, .pausing, .resuming, .stopping:
+            AppEventLog.guardRejected("toggleRecordingPause", reason: "pause/resume transition already in flight or stopping", traceID: activeRecordingTraceID, fields: [
+                "pauseState": recordingPauseMachine.state.rawValue
+            ])
+        }
+    }
+
+    private func handleNativeRecordingPaused(_ output: AVCaptureFileOutput, fileURL: URL) {
+        guard output === movieOutput,
+              let request = pendingRecordingPauseRequest,
+              case .pause = request.operation,
+              recordingPauseRequests.isLatest(request.id),
+              recordingPauseMachine.state == .pausing,
+              movieOutput.isRecording,
+              movieOutput.isRecordingPaused else {
+            AppEventLog.guardRejected("didPauseRecording", reason: "stale or invalid native pause callback", traceID: activeRecordingTraceID, fields: [
+                "file": fileURL.lastPathComponent,
+                "requestID": pendingRecordingPauseRequest.map { String($0.id) } ?? "none",
+                "latestID": String(recordingPauseRequests.current()),
+                "pauseState": recordingPauseMachine.state.rawValue,
+                "movieOutput.isRecording": String(movieOutput.isRecording),
+                "movieOutput.isRecordingPaused": String(movieOutput.isRecordingPaused)
+            ])
+            return
+        }
+
+        let stateBefore = recordingPauseMachine.state
+        guard recordingPauseMachine.confirmPaused() else { return }
+        pendingRecordingPauseRequest = nil
+        cancelSplitTimer()
+        let fields = recordingPauseLogFields(
+            requestID: request.id,
+            traceID: request.traceID,
+            stateBefore: stateBefore,
+            stateAfter: recordingPauseMachine.state,
+            recordingStateBefore: String(describing: recordingState),
+            recordingStateAfter: String(describing: recordingState),
+            recordedDuration: movieOutput.recordedDuration.seconds,
+            recordingClockElapsed: recordingClock.elapsedSeconds,
+            movieIsRecording: movieOutput.isRecording,
+            movieIsPaused: movieOutput.isRecordingPaused,
+            requestedAt: request.requestedAt,
+            file: fileURL.lastPathComponent
+        )
+        publish {
+            self.recordingClock.pause()
+            var actualFields = fields
+            actualFields["recordingClockElapsed"] = String(format: "%.0f", self.recordingClock.elapsedSeconds)
+            self.recordingPauseState = .paused
+            AppEventLog.event("RECORDING PAUSED", category: .recording, traceID: request.traceID, fields: actualFields)
+        }
+    }
+
+    private func handleNativeRecordingResumed(_ output: AVCaptureFileOutput, fileURL: URL) {
+        guard output === movieOutput,
+              let request = pendingRecordingPauseRequest,
+              case .resume = request.operation,
+              recordingPauseRequests.isLatest(request.id),
+              recordingPauseMachine.state == .resuming,
+              movieOutput.isRecording,
+              !movieOutput.isRecordingPaused else {
+            AppEventLog.guardRejected("didResumeRecording", reason: "stale or invalid native resume callback", traceID: activeRecordingTraceID, fields: [
+                "file": fileURL.lastPathComponent,
+                "requestID": pendingRecordingPauseRequest.map { String($0.id) } ?? "none",
+                "latestID": String(recordingPauseRequests.current()),
+                "pauseState": recordingPauseMachine.state.rawValue,
+                "movieOutput.isRecording": String(movieOutput.isRecording),
+                "movieOutput.isRecordingPaused": String(movieOutput.isRecordingPaused)
+            ])
+            return
+        }
+
+        let stateBefore = recordingPauseMachine.state
+        guard recordingPauseMachine.confirmResumed() else { return }
+        pendingRecordingPauseRequest = nil
+        let fields = recordingPauseLogFields(
+            requestID: request.id,
+            traceID: request.traceID,
+            stateBefore: stateBefore,
+            stateAfter: recordingPauseMachine.state,
+            recordingStateBefore: String(describing: recordingState),
+            recordingStateAfter: String(describing: recordingState),
+            recordedDuration: movieOutput.recordedDuration.seconds,
+            recordingClockElapsed: recordingClock.elapsedSeconds,
+            movieIsRecording: movieOutput.isRecording,
+            movieIsPaused: movieOutput.isRecordingPaused,
+            requestedAt: request.requestedAt,
+            file: fileURL.lastPathComponent
+        )
+        publish {
+            self.recordingClock.resume()
+            var actualFields = fields
+            actualFields["recordingClockElapsed"] = String(format: "%.0f", self.recordingClock.elapsedSeconds)
+            self.recordingPauseState = .recording
+            AppEventLog.event("RECORDING RESUMED", category: .recording, traceID: request.traceID, fields: actualFields)
+        }
+        let splitDuration = recordingState.splitDuration
+        if splitDuration > 0 {
+            scheduleSplitTimer(splitDuration: splitDuration)
+        }
+    }
+
+    private func requestNativeRecordingStop(reason: String) {
+        pendingRecordingPauseRequest = nil
+        _ = recordingPauseRequests.next(reason: reason)
+        if recordingPauseMachine.state != .idle && recordingPauseMachine.state != .stopping {
+            _ = recordingPauseMachine.requestStop()
+        }
+        let state = recordingPauseMachine.state
+        publish { self.recordingPauseState = state }
+    }
+
+    private func completeNativeRecordingStop(reason: String) {
+        pendingRecordingPauseRequest = nil
+        _ = recordingPauseRequests.next(reason: reason)
+        _ = recordingPauseMachine.completeStop()
+        recordingPauseMachine.reset()
+        publish { self.recordingPauseState = .idle }
+    }
+
+    private func resetNativeRecordingPauseState(reason: String) {
+        pendingRecordingPauseRequest = nil
+        _ = recordingPauseRequests.next(reason: reason)
+        recordingPauseMachine.reset()
+        publish { self.recordingPauseState = .idle }
+    }
+
+    private func recordingPauseLogFields(
+        requestID: UInt64,
+        traceID: String?,
+        stateBefore: RecordingPauseState,
+        stateAfter: RecordingPauseState,
+        recordingStateBefore: String,
+        recordingStateAfter: String,
+        recordedDuration: Double,
+        recordingClockElapsed: Double,
+        movieIsRecording: Bool,
+        movieIsPaused: Bool,
+        requestedAt: TimeInterval,
+        file: String? = nil
+    ) -> [String: String] {
+        var fields: [String: String] = [
+            "requestID": String(requestID),
+            "traceID": traceID ?? "none",
+            "recordingTraceID": traceID ?? "none",
+            "stateBefore": stateBefore.rawValue,
+            "stateAfter": stateAfter.rawValue,
+            "recordingPauseStateBefore": stateBefore.rawValue,
+            "recordingPauseStateAfter": stateAfter.rawValue,
+            "recordingStateBefore": recordingStateBefore,
+            "recordingStateAfter": recordingStateAfter,
+            "movieOutput.isRecording": String(movieIsRecording),
+            "movieOutput.isRecordingPaused": String(movieIsPaused),
+            "recordedDuration": String(format: "%.3f", max(recordedDuration.isFinite ? recordedDuration : 0, 0)),
+            "recordingClockElapsed": String(format: "%.0f", max(recordingClockElapsed.isFinite ? recordingClockElapsed : 0, 0)),
+            "requestElapsedMs": String(format: "%.2f", max(0, ProcessInfo.processInfo.systemUptime - requestedAt) * 1000)
+        ]
+        if let file { fields["file"] = file }
+        return fields
+    }
+
+    private func cancelSplitTimer() {
+        segmentTimerGeneration &+= 1
+        segmentTimer?.cancel()
+        segmentTimer = nil
+    }
+
+    private func scheduleSplitTimer(splitDuration: Double) {
+        cancelSplitTimer()
+        guard splitDuration.isFinite, splitDuration > 0,
+              recordingState.requestsRecording,
+              movieOutput.isRecording else { return }
+
+        let remaining = RecordingSplitTimingPolicy.remainingDuration(
+            splitDuration: splitDuration,
+            recordedDuration: movieOutput.recordedDuration.seconds
+        )
+        let delay = remaining > 0.05 ? remaining : 0.25
+        let generation = segmentTimerGeneration
+        let timer = DispatchWorkItem { [weak self] in
+            guard let self, self.segmentTimerGeneration == generation else { return }
+            self.handleSplitTimer(splitDuration: splitDuration)
+        }
+        segmentTimer = timer
+        sessionQueue.asyncAfter(deadline: .now() + delay, execute: timer)
+    }
+
+    private func handleSplitTimer(splitDuration: Double) {
+        guard recordingState.requestsRecording, movieOutput.isRecording else { return }
+        guard recordingPauseMachine.state == .recording else {
+            scheduleSplitTimer(splitDuration: splitDuration)
+            return
+        }
+
+        let recordedDuration = movieOutput.recordedDuration.seconds
+        guard RecordingSplitTimingPolicy.shouldSplit(
+            splitDuration: splitDuration,
+            recordedDuration: recordedDuration,
+            pauseState: recordingPauseMachine.state
+        ) else {
+            scheduleSplitTimer(splitDuration: splitDuration)
+            return
+        }
+
+        requestNativeRecordingStop(reason: "recording split timer")
+        transitionRecordingState(to: .stoppingToContinueSegment(splitDuration: splitDuration))
+        movieOutput.stopRecording()
+    }
+
+    private func compressionSelection(for mode: CaptureMode) -> (mode: CompressionMode, level: VideoCompression, manualBitrateMbps: Double) {
+        if mode == .sloMo {
+            return (slowMotionCompressionMode, slowMotionCompression, slowMotionManualBitrateMbps)
+        }
+        return (videoCompressionMode, videoCompression, videoManualBitrateMbps)
+    }
+
+    func compressionDescription(for mode: CaptureMode) -> String {
+        let selection = compressionSelection(for: mode)
+        if selection.mode == .manual {
+            return "Manual \(String(format: "%.1f", selection.manualBitrateMbps)) Mbps"
+        }
+        return "Auto \(selection.level.rawValue)"
+    }
+
+    private func refreshCompressionOutputIfNeeded() {
+        guard captureMode == .video || captureMode == .sloMo else { return }
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording else { return }
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning, !self.movieOutput.isRecording else { return }
+            _ = self.configureMovieOutputSettings()
+        }
+    }
+
+    func setVideoCompressionMode(_ mode: CompressionMode) {
+        guard videoCompressionMode != mode else { return }
+        videoCompressionMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: LowPolyCamPreferences.Key.videoCompressionMode)
+        _ = compressionRequests.next(reason: "video compression mode")
+        AppEventLog.event("Video compression mode changed: \(mode.rawValue)")
+        refreshCompressionOutputIfNeeded()
+    }
+
+    func setVideoCompressionLevel(_ level: VideoCompression) {
+        guard videoCompression != level else { return }
+        videoCompression = level
+        // Keep the historical key current for older installs and diagnostics.
+        UserDefaults.standard.set(level.rawValue, forKey: LowPolyCamPreferences.Key.videoCompression)
+    }
+
+    func setVideoManualBitrateMbps(_ value: Double) {
+        let validated = ManualBitratePolicy.validatedMbps(value, fallback: videoManualBitrateMbps)
+        guard abs(videoManualBitrateMbps - validated) > 0.000_001 else { return }
+        videoManualBitrateMbps = validated
+        UserDefaults.standard.set(validated, forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps)
+        _ = compressionRequests.next(reason: "video manual bitrate")
+        refreshCompressionOutputIfNeeded()
+    }
+
+    func setSlowMotionCompressionMode(_ mode: CompressionMode) {
+        guard slowMotionCompressionMode != mode else { return }
+        slowMotionCompressionMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: LowPolyCamPreferences.Key.slowMotionCompressionMode)
+        _ = compressionRequests.next(reason: "Slo-Mo compression mode")
+        refreshCompressionOutputIfNeeded()
+    }
+
+    func setSlowMotionCompressionLevel(_ level: VideoCompression) {
+        guard slowMotionCompression != level else { return }
+        slowMotionCompression = level
+        UserDefaults.standard.set(level.rawValue, forKey: LowPolyCamPreferences.Key.slowMotionCompressionLevel)
+        refreshCompressionOutputIfNeeded()
+    }
+
+    func setSlowMotionManualBitrateMbps(_ value: Double) {
+        let validated = ManualBitratePolicy.validatedMbps(value, fallback: slowMotionManualBitrateMbps)
+        guard abs(slowMotionManualBitrateMbps - validated) > 0.000_001 else { return }
+        slowMotionManualBitrateMbps = validated
+        UserDefaults.standard.set(validated, forKey: LowPolyCamPreferences.Key.slowMotionManualBitrateMbps)
+        _ = compressionRequests.next(reason: "Slo-Mo manual bitrate")
+        refreshCompressionOutputIfNeeded()
+    }
+
+    func setAudioLevelMeterMode(_ mode: AudioLevelMeterMode) {
+        guard audioLevelMeterMode != mode else { return }
+        let previousMode = audioLevelMeterMode
+        audioLevelMeterMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: LowPolyCamPreferences.Key.audioLevelMeter)
+        AppEventLog.event("Audio level meter mode changed: \(previousMode.rawValue) -> \(mode.rawValue)", category: .audio)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.configureAudioMeterOutput()
+            self.refreshLiveMetrics()
+        }
+    }
+
+    func setZebraExposureWarningEnabled(_ enabled: Bool) {
+        guard isZebraExposureWarningEnabled != enabled else { return }
+        isZebraExposureWarningEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: LowPolyCamPreferences.Key.zebraExposureWarning)
+        AppEventLog.event(enabled ? "ZEBRA ENABLED" : "ZEBRA DISABLED", category: .exposure)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.refreshLiveMetrics()
+        }
+    }
+
+    func setCaptureOrientation(_ preference: CaptureOrientationPreference) {
+        guard captureOrientation != preference else { return }
+        captureOrientation = preference
+        UserDefaults.standard.set(preference.rawValue, forKey: LowPolyCamPreferences.Key.captureOrientation)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let movieConnection = self.movieOutput.connection(with: .video)
+            self.applyCaptureRotation(to: movieConnection)
+            let photoConnection = self.photoOutput.connection(with: .video)
+            self.applyCaptureRotation(to: photoConnection)
+            AppEventLog.event("Capture orientation applied", category: .session, fields: [
+                "requested": preference.rawValue,
+                "movieRotationAngle": movieConnection.map { String(format: "%.1f", $0.videoRotationAngle) } ?? "unavailable",
+                "photoRotationAngle": photoConnection.map { String(format: "%.1f", $0.videoRotationAngle) } ?? "unavailable"
+            ])
+        }
+    }
+
+    func setCustomWhiteBalance(temperature: Double, tint: Double) {
+        let nextTemperature = WhiteBalancePreferencePolicy.validatedTemperature(temperature)
+        let nextTint = WhiteBalancePreferencePolicy.validatedTint(tint)
+        customWhiteBalanceTemperature = nextTemperature
+        customWhiteBalanceTint = nextTint
+        let defaults = UserDefaults.standard
+        defaults.set(nextTemperature, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature)
+        defaults.set(nextTint, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint)
+        guard requestedWhiteBalancePreset == .custom else { return }
+        selectWhiteBalancePreset(.custom)
+    }
+
+    func setTorchBrightness(_ level: Double) {
+        let validated = min(max(level.isFinite ? level : 0.35, 0.05), 1.0)
+        guard abs(torchBrightnessLevel - validated) > 0.000_001 else { return }
+        torchBrightnessLevel = validated
+        UserDefaults.standard.set(validated, forKey: LowPolyCamPreferences.Key.torchBrightness)
+        AppEventLog.event("TORCH BRIGHTNESS REQUEST", category: .torch, fields: [
+            "requestedLevel": String(format: "%.3f", validated),
+            "device": videoInput?.device.localizedName ?? "none"
+        ])
+        sessionQueue.async { [weak self] in
+            guard let self, self.isTorchOn else { return }
+            self.setTorchEnabledOnCurrentDevice(true)
+        }
+    }
+
+    var zoomShortcuts: [Double] {
+        zoomShortcutValues
+    }
+
+    func setZoomShortcuts(_ values: [Double], count requestedCount: Int? = nil) {
+        var validated = ZoomShortcutPolicy.validated(values)
+        let targetCount = min(max(requestedCount ?? validated.count, 3), 5)
+        for fallback in ZoomShortcutPolicy.defaultValues + [8.0] where validated.count < targetCount {
+            guard !validated.contains(where: { abs($0 - fallback) < 0.0001 }) else { continue }
+            validated.append(fallback)
+        }
+        let padded = Array(validated.prefix(targetCount))
+        let defaults = UserDefaults.standard
+        let keys = [
+            LowPolyCamPreferences.Key.zoomButton1,
+            LowPolyCamPreferences.Key.zoomButton2,
+            LowPolyCamPreferences.Key.zoomButton3,
+            LowPolyCamPreferences.Key.zoomButton4,
+            LowPolyCamPreferences.Key.zoomButton5
+        ]
+        for (index, key) in keys.enumerated() {
+            let fallback = ZoomShortcutPolicy.defaultValues.indices.contains(index)
+                ? ZoomShortcutPolicy.defaultValues[index]
+                : 8.0
+            defaults.set(padded.indices.contains(index) ? padded[index] : fallback, forKey: key)
+        }
+        defaults.set(targetCount, forKey: LowPolyCamPreferences.Key.zoomButtonCount)
+        zoomShortcutValues = padded.isEmpty ? Array(ZoomShortcutPolicy.defaultValues.prefix(targetCount)) : padded
+        AppEventLog.event("Zoom shortcut buttons updated", category: .zoom, fields: [
+            "values": padded.map { String(format: "%.2f", $0) }.joined(separator: ",")
+        ])
+    }
+
+    private static func loadZoomShortcutValues(from defaults: UserDefaults) -> [Double] {
+        let storedCount = defaults.integer(forKey: LowPolyCamPreferences.Key.zoomButtonCount)
+        let count = [3, 4, 5].contains(storedCount) ? storedCount : 4
+        let values = [
+            defaults.object(forKey: LowPolyCamPreferences.Key.zoomButton1) as? NSNumber,
+            defaults.object(forKey: LowPolyCamPreferences.Key.zoomButton2) as? NSNumber,
+            defaults.object(forKey: LowPolyCamPreferences.Key.zoomButton3) as? NSNumber,
+            defaults.object(forKey: LowPolyCamPreferences.Key.zoomButton4) as? NSNumber,
+            defaults.object(forKey: LowPolyCamPreferences.Key.zoomButton5) as? NSNumber
+        ].prefix(count).compactMap { $0?.doubleValue }
+        var validated = ZoomShortcutPolicy.validated(values)
+        for fallback in ZoomShortcutPolicy.defaultValues + [8.0] where validated.count < count {
+            guard !validated.contains(where: { abs($0 - fallback) < 0.0001 }) else { continue }
+            validated.append(fallback)
+        }
+        return validated.isEmpty ? Array(ZoomShortcutPolicy.defaultValues.prefix(count)) : Array(validated.prefix(count))
+    }
+
+    func resetTemporaryCameraControls() {
+        AppEventLog.event("Quick camera reset requested", category: .session, fields: [
+            "exposureBiasBefore": String(format: "%.2f", exposureBias),
+            "zoomBefore": String(format: "%.2f", Double(zoomFactor)),
+            "whiteBalanceBefore": requestedWhiteBalancePreset.rawValue,
+            "torchBefore": String(isTorchOn)
+        ])
+        setExposureBias(0)
+        setZoomFactor(1)
+        selectWhiteBalancePreset(.auto)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.resetFocusAndExposureState()
+            self.setTorchEnabledOnCurrentDevice(false)
+            self.postStatus("Temporary camera controls reset")
+        }
+    }
+
+    func makeCameraPreset(named name: String) -> CameraPreset {
+        CameraPreset(
+            name: name,
+            captureMode: captureMode.rawValue,
+            videoResolution: selectedResolution.rawValue,
+            videoFrameRate: selectedFrameRate.rawValue,
+            slowMotionResolution: selectedSlowMotionResolution.rawValue,
+            slowMotionFrameRate: selectedSlowMotionFrameRate.rawValue,
+            codec: selectedVideoCodec,
+            videoCompressionMode: videoCompressionMode.rawValue,
+            videoCompressionLevel: videoCompression.rawValue,
+            videoManualBitrateMbps: videoManualBitrateMbps,
+            slowMotionCompressionMode: slowMotionCompressionMode.rawValue,
+            slowMotionCompressionLevel: slowMotionCompression.rawValue,
+            slowMotionManualBitrateMbps: slowMotionManualBitrateMbps,
+            zoom: Double(requestedZoom),
+            stabilization: isVideoStabilizationEnabled,
+            whiteBalance: requestedWhiteBalancePreset.rawValue,
+            customWhiteBalanceTemperature: customWhiteBalanceTemperature,
+            customWhiteBalanceTint: customWhiteBalanceTint,
+            cameraPosition: cameraPosition.rawValue
+        )
+    }
+
+    func applyCameraPreset(_ preset: CameraPreset, completion: ((Bool) -> Void)? = nil) {
+        let migrated = preset.migrated()
+        guard !isRecording, !isRecordingStarting, !isFinalizingRecording,
+              !isCapturingPhoto, !isLensTransitioning else {
+            completion?(false)
+            return
+        }
+        let targetPosition = CameraPosition(rawValue: migrated.cameraPosition) ?? cameraPosition
+        if targetPosition != cameraPosition {
+            switchCamera()
+            sessionQueue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.applyCameraPresetOnSessionQueue(migrated, completion: completion)
+            }
+        } else {
+            sessionQueue.async { [weak self] in
+                self?.applyCameraPresetOnSessionQueue(migrated, completion: completion)
+            }
+        }
+    }
+
+    private func applyCameraPresetOnSessionQueue(_ preset: CameraPreset, completion: ((Bool) -> Void)?) {
+        guard cameraPosition.rawValue == preset.cameraPosition || preset.cameraPosition.isEmpty else {
+            completion?(false)
+            return
+        }
+        guard let targetMode = CaptureMode(rawValue: preset.captureMode) else {
+            completion?(false)
+            return
+        }
+
+        invalidatePendingVideoConfiguration()
+        lensTransitionCoordinator.cancel()
+        _ = qualityRequests.next(reason: "custom camera preset")
+        _ = captureConfigurationGeneration.next(reason: "custom camera preset")
+        let previousSuppression = suppressAutomaticReconfiguration
+        let previousPersistenceSuppression = suppressPreferencePersistence
+        suppressAutomaticReconfiguration = true
+        suppressPreferencePersistence = true
+        captureMode = targetMode
+        selectedResolution = VideoResolution(rawValue: preset.videoResolution) ?? .p1080
+        selectedFrameRate = VideoFrameRate(rawValue: preset.videoFrameRate) ?? .fps60
+        selectedSlowMotionResolution = VideoResolution(rawValue: preset.slowMotionResolution) ?? .p1080
+        selectedSlowMotionFrameRate = SlowMotionFrameRate(rawValue: preset.slowMotionFrameRate) ?? .fps240
+        selectedVideoCodec = preset.codec == "H264" ? "H264" : "HEVC"
+        videoCompressionMode = CompressionMode(rawValue: preset.videoCompressionMode) ?? .auto
+        videoCompression = VideoCompression(rawValue: preset.videoCompressionLevel) ?? .high
+        videoManualBitrateMbps = ManualBitratePolicy.validatedMbps(preset.videoManualBitrateMbps)
+        slowMotionCompressionMode = CompressionMode(rawValue: preset.slowMotionCompressionMode) ?? .auto
+        slowMotionCompression = VideoCompression(rawValue: preset.slowMotionCompressionLevel) ?? .high
+        slowMotionManualBitrateMbps = ManualBitratePolicy.validatedMbps(preset.slowMotionManualBitrateMbps)
+        isVideoStabilizationEnabled = preset.stabilization
+        customWhiteBalanceTemperature = WhiteBalancePreferencePolicy.validatedTemperature(preset.customWhiteBalanceTemperature)
+        customWhiteBalanceTint = WhiteBalancePreferencePolicy.validatedTint(preset.customWhiteBalanceTint)
+        requestedWhiteBalancePreset = WhiteBalancePreset(rawValue: preset.whiteBalance) ?? .auto
+        whiteBalancePreset = requestedWhiteBalancePreset
+        requestedZoom = CGFloat(preset.zoom.isFinite ? max(preset.zoom, 0.5) : 1)
+        suppressAutomaticReconfiguration = previousSuppression
+        suppressPreferencePersistence = previousPersistenceSuppression
+
+        let defaults = UserDefaults.standard
+        defaults.set(videoCompressionMode.rawValue, forKey: LowPolyCamPreferences.Key.videoCompressionMode)
+        defaults.set(videoCompression.rawValue, forKey: LowPolyCamPreferences.Key.videoCompression)
+        defaults.set(videoManualBitrateMbps, forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps)
+        defaults.set(slowMotionCompressionMode.rawValue, forKey: LowPolyCamPreferences.Key.slowMotionCompressionMode)
+        defaults.set(slowMotionCompression.rawValue, forKey: LowPolyCamPreferences.Key.slowMotionCompressionLevel)
+        defaults.set(slowMotionManualBitrateMbps, forKey: LowPolyCamPreferences.Key.slowMotionManualBitrateMbps)
+        defaults.set(selectedVideoCodec, forKey: LowPolyCamPreferences.Key.selectedVideoCodec)
+        defaults.set(isVideoStabilizationEnabled, forKey: LowPolyCamPreferences.Key.videoStabilizationEnabled)
+        defaults.set(requestedWhiteBalancePreset.rawValue, forKey: LowPolyCamPreferences.Key.whiteBalancePreset)
+        defaults.set(customWhiteBalanceTemperature, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature)
+        defaults.set(customWhiteBalanceTint, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint)
+        persistCameraPreferences()
+
+        let success = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
+        if success {
+            synchronizeTorchState()
+            synchronizeWhiteBalanceAfterConfiguration()
+            persistRememberedCameraSetup()
+            AppEventLog.event("Custom camera preset applied", category: .settings, fields: [
+                "name": preset.name, "mode": preset.captureMode, "position": preset.cameraPosition
+            ])
+        } else {
+            AppEventLog.event("Custom camera preset failed to apply", category: .settings, level: .warning, fields: [
+                "name": preset.name, "mode": preset.captureMode, "position": preset.cameraPosition
+            ])
+        }
+        publish { completion?(success) }
+    }
+
     private func prepareMicrophoneAndBeginRecording() {
         guard recordingState.requestsRecording else { return }
         let requestID = microphonePermissionRequests.next(reason: "prepare microphone for recording")
@@ -3568,6 +4442,7 @@ final class CameraManager: NSObject, ObservableObject {
                 AppEventLog.event("Recording stop requested", category: .recording, traceID: self.activeRecordingTraceID,
                                   fields: ["movieOutputRecording": String(self.movieOutput.isRecording),
                                            "state": String(describing: self.recordingState)])
+                self.requestNativeRecordingStop(reason: "user requested recording stop")
                 let wasWaitingForMicrophone = self.awaitingMicrophonePermission
                 _ = self.recordingStartRequests.next(reason: "user requested recording stop")
                 _ = self.microphonePermissionRequests.next(reason: "recording stop invalidates microphone request")
@@ -3575,7 +4450,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.microphonePermissionPromptLifecyclePending = false
                 self.storageGuard.stopMonitoring()
                 self.stopLiveMetrics()
-                self.segmentTimer?.cancel()
+                self.cancelSplitTimer()
 
                 if self.movieOutput.isRecording {
                     self.transitionRecordingState(to: .finalizing, resetClock: true)
@@ -3599,6 +4474,7 @@ final class CameraManager: NSObject, ObservableObject {
                 ])
                 return
             }
+            self.resetNativeRecordingPauseState(reason: "new recording session")
             self.activeRecordingTraceID = AppEventLog.makeTraceID("RECORD")
             self.activeRecordingSessionID = UUID().uuidString
             self.recordingRequestStartedAt = ProcessInfo.processInfo.systemUptime
@@ -3610,7 +4486,7 @@ final class CameraManager: NSObject, ObservableObject {
                 "resolution": self.hudResolutionLabel,
                 "fps": self.hudFrameRateLabel ?? "unknown",
                 "codec": self.activeVideoCodec,
-                "compression": self.videoCompression.rawValue,
+                "compression": self.compressionDescription(for: self.captureMode),
                 "camera": self.cameraPosition.rawValue,
                 "device": self.videoInput?.device.localizedName ?? "none",
                 "requestedZoom": String(format: "%.3f", self.requestedZoom)
@@ -3673,6 +4549,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.suppressAutomaticReconfiguration = true
                 self.selectedResolution = preset.resolution
                 self.selectedFrameRate = preset.frameRate
+                self.videoCompressionMode = .auto
                 self.videoCompression = preset.compression
                 self.selectedVideoCodec = "HEVC"
                 self.suppressPreferencePersistence = false
@@ -3697,19 +4574,23 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func currentAudioStatusLabel() -> String {
-        if audioInput != nil { return "Audio" }
+        if audioInput != nil { return "Microphone" }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .notDetermined: return "Audio —"
-        case .denied, .restricted: return "Silent"
-        case .authorized: return "Audio unavailable"
-        @unknown default: return "Audio —"
+        case .notDetermined: return "Checking microphone"
+        case .denied, .restricted: return "Microphone off"
+        case .authorized: return "Microphone unavailable"
+        @unknown default: return "Microphone unavailable"
         }
     }
 
     private func publishAudioStatus() {
         let label = currentAudioStatusLabel()
         publish {
+            guard self.audioStatusLabel != label else { return }
             self.audioStatusLabel = label
+            if label != "Microphone" {
+                AppEventLog.event("Audio unavailable state: \(label)", category: .audio)
+            }
         }
     }
 
@@ -3723,6 +4604,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         if let existingAudioInput = audioInput,
            session.inputs.contains(where: { $0 === existingAudioInput }) {
+            configureAudioMeterOutput()
             publishAudioStatus()
             return true
         }
@@ -3735,9 +4617,47 @@ final class CameraManager: NSObject, ObservableObject {
         session.addInput(newInput)
         session.commitConfiguration()
         audioInput = newInput
+        configureAudioMeterOutput()
         AppEventLog.event("Microphone audio input attached: \(newInput.device.localizedName)")
         publishAudioStatus()
         return true
+    }
+
+    private func audioMeterOutputIsAttached() -> Bool {
+        session.outputs.contains { $0 === audioMeter.output }
+    }
+
+    private func audioMeterShouldBeEnabled() -> Bool {
+        audioMeterOutputIsAttached() &&
+            audioInput != nil &&
+            captureMode != .photo &&
+            audioLevelMeterMode != .off &&
+            recordingState.requestsRecording &&
+            movieOutput.isRecording
+    }
+
+    /// The audio-data output is optional and disabled outside an active recording. It reads the
+    /// same authorized microphone input as the movie output and never creates a parallel recorder.
+    private func configureAudioMeterOutput() {
+        let wanted = audioInput != nil && captureMode != .photo && audioLevelMeterMode != .off
+        let attached = audioMeterOutputIsAttached()
+        if wanted != attached {
+            session.beginConfiguration()
+            if wanted, session.canAddOutput(audioMeter.output) {
+                session.addOutput(audioMeter.output)
+            } else if !wanted, attached {
+                audioMeter.setEnabled(false)
+                session.removeOutput(audioMeter.output)
+            }
+            session.commitConfiguration()
+        }
+        let available = audioMeterOutputIsAttached()
+        let enabled = available && audioMeterShouldBeEnabled()
+        audioMeter.output.connection(with: .audio)?.isEnabled = enabled
+        audioMeter.setEnabled(enabled)
+        AppEventLog.deepEvent("AUDIO LEVEL METER OUTPUT", category: .audio, fields: [
+            "wanted": String(wanted), "attached": String(available), "enabled": String(enabled)
+        ])
     }
 
     private func configureSessionIfNeeded(forceRebuild: Bool = false) {
@@ -3748,6 +4668,8 @@ final class CameraManager: NSObject, ObservableObject {
         let hasPhoto = session.outputs.contains(where: { $0 === photoOutput })
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
             publishAudioStatus()
+            configureAudioMeterOutput()
+            configureZebraAnalysis()
             return
         }
 
@@ -3773,6 +4695,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         videoInput = nil
         audioInput = nil
+        audioMeter.setEnabled(false)
         publishAudioStatus()
 
         guard let device = preferredCamera(for: cameraPosition.avPosition) else {
@@ -3830,6 +4753,7 @@ final class CameraManager: NSObject, ObservableObject {
             photoOutput.isResponsiveCaptureEnabled = true
         }
         session.commitConfiguration()
+        configureAudioMeterOutput()
 
         let formatApplied = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         if formatApplied {
@@ -3947,7 +4871,8 @@ final class CameraManager: NSObject, ObservableObject {
             if zoomMatches, hdrMatches, distortionMatches {
                 setLiveMetricsConnectionEnabled(
                     (recordingState.requestsRecording && movieOutput.isRecording) ||
-                    (AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
+                    ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+                        liveMetricsOutputIsAttached() && captureMode != .photo)
                 )
                 rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
                 requestedZoom = displayedZoomCandidate
@@ -3990,8 +4915,21 @@ final class CameraManager: NSObject, ObservableObject {
                     AppEventLog.event("Torch could not be restored after camera input switch: unavailable on \(device.localizedName)")
                     return
                 }
-                device.torchMode = .on
-                AppEventLog.event("Torch restored after camera input switch on \(device.localizedName)")
+                do {
+                    let maximumTorchLevel = max(device.maxAvailableTorchLevel, 0.05)
+                    let requestedTorchLevel = min(
+                        max(Float(self.torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
+                        maximumTorchLevel
+                    )
+                    try device.setTorchModeOn(level: requestedTorchLevel)
+                } catch {
+                    device.torchMode = .on
+                }
+                AppEventLog.event("Torch restored after camera input switch on \(device.localizedName)", category: .torch, fields: [
+                    "requestedLevel": String(format: "%.3f", self.torchBrightnessLevel),
+                    "actualLevel": String(format: "%.3f", device.torchLevel),
+                    "device": device.localizedName
+                ])
             } catch {
                 AppEventLog.event("Torch could not be restored after camera input switch: \(error.localizedDescription)")
             }
@@ -4121,7 +5059,16 @@ final class CameraManager: NSObject, ObservableObject {
                 desiredDevice.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: desiredDevice)
                 if shouldPreserveTorch, !isSwitchingInput,
                    desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
-                    desiredDevice.torchMode = .on
+                    do {
+                        let maximumTorchLevel = max(desiredDevice.maxAvailableTorchLevel, 0.05)
+                        let requestedTorchLevel = min(
+                            max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
+                            maximumTorchLevel
+                        )
+                        try desiredDevice.setTorchModeOn(level: requestedTorchLevel)
+                    } catch {
+                        desiredDevice.torchMode = .on
+                    }
                 }
             }
 
@@ -4146,7 +5093,8 @@ final class CameraManager: NSObject, ObservableObject {
             }
             setLiveMetricsConnectionEnabled(
                 (recordingState.requestsRecording && movieOutput.isRecording) ||
-                (AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
+                ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+                    liveMetricsOutputIsAttached() && captureMode != .photo)
             )
             rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
             requestedZoom = displayedZoom
@@ -4386,16 +5334,27 @@ final class CameraManager: NSObject, ObservableObject {
                 return false
             }
 
-            guard let temperature = preset.temperature,
-                  device.isWhiteBalanceModeSupported(.locked),
+            guard device.isWhiteBalanceModeSupported(.locked),
                   device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else {
+                return false
+            }
+
+            let temperature: Float
+            let tint: Float
+            if preset == .custom {
+                temperature = Float(WhiteBalancePreferencePolicy.validatedTemperature(customWhiteBalanceTemperature))
+                tint = Float(WhiteBalancePreferencePolicy.validatedTint(customWhiteBalanceTint))
+            } else if let presetTemperature = preset.temperature {
+                temperature = presetTemperature
+                tint = preset.tint
+            } else {
                 return false
             }
 
             // Convert to device gains and clamp before applying. The temperature/tint setter can
             // raise an Objective-C range exception for values a particular lens rejects; Swift
             // do/catch cannot recover from that exception. iPhone 11 supports custom gains.
-            let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: preset.tint)
+            let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(temperature: temperature, tint: tint)
             var gains = device.deviceWhiteBalanceGains(for: values)
             let maximum = device.maxWhiteBalanceGain
             gains.redGain = min(max(gains.redGain, 1), maximum)
@@ -4404,7 +5363,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.deepEvent("WB LOCKED GAINS TARGET", category: .whiteBalance, traceID: traceID, fields: [
                 "preset": preset.rawValue,
                 "temperature": String(format: "%.1f", temperature),
-                "tint": String(format: "%.1f", preset.tint),
+                "tint": String(format: "%.1f", tint),
                 "red": String(format: "%.3f", gains.redGain),
                 "green": String(format: "%.3f", gains.greenGain),
                 "blue": String(format: "%.3f", gains.blueGain),
@@ -4885,7 +5844,7 @@ final class CameraManager: NSObject, ObservableObject {
             requestedResolution: hudResolutionLabel,
             requestedFrameRate: Int(hudFrameRateLabel ?? "0") ?? 0,
             selectedCodec: activeVideoCodec,
-            compression: videoCompression.rawValue,
+            compression: compressionDescription(for: captureMode),
             torchOn: torchOn,
             photoFlashMode: photoFlashMode.rawValue,
             zoomFactor: Double(requestedZoom),
@@ -4921,6 +5880,8 @@ final class CameraManager: NSObject, ObservableObject {
         requestedFrameRate: VideoFrameRate? = nil,
         requestedCodec: String? = nil,
         requestedCompression: VideoCompression? = nil,
+        requestedCompressionMode: CompressionMode? = nil,
+        requestedManualBitrateMbps: Double? = nil,
         qualityRequestID: UInt64? = nil,
         requestedPosition: CameraPosition? = nil,
         requestValidation: (() -> Bool)? = nil
@@ -4929,7 +5890,10 @@ final class CameraManager: NSObject, ObservableObject {
         if let requestValidation, !requestValidation() { return false }
         let targetPosition = requestedPosition ?? cameraPosition
         let effectiveCodec = requestedCodec ?? activeVideoCodec
-        let effectiveCompression = requestedCompression ?? videoCompression
+        let currentCompressionSelection = compressionSelection(for: .video)
+        let effectiveCompression = requestedCompression ?? currentCompressionSelection.level
+        let effectiveCompressionMode = requestedCompressionMode ?? currentCompressionSelection.mode
+        let effectiveManualBitrateMbps = requestedManualBitrateMbps ?? currentCompressionSelection.manualBitrateMbps
         let requestSelector = CameraFormatSelector(
             selectedVideoCodec: effectiveCodec,
             selectedResolution: requestedResolution ?? selectedResolution,
@@ -5035,12 +5999,15 @@ final class CameraManager: NSObject, ObservableObject {
         let outputConfigured = configureMovieOutputSettings(
             requestedCodec: effectiveCodec,
             requestedCompression: effectiveCompression,
+            requestedCompressionMode: effectiveCompressionMode,
+            requestedManualBitrateMbps: effectiveManualBitrateMbps,
             requestedResolution: selection.resolution,
             requestedFrameRate: selection.frameRate,
             requestedPosition: targetPosition,
             requestedMode: .video
         )
-        if requestedCodec != nil || requestedCompression != nil {
+        if requestedCodec != nil || requestedCompression != nil ||
+            requestedCompressionMode != nil || requestedManualBitrateMbps != nil {
             guard outputConfigured else { return false }
         }
         let zoomDevices = forcePhysical4K60 ? physicalSupportedDevices : [desiredDevice]
@@ -5389,8 +6356,13 @@ final class CameraManager: NSObject, ObservableObject {
               abs(provenance.frameRate - (captureMode == .sloMo
                   ? Double(selectedSlowMotionFrameRate.rawValue)
                   : Double(selectedFrameRate.rawValue))) < 0.0001,
-              provenance.codec == preferredCodec.rawValue,
-              videoCompression == .high else {
+              provenance.codec == preferredCodec.rawValue else {
+            return false
+        }
+
+        let currentCompression = compressionSelection(for: captureMode)
+        guard currentCompression.mode == .auto,
+              currentCompression.level == .high else {
             return false
         }
 
@@ -5435,7 +6407,9 @@ final class CameraManager: NSObject, ObservableObject {
             if connection.preferredVideoStabilizationMode != expected { return false }
         }
 
-        if videoCompression != .high {
+        let compression = compressionSelection(for: captureMode)
+        let usesCustomBitrate = compression.mode == .manual || compression.level != .high
+        if usesCustomBitrate {
             guard let compression = applied[AVVideoCompressionPropertiesKey] as? [String: Any],
                   let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber else { return false }
             let expected = estimatedVideoBitsPerSecond
@@ -5458,6 +6432,8 @@ final class CameraManager: NSObject, ObservableObject {
     private func configureMovieOutputSettings(
         requestedCodec: String? = nil,
         requestedCompression: VideoCompression? = nil,
+        requestedCompressionMode: CompressionMode? = nil,
+        requestedManualBitrateMbps: Double? = nil,
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: VideoFrameRate? = nil,
         requestedPosition: CameraPosition? = nil,
@@ -5475,26 +6451,47 @@ final class CameraManager: NSObject, ObservableObject {
         let effectiveMode = requestedMode ?? captureMode
         let effectivePosition = requestedPosition ?? cameraPosition
         let effectiveCodec = effectiveMode == .sloMo ? "HEVC" : (requestedCodec ?? activeVideoCodec)
-        let effectiveCompression = requestedCompression ?? videoCompression
+        let currentCompression = compressionSelection(for: effectiveMode)
+        let effectiveCompression = requestedCompression ?? currentCompression.level
+        let effectiveCompressionMode = requestedCompressionMode ?? currentCompression.mode
+        let requestedBitrateMbps = ManualBitratePolicy.validatedMbps(
+            requestedManualBitrateMbps ?? currentCompression.manualBitrateMbps
+        )
         let effectiveResolution = effectiveMode == .sloMo
             ? selectedSlowMotionResolution
             : (requestedResolution ?? selectedResolution)
         let effectiveFPS: Double = effectiveMode == .sloMo
             ? Double(selectedSlowMotionFrameRate.rawValue)
             : Double((requestedFrameRate ?? selectedFrameRate).rawValue)
+        let effectiveManualBitrateMbps = ManualBitratePolicy.effectiveMbps(
+            requested: requestedBitrateMbps,
+            resolution: effectiveResolution,
+            fps: effectiveFPS,
+            isSlowMotion: effectiveMode == .sloMo,
+            codec: effectiveCodec
+        )
         let expectedBitRate = estimatedVideoBitsPerSecond(
             resolution: effectiveResolution,
             fps: effectiveFPS,
             codec: effectiveCodec,
-            compression: effectiveCompression
+            compression: effectiveCompression,
+            compressionMode: effectiveCompressionMode,
+            manualBitrateMbps: requestedBitrateMbps,
+            isSlowMotion: effectiveMode == .sloMo
         )
         AppEventLog.deepEvent("MOVIE OUTPUT CONFIG REQUEST", category: .video, traceID: outputTraceID, fields: [
             "mode": effectiveMode.rawValue,
+            "Video/Slo-Mo": effectiveMode.rawValue,
             "position": effectivePosition.rawValue,
             "resolution": effectiveResolution.rawValue,
             "fps": String(format: "%.1f", effectiveFPS),
+            "FPS": String(format: "%.1f", effectiveFPS),
             "codec": effectiveCodec,
-            "compression": effectiveCompression.rawValue,
+            "requestedManualBitrateMbps": String(format: "%.1f", requestedBitrateMbps),
+            "effectiveManualBitrateMbps": String(format: "%.1f", effectiveManualBitrateMbps),
+            "compression": effectiveCompressionMode == .manual
+                ? "Manual \(String(format: "%.1f", effectiveManualBitrateMbps)) Mbps"
+                : "Auto \(effectiveCompression.rawValue)",
             "expectedBitrate": String(Int(expectedBitRate)),
             "availableCodecs": movieOutput.availableVideoCodecTypes.map(\.rawValue).joined(separator: ",")
         ])
@@ -5538,8 +6535,17 @@ final class CameraManager: NSObject, ObservableObject {
             return false
         }
 
+        let needsCompressionProperties = effectiveCompressionMode == .manual || effectiveCompression != .high
+        guard !needsCompressionProperties || supportedKeys.contains(AVVideoCompressionPropertiesKey) else {
+            AppEventLog.event("MOVIE OUTPUT COMPRESSION REJECTED: compression properties are unsupported",
+                              category: .video, level: .warning, traceID: outputTraceID,
+                              fields: ["mode": effectiveMode.rawValue, "compression": effectiveCompressionMode == .manual
+                                       ? "manual" : effectiveCompression.rawValue])
+            return false
+        }
+
         var settings: [String: Any] = [AVVideoCodecKey: preferred]
-        if effectiveCompression != .high, supportedKeys.contains(AVVideoCompressionPropertiesKey) {
+        if needsCompressionProperties {
             settings[AVVideoCompressionPropertiesKey] = [
                 AVVideoAverageBitRateKey: Int(expectedBitRate)
             ]
@@ -5574,9 +6580,13 @@ final class CameraManager: NSObject, ObservableObject {
             let expected: AVCaptureVideoStabilizationMode = shouldStabilize ? .auto : .off
             if connection.preferredVideoStabilizationMode != expected { return false }
         }
-        if effectiveCompression != .high,
-           let compression = applied[AVVideoCompressionPropertiesKey] as? [String: Any],
-           let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber {
+        if needsCompressionProperties {
+            guard let compression = applied[AVVideoCompressionPropertiesKey] as? [String: Any],
+                  let bitrate = compression[AVVideoAverageBitRateKey] as? NSNumber else {
+                AppEventLog.event("MOVIE OUTPUT COMPRESSION READBACK REJECTED: bitrate missing",
+                                  category: .video, level: .warning, traceID: outputTraceID)
+                return false
+            }
             if abs(bitrate.doubleValue - expectedBitRate) > max(expectedBitRate * 0.20, 1_000_000) {
                 return false
             }
@@ -5586,9 +6596,11 @@ final class CameraManager: NSObject, ObservableObject {
             settings: applied,
             mode: effectiveMode,
             position: effectivePosition,
-            compression: effectiveCompression
+            compression: effectiveCompression,
+            compressionMode: effectiveCompressionMode,
+            manualBitrateMbps: effectiveManualBitrateMbps
         )
-        if effectiveCompression == .high {
+        if effectiveCompressionMode == .auto, effectiveCompression == .high {
             installVerifiedHighOutputProvenance(
                 requestSnapshot: requestSnapshot,
                 connection: connection,
@@ -5623,16 +6635,21 @@ final class CameraManager: NSObject, ObservableObject {
         settings: [String: Any],
         mode: CaptureMode,
         position: CameraPosition,
-        compression configuredCompression: VideoCompression
+        compression configuredCompression: VideoCompression,
+        compressionMode: CompressionMode = .auto,
+        manualBitrateMbps: Double = ManualBitratePolicy.defaultMbps
     ) {
         let codec = settings[AVVideoCodecKey] as? String ?? "system default"
         let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
         let bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
         let bitRateText = bitRate.map { "\($0)" } ?? "default"
+        let compressionText = compressionMode == .manual
+            ? "Manual \(String(format: "%.1f", manualBitrateMbps)) Mbps"
+            : "Auto \(configuredCompression.rawValue)"
         AppEventLog.event(
             "MOVIE OUTPUT READBACK: mode=\(mode.rawValue), " +
             "position=\(position == .back ? "back" : "front"), codec=\(codec), " +
-            "compression=\(configuredCompression.rawValue), averageBitrate=\(bitRateText), " +
+            "compression=\(compressionText), averageBitrate=\(bitRateText), " +
             "mirrored=\(connection.isVideoMirrored), " +
             "stabilization=\(String(describing: connection.preferredVideoStabilizationMode))"
         )
@@ -5644,9 +6661,22 @@ final class CameraManager: NSObject, ObservableObject {
 
 
     private func applyCaptureRotation(to connection: AVCaptureConnection?) {
-        guard let connection,
-              let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture,
-              connection.isVideoRotationAngleSupported(angle) else { return }
+        guard let connection else { return }
+        let automaticAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture
+        let requestedAngle: CGFloat?
+        switch captureOrientation {
+        case .auto:
+            requestedAngle = automaticAngle
+        case .portrait:
+            requestedAngle = 90
+        case .landscapeLeft:
+            requestedAngle = 180
+        case .landscapeRight:
+            requestedAngle = 0
+        }
+        let angle = requestedAngle.flatMap { connection.isVideoRotationAngleSupported($0) ? $0 : nil }
+            ?? automaticAngle.flatMap { connection.isVideoRotationAngleSupported($0) ? $0 : nil }
+        guard let angle else { return }
         connection.videoRotationAngle = angle
     }
 
@@ -6002,6 +7032,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if self.torchAvailable { self.torchAvailable = false }
                 if self.isTorchOn { self.isTorchOn = false }
                 if self.photoFlashAvailable { self.photoFlashAvailable = false }
+                if self.torchBrightnessSupported { self.torchBrightnessSupported = false }
             }
             return
         }
@@ -6018,6 +7049,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
         let torchAvailable = device.hasTorch && device.isTorchAvailable
+        let torchLevelSupported = device.hasTorch && device.maxAvailableTorchLevel > 0
         configurePhotoSceneMonitoring()
         let flashAvailable = device.hasFlash && !photoOutput.supportedFlashModes.isEmpty
         publish {
@@ -6029,6 +7061,9 @@ final class CameraManager: NSObject, ObservableObject {
             }
             if self.photoFlashAvailable != flashAvailable {
                 self.photoFlashAvailable = flashAvailable
+            }
+            if self.torchBrightnessSupported != torchLevelSupported {
+                self.torchBrightnessSupported = torchLevelSupported
             }
         }
     }
@@ -6440,11 +7475,26 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
             if !self.recordingState.requestsRecording {
                 self.transitionRecordingToDiscard()
-                if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+                if self.movieOutput.isRecording {
+                    self.requestNativeRecordingStop(reason: "stale recording start callback")
+                    self.movieOutput.stopRecording()
+                }
                 return
             }
 
+            guard self.recordingPauseMachine.start() else {
+                AppEventLog.guardRejected("didStartRecording", reason: "pause state machine was not idle", traceID: self.activeRecordingTraceID, fields: [
+                    "pauseState": self.recordingPauseMachine.state.rawValue
+                ])
+                self.transitionRecordingToDiscard()
+                self.requestNativeRecordingStop(reason: "pause state machine rejected recording start")
+                self.movieOutput.stopRecording()
+                return
+            }
+            self.publish { self.recordingPauseState = .recording }
+
             self.startLiveMetrics()
+            self.configureAudioMeterOutput()
             let callbackAt = ProcessInfo.processInfo.systemUptime
             AppEventLog.event("RECORDING DID START CALLBACK", category: .recording, traceID: self.activeRecordingTraceID, fields: [
                 "file": fileURL.lastPathComponent,
@@ -6454,22 +7504,13 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 "microphoneAuthorized": String(AVCaptureDevice.authorizationStatus(for: .audio).rawValue),
                 "audioInputAttached": String(self.audioInput != nil)
             ])
-            self.segmentTimer?.cancel()
             let splitDuration = self.recordingState.splitDuration
-            if splitDuration > 0 {
-                let timer = DispatchWorkItem { [weak self] in
-                    guard let self, self.recordingState.requestsRecording, self.movieOutput.isRecording else { return }
-                    self.transitionRecordingState(to: .stoppingToContinueSegment(splitDuration: splitDuration))
-                    self.movieOutput.stopRecording()
-                }
-                self.segmentTimer = timer
-                self.sessionQueue.asyncAfter(deadline: .now() + splitDuration, execute: timer)
-            }
 
             self.transitionRecordingState(
                 to: .recording(splitDuration: splitDuration),
                 startClock: true
             )
+            self.scheduleSplitTimer(splitDuration: splitDuration)
 
             // Validate and publish the recording state before collecting detailed diagnostics.
             // Snapshot formatting and disk I/O are handled asynchronously by AppEventLog.
@@ -6479,6 +7520,18 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 label: "RECORDING START CALLBACK"
             )
             self.logSessionSnapshot("recording started")
+        }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didPauseRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        sessionQueue.async { [weak self] in
+            self?.handleNativeRecordingPaused(output, fileURL: fileURL)
+        }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didResumeRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        sessionQueue.async { [weak self] in
+            self?.handleNativeRecordingResumed(output, fileURL: fileURL)
         }
     }
 
@@ -6500,8 +7553,10 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             AppEventLog.event("Recording finished: \(outputFileURL.lastPathComponent), success=\(successful)\(errorDetail)", category: .recording, traceID: self.activeRecordingTraceID)
             if let error { AppEventLog.log(error: error, prefix: "Recording delegate error", category: .recording, traceID: self.activeRecordingTraceID) }
             self.stopLiveMetrics()
+            self.configureAudioMeterOutput()
             self.storageGuard.stopMonitoring()
-            self.segmentTimer?.cancel()
+            self.cancelSplitTimer()
+            self.completeNativeRecordingStop(reason: "native recording finished")
 
             if self.recordingState.shouldDiscardWhenFinished {
                 try? FileManager.default.removeItem(at: outputFileURL)
@@ -6523,7 +7578,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                     resolution: (isSlowMotion ? self.selectedSlowMotionResolution : self.selectedResolution).rawValue,
                     frameRate: Double((isSlowMotion ? self.selectedSlowMotionFrameRate.rawValue : self.selectedFrameRate.rawValue)),
                     codec: self.activeVideoCodec,
-                    compression: self.videoCompression.rawValue,
+                    compression: self.compressionDescription(for: self.captureMode),
                     duration: max(self.movieOutput.recordedDuration.seconds, 0),
                     recordedAt: Date()
                 ))

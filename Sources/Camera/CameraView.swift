@@ -14,6 +14,7 @@ struct CameraView: View {
     @StateObject private var camera = CameraManager()
     @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = false
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
+    @AppStorage("gridStyle") private var gridStyle = GridStyle.ruleOfThirds.rawValue
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
@@ -36,11 +37,17 @@ struct CameraView: View {
     @AppStorage("recordingLock") private var recordingLock = false
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
+    @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
+    @AppStorage("zebraExposureWarning") private var zebraExposureWarning = false
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @AppStorage("liveRecordingStats") private var liveStats = false
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("longevityMode") private var longevity = false
     @State private var editingStats = false
+    @State private var isCleanPreview = false
+    @State private var countdownIsForRecording = false
     @State private var restoreBrightness: CGFloat?
     private var accent = CameraAccent()
 
@@ -50,6 +57,7 @@ struct CameraView: View {
             photoAspectOverlay
             previewGradient
             gridOverlay
+            zebraExposureOverlay
             crosshairOverlay
             countdownOverlay
             levelMeterOverlay
@@ -86,6 +94,19 @@ struct CameraView: View {
         }
         .onChange(of: mirrorSelfies) { _, _ in
             camera.refreshMovieOutputSettings()
+        }
+        .onChange(of: audioLevelMeter) { _, newValue in
+            if let mode = AudioLevelMeterMode(rawValue: newValue) {
+                camera.setAudioLevelMeterMode(mode)
+            }
+        }
+        .onChange(of: zebraExposureWarning) { _, newValue in
+            camera.setZebraExposureWarningEnabled(newValue)
+        }
+        .onChange(of: cleanPreviewGesture) { _, newValue in
+            if newValue == CleanPreviewGesture.off.rawValue {
+                isCleanPreview = false
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             updateIdleTimer(for: phase)
@@ -137,8 +158,18 @@ struct CameraView: View {
             isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
             reservesTopHUDSpace: isHUDEnabled,
             fitsPhoto: camera.captureMode == .photo,
+            cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .twoFingerTap,
+            captureOrientation: camera.captureOrientation,
             onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
-            onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
+            onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } },
+            onCleanPreviewGesture: {
+                guard !editingStats, !isShowingSettings, countdown == 0 else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isCleanPreview.toggle()
+                }
+                CameraHaptics.fire()
+                AppEventLog.event("Clean Preview \(isCleanPreview ? "enabled" : "disabled")")
+            }
         )
         .ignoresSafeArea()
     }
@@ -172,10 +203,18 @@ struct CameraView: View {
     @ViewBuilder
     private var gridOverlay: some View {
         if isGridEnabled {
-            CameraGridOverlay()
+            CameraGridOverlay(style: GridStyle(rawValue: gridStyle) ?? .ruleOfThirds)
                 .opacity(gridOpacity)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var zebraExposureOverlay: some View {
+        if zebraExposureWarning && camera.isZebraAvailableForCurrentConfiguration && camera.captureMode != .photo {
+            ZebraExposureOverlay(mask: camera.zebraExposureMask)
+                .ignoresSafeArea()
         }
     }
 
@@ -195,7 +234,8 @@ struct CameraView: View {
             Button { cancelCountdown() } label: {
                 VStack {
                     Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
-                    Text("Tap to cancel").font(.caption)
+                    Text(countdownIsForRecording ? "Starting recording · tap to cancel" : "Tap to cancel")
+                        .font(.caption)
                 }
                 .padding(24)
                 .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
@@ -205,7 +245,11 @@ struct CameraView: View {
         }
     }
 
+    @ViewBuilder
     private var levelMeterOverlay: some View {
+        if isCleanPreview {
+            EmptyView()
+        } else {
         GeometryReader { proxy in
             let levelHalfExtent: CGFloat = 54
             let topControlsBottom: CGFloat = 14 + 116
@@ -224,6 +268,7 @@ struct CameraView: View {
             .position(x: proxy.size.width / 2, y: levelY)
         }
         .allowsHitTesting(false)
+        }
     }
 
     private var controlsLayer: some View {
@@ -231,7 +276,7 @@ struct CameraView: View {
             topControls
             Spacer()
             VStack(spacing: 8) {
-                statusToast
+                if !isCleanPreview { statusToast }
                 bottomControls
             }
             .background {
@@ -250,7 +295,7 @@ struct CameraView: View {
 
     @ViewBuilder
     private var proToolsOverlay: some View {
-        if isShowingProTools {
+        if isShowingProTools && !isCleanPreview {
             Color.black.opacity(0.001)
                 .ignoresSafeArea()
                 .onTapGesture { isShowingProTools = false }
@@ -268,7 +313,9 @@ struct CameraView: View {
         }
     }
 
+    @ViewBuilder
     private var topControls: some View {
+        if !isCleanPreview {
         GeometryReader { proxy in
             let hudMaxWidth = max(120, proxy.size.width - 112)
             let hudSnapshot = CameraHUDSnapshot(
@@ -281,7 +328,9 @@ struct CameraView: View {
                 whiteBalanceLabel: hudWhiteBalanceLabel,
                 audioStatusLabel: camera.audioStatusLabel,
                 availableStorageBytes: camera.availableStorageBytes,
-                lastFrameGaps: camera.lastFrameGaps
+                lastFrameGaps: camera.lastFrameGaps,
+                audioMeterMode: camera.audioLevelMeterMode,
+                audioMeterSnapshot: camera.audioMeterSnapshot
             )
 
             ZStack {
@@ -294,9 +343,7 @@ struct CameraView: View {
                             action: { camera.cyclePhotoFlashMode() }
                         )
                     } else {
-                        CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !camera.isLensTransitioning && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
-                            camera.toggleTorch()
-                        }
+                        TorchButton(camera: camera, isEnabled: !(camera.isRecording && recordingLock))
                     }
                     Spacer()
                     CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning, color: accent.color) {
@@ -312,16 +359,42 @@ struct CameraView: View {
                         showFPS: hudFPS,
                         showRemaining: hudRemaining,
                         showWhiteBalance: hudWhiteBalance,
-                        maxWidth: hudMaxWidth
+                        maxWidth: hudMaxWidth,
+                        audioMeterMode: camera.audioLevelMeterMode,
+                        audioMeterSnapshot: camera.audioMeterSnapshot
                     )
                     .allowsHitTesting(false)
                 }
             }
         }
         .frame(height: 116)
+        }
     }
 
+    @ViewBuilder
     private var bottomControls: some View {
+        if isCleanPreview {
+            HStack {
+                Spacer()
+                ZStack {
+                    RecordButton(
+                        isRecording: camera.isRecording,
+                        isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning
+                    ) {
+                        shutterPressed()
+                    }
+                    recordingPauseControl
+                        .offset(x: 52)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 14)
+        } else {
+            normalBottomControls
+        }
+    }
+
+    private var normalBottomControls: some View {
         VStack(spacing: 14) {
                 ZStack {
                     Color.clear
@@ -338,6 +411,26 @@ struct CameraView: View {
                 .gesture(zoomGesture)
                 .allowsHitTesting(!(camera.isRecording && recordingLock))
 
+            HStack(spacing: 8) {
+                ForEach(Array(camera.zoomShortcutValues.enumerated()), id: \.offset) { item in
+                    let value = item.element
+                    Button {
+                        CameraHaptics.fire()
+                        camera.setZoomFactor(CGFloat(value))
+                    } label: {
+                        Text(cameraZoomLabel(value))
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(abs(camera.zoomFactor - CGFloat(value)) < 0.05 ? accent.color : .white.opacity(0.78))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.34), in: Capsule())
+                    }
+                    .disabled(camera.isRecording && recordingLock)
+                    .accessibilityLabel("Set zoom \(cameraZoomLabel(value))")
+                }
+            }
+            .frame(maxWidth: .infinity)
+
             CaptureModeSelector(
                 selectedMode: camera.captureMode,
                 isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0,
@@ -351,37 +444,41 @@ struct CameraView: View {
                     withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
                 }
                 Spacer()
-                if camera.captureMode == .photo {
-                    PhotoButton(
-                        isCapturing: camera.isCapturingPhoto,
-                        onTap: {
-                            guard !editingStats else { return }
-                            shutterPressed()
-                        },
-                        onBurstStart: {
-                            guard !editingStats else { return }
-                            cancelCountdown()
-                            if camera.captureBurst() {
-                                captureHaptic()
+                ZStack {
+                    if camera.captureMode == .photo {
+                        PhotoButton(
+                            isCapturing: camera.isCapturingPhoto,
+                            onTap: {
+                                guard !editingStats else { return }
+                                shutterPressed()
+                            },
+                            onBurstStart: {
+                                guard !editingStats else { return }
+                                cancelCountdown()
+                                if camera.captureBurst() {
+                                    captureHaptic()
+                                }
+                            },
+                            onBurstEnd: {
+                                camera.stopBurst()
                             }
-                        },
-                        onBurstEnd: {
-                            camera.stopBurst()
+                        )
+                    } else if camera.isRecording && recordingLock {
+                        Image(systemName: "lock.fill")
+                            .font(.title2).foregroundStyle(accent.color)
+                            .frame(width: 76, height: 76)
+                            .background(.black.opacity(0.6), in: Circle())
+                            .overlay(Circle().stroke(.red, lineWidth: 3))
+                            .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
+                            .accessibilityLabel("Recording locked. Hold to stop")
+                            .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
+                    } else {
+                        RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning) {
+                            shutterPressed()
                         }
-                    )
-                } else if camera.isRecording && recordingLock {
-                    Image(systemName: "lock.fill")
-                        .font(.title2).foregroundStyle(accent.color)
-                        .frame(width: 76, height: 76)
-                        .background(.black.opacity(0.6), in: Circle())
-                        .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
-                        .accessibilityLabel("Recording locked. Hold to stop")
-                        .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
-                } else {
-                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning) {
-                        shutterPressed()
                     }
+                    recordingPauseControl
+                        .offset(x: 52)
                 }
             Spacer()
             CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
@@ -390,6 +487,18 @@ struct CameraView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var recordingPauseControl: some View {
+        if camera.isRecording && camera.captureMode != .photo {
+            RecordingPauseButton(
+                isPaused: camera.recordingPauseState == .paused,
+                isEnabled: camera.recordingPauseState == .recording || camera.recordingPauseState == .paused
+            ) {
+                camera.toggleRecordingPause()
+            }
+        }
     }
 
     @ViewBuilder
@@ -443,6 +552,12 @@ struct CameraView: View {
             }
     }
 
+    private func cameraZoomLabel(_ value: Double) -> String {
+        abs(value.rounded() - value) < 0.01
+            ? "\(Int(value.rounded()))×"
+            : String(format: "%.1f×", value)
+    }
+
     private func captureHaptic() {
         guard isHapticsEnabled else { return }
         AppEventLog.event("App haptic requested: capture")
@@ -456,6 +571,7 @@ struct CameraView: View {
         case .cloudy: return "Cloud"
         case .tungsten: return "Tung"
         case .fluorescent: return "Fluor"
+        case .custom: return "Custom"
         }
     }
 
@@ -466,10 +582,13 @@ struct CameraView: View {
         shutterTask?.cancel()
         shutterTask = nil
         countdown = 0
+        countdownIsForRecording = false
     }
 
     private func shutterPressed() {
-        AppEventLog.event("Shutter pressed: mode=\(camera.captureMode.rawValue), recording=\(camera.isRecording), delay=\(shutterDelay)s")
+        let mode = camera.captureMode
+        let configuredDelay = mode == .photo ? shutterDelay : recordingStartCountdown
+        AppEventLog.event("Shutter pressed: mode=\(mode.rawValue), recording=\(camera.isRecording), delay=\(configuredDelay)s")
         if countdown > 0 { cancelCountdown(); return }
         if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
         guard !camera.isRecordingStarting, !camera.isFinalizingRecording,
@@ -477,10 +596,14 @@ struct CameraView: View {
             AppEventLog.event("Shutter ignored: starting=\(camera.isRecordingStarting), finalizing=\(camera.isFinalizingRecording), pendingCountdown=\(shutterTask != nil), sessionRunning=\(camera.isSessionRunning)")
             return
         }
-        let mode = camera.captureMode
         shutterTask = Task { @MainActor in
-            countdown = shutterDelay
-            if countdown > 0 { AppEventLog.event("Shutter countdown started: \(countdown)s") }
+            countdownIsForRecording = mode != .photo
+            countdown = configuredDelay
+            if countdown > 0 {
+                AppEventLog.event(
+                    "\(mode == .photo ? "Photo shutter timer" : "Recording start countdown") started: \(countdown)s"
+                )
+            }
             while countdown > 0 {
                 if countdownHaptics { CameraHaptics.fire() }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
@@ -498,6 +621,7 @@ struct CameraView: View {
                 camera.startOrStopRecording()
             }
             shutterTask = nil
+            countdownIsForRecording = false
         }
     }
 

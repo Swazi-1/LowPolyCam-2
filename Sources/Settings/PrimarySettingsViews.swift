@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 struct CameraSetupSettingsView: View {
     @ObservedObject var camera: CameraManager
@@ -35,6 +36,32 @@ struct CameraSetupSettingsView: View {
                     .pickerStyle(.menu)
                     .disabled(!cameraControlsEnabled)
                 }
+            }
+
+            Section("CAPTURE BEHAVIOR") {
+                NavigationLink {
+                    CaptureOrientationSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationLabel(
+                        symbol: "rectangle.rotate",
+                        color: .blue,
+                        title: "Capture Orientation",
+                        value: camera.captureOrientation.rawValue
+                    )
+                }
+                .disabled(!cameraControlsEnabled)
+
+                NavigationLink {
+                    ZoomControlsSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationLabel(
+                        symbol: "plus.magnifyingglass",
+                        color: .purple,
+                        title: "Zoom Controls",
+                        value: "\(camera.zoomShortcutValues.count) buttons"
+                    )
+                }
+                .disabled(!cameraControlsEnabled)
             }
 
             Section("DISPLAY") {
@@ -79,6 +106,122 @@ struct CameraSetupSettingsView: View {
         case .photo: return "Photo"
         case .sloMo: return "Slo-Mo"
         }
+    }
+}
+
+struct CaptureOrientationSettingsView: View {
+    @ObservedObject var camera: CameraManager
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Capture Orientation", selection: orientationBinding) {
+                    ForEach(CaptureOrientationPreference.allCases) { preference in
+                        Text(preference.rawValue).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("ORIENTATION")
+            } footer: {
+                Text("Auto follows the device and camera rotation coordinator. A fixed choice is applied to photo and video outputs when the connection supports it.")
+            }
+
+            Section {
+                SettingsInfoRow(
+                    symbol: "arrow.triangle.2.circlepath.camera",
+                    color: .blue,
+                    title: "Safe Fallback",
+                    detail: "Front-camera mirroring, Slo-Mo, lens handoff and unsupported-angle fallback remain managed by the camera session."
+                )
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Capture Orientation")
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+    }
+
+    private var orientationBinding: Binding<CaptureOrientationPreference> {
+        Binding(
+            get: { camera.captureOrientation },
+            set: { camera.setCaptureOrientation($0) }
+        )
+    }
+}
+
+struct ZoomControlsSettingsView: View {
+    @ObservedObject var camera: CameraManager
+    @AppStorage("zoomButtonCount") private var buttonCount = 4
+    @AppStorage("zoomButton1") private var zoom1 = 0.5
+    @AppStorage("zoomButton2") private var zoom2 = 1.0
+    @AppStorage("zoomButton3") private var zoom3 = 2.0
+    @AppStorage("zoomButton4") private var zoom4 = 4.0
+    @AppStorage("zoomButton5") private var zoom5 = 8.0
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Number of Buttons", selection: $buttonCount) {
+                    ForEach([3, 4, 5], id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                zoomStepper(title: "Button 1", value: $zoom1)
+                zoomStepper(title: "Button 2", value: $zoom2)
+                zoomStepper(title: "Button 3", value: $zoom3)
+                zoomStepper(title: "Button 4", value: $zoom4)
+                    .opacity(buttonCount >= 4 ? 1 : 0.45)
+                    .disabled(buttonCount < 4)
+                zoomStepper(title: "Button 5", value: $zoom5)
+                    .opacity(buttonCount >= 5 ? 1 : 0.45)
+                    .disabled(buttonCount < 5)
+            } header: {
+                Text("ZOOM BUTTONS")
+            } footer: {
+                Text("Choose 3–5 shortcuts. Values are clamped, de-duplicated and sent through the existing zoom request/ramp path.")
+            }
+
+            Section {
+                SettingsInfoRow(
+                    symbol: "plus.magnifyingglass",
+                    color: .purple,
+                    title: "Default Shortcuts",
+                    detail: "0.5×, 1×, 2× and 4× are used on a fresh install. The fifth slot is available when you choose five buttons."
+                )
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Zoom Controls")
+        .navigationBarTitleDisplayMode(.large)
+        .tint(.blue)
+        .onAppear { updateZoomShortcuts() }
+        .onChange(of: buttonCount) { _, _ in updateZoomShortcuts() }
+        .onChange(of: zoom1) { _, _ in updateZoomShortcuts() }
+        .onChange(of: zoom2) { _, _ in updateZoomShortcuts() }
+        .onChange(of: zoom3) { _, _ in updateZoomShortcuts() }
+        .onChange(of: zoom4) { _, _ in updateZoomShortcuts() }
+        .onChange(of: zoom5) { _, _ in updateZoomShortcuts() }
+    }
+
+    @ViewBuilder
+    private func zoomStepper(title: String, value: Binding<Double>) -> some View {
+        Stepper(value: value, in: 0.5...100, step: 0.5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(String(format: "%.1f×", value.wrappedValue))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private func updateZoomShortcuts() {
+        let values = [zoom1, zoom2, zoom3, zoom4, zoom5].prefix(min(max(buttonCount, 3), 5))
+        camera.setZoomShortcuts(Array(values), count: buttonCount)
     }
 }
 
@@ -136,7 +279,7 @@ struct RecordVideoSettingsView: View {
                         symbol: "internaldrive.fill",
                         color: .blue,
                         title: "Codec & Compression",
-                        value: "\(camera.selectedVideoCodec == "HEVC" ? "HEVC" : "H.264") · \(camera.videoCompression.rawValue)"
+                        value: "\(camera.selectedVideoCodec == "HEVC" ? "HEVC" : "H.264") · \(camera.compressionDescription(for: .video))"
                     )
                 }
             }
@@ -232,6 +375,8 @@ struct SlowMotionSettingsView: View {
             } footer: {
                 Text("Slo-Mo uses HEVC automatically. Available resolutions and frame rates depend on the selected camera and lens.")
             }
+
+            CompressionSettingsSection(camera: camera, isSlowMotion: true)
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Record Slo-Mo")
@@ -388,19 +533,7 @@ struct CodecCompressionSettingsView: View {
                 Text("HEVC saves space efficiently and is required for some high-resolution or high-frame-rate combinations.")
             }
 
-            Section {
-                Picker("Compression", selection: compressionBinding) {
-                    ForEach(VideoCompression.allCases) { compression in
-                        Text(compression.rawValue).tag(compression.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                .disabled(!codecControlsEnabled)
-            } header: {
-                Text("COMPRESSION")
-            } footer: {
-                Text("Data Saver creates smaller files. High uses more data to preserve detail.")
-            }
+            CompressionSettingsSection(camera: camera, isSlowMotion: false)
 
             if let message = camera.codecAvailabilityMessage {
                 Section {
@@ -433,22 +566,150 @@ struct CodecCompressionSettingsView: View {
         )
     }
 
-    private var compressionBinding: Binding<String> {
-        Binding(
-            get: { camera.videoCompression.rawValue },
-            set: { rawValue in
-                guard let compression = VideoCompression(rawValue: rawValue) else { return }
-                camera.videoCompression = compression
-            }
-        )
-    }
-
     private var codecControlsEnabled: Bool {
         !camera.isRecording &&
         !camera.isRecordingStarting &&
         !camera.isFinalizingRecording &&
         !camera.isCapturingPhoto &&
         !camera.isLensTransitioning
+    }
+}
+
+struct CompressionSettingsSection: View {
+    @ObservedObject var camera: CameraManager
+    let isSlowMotion: Bool
+
+    var body: some View {
+        Section {
+            Picker("Compression", selection: modeBinding) {
+                ForEach(CompressionMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!controlsEnabled)
+
+            if selectedMode == .auto {
+                Picker("Compression Level", selection: levelBinding) {
+                    ForEach(VideoCompression.allCases) { level in
+                        Text(level.rawValue).tag(level)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(!controlsEnabled)
+            } else {
+                Stepper(value: manualBitrateBinding, in: ManualBitratePolicy.minimumMbps...ManualBitratePolicy.maximumMbps, step: 1) {
+                    HStack {
+                        Text("Bitrate")
+                        Spacer()
+                        Text(String(format: "%.1f Mbps", manualBitrateBinding.wrappedValue))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                .disabled(!controlsEnabled)
+            }
+        } header: {
+            Text(isSlowMotion ? "SLO-MO COMPRESSION" : "COMPRESSION")
+        } footer: {
+            if selectedMode == .auto {
+                Text("Auto exposes High, Medium and Data Saver using the existing device-aware bitrate policy. Video and Slo-Mo keep separate values.")
+            } else {
+                Text("Bitrate is validated to 1–200 Mbps. For the current format, the effective value is \(formattedMbps(effectiveBitrate)) Mbps within \(formattedMbps(bitrateRecommendation.minimumMbps))–\(formattedMbps(bitrateRecommendation.maximumMbps)) Mbps; the requested value is preserved when formats change.")
+            }
+        }
+    }
+
+    private var selectedMode: CompressionMode {
+        isSlowMotion ? camera.slowMotionCompressionMode : camera.videoCompressionMode
+    }
+
+    private var controlsEnabled: Bool {
+        !camera.isRecording &&
+        !camera.isRecordingStarting &&
+        !camera.isFinalizingRecording &&
+        !camera.isCapturingPhoto &&
+        !camera.isLensTransitioning
+    }
+
+    private var currentResolution: VideoResolution {
+        isSlowMotion ? camera.selectedSlowMotionResolution : camera.selectedResolution
+    }
+
+    private var currentFPS: Double {
+        isSlowMotion
+            ? Double(camera.selectedSlowMotionFrameRate.rawValue)
+            : Double(camera.selectedFrameRate.rawValue)
+    }
+
+    private var currentCodec: String {
+        isSlowMotion ? "HEVC" : camera.selectedVideoCodec
+    }
+
+    private var requestedBitrate: Double {
+        isSlowMotion ? camera.slowMotionManualBitrateMbps : camera.videoManualBitrateMbps
+    }
+
+    private var bitrateRecommendation: ManualBitrateRecommendation {
+        ManualBitratePolicy.recommendation(
+            resolution: currentResolution,
+            fps: currentFPS,
+            isSlowMotion: isSlowMotion,
+            codec: currentCodec
+        )
+    }
+
+    private var effectiveBitrate: Double {
+        ManualBitratePolicy.effectiveMbps(
+            requested: requestedBitrate,
+            resolution: currentResolution,
+            fps: currentFPS,
+            isSlowMotion: isSlowMotion,
+            codec: currentCodec
+        )
+    }
+
+    private func formattedMbps(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+
+    private var modeBinding: Binding<CompressionMode> {
+        Binding(
+            get: { selectedMode },
+            set: { mode in
+                if isSlowMotion {
+                    camera.setSlowMotionCompressionMode(mode)
+                } else {
+                    camera.setVideoCompressionMode(mode)
+                }
+            }
+        )
+    }
+
+    private var levelBinding: Binding<VideoCompression> {
+        Binding(
+            get: { isSlowMotion ? camera.slowMotionCompression : camera.videoCompression },
+            set: { level in
+                if isSlowMotion {
+                    camera.setSlowMotionCompressionLevel(level)
+                } else {
+                    camera.setVideoCompressionLevel(level)
+                }
+            }
+        )
+    }
+
+    private var manualBitrateBinding: Binding<Double> {
+        Binding(
+            get: { isSlowMotion ? camera.slowMotionManualBitrateMbps : camera.videoManualBitrateMbps },
+            set: { value in
+                if isSlowMotion {
+                    camera.setSlowMotionManualBitrateMbps(value)
+                } else {
+                    camera.setVideoManualBitrateMbps(value)
+                }
+            }
+        )
     }
 }
 

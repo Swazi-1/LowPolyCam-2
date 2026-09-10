@@ -4,6 +4,7 @@ struct QuickControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraGridEnabled") private var grid = false
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
+    @AppStorage("gridStyle") private var gridStyle = GridStyle.ruleOfThirds.rawValue
     @AppStorage("levelMeterEnabled") private var level = false
     @AppStorage("centerCrosshair") private var crosshair = false
 
@@ -36,6 +37,13 @@ struct QuickControlsSettingsView: View {
                 }
 
                 if grid {
+                    Picker("Grid Style", selection: $gridStyle) {
+                        ForEach(GridStyle.allCases) { style in
+                            Text(style.rawValue).tag(style.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Grid Opacity")

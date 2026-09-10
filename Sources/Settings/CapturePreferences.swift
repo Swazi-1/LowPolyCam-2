@@ -24,6 +24,21 @@ enum VideoCompression: String, CaseIterable, Identifiable {
     }
 }
 
+enum CameraAccentPalette {
+    static let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
+
+    static func color(for name: String, red: Double = 0.55, green: Double = 0.85, blue: Double = 1.0) -> Color {
+        switch name {
+        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
+        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
+        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
+        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
+        case "Custom": return Color(red: red, green: green, blue: blue)
+        default: return Color(red: 0.65, green: 0.88, blue: 1)
+        }
+    }
+}
+
 enum VideoQuickPreset: String, CaseIterable, Identifiable {
     case balanced = "Balanced", highQuality = "High Quality", allRounder = "All Rounder", allDay = "All Day", social = "Social"
     var id: String { rawValue }
@@ -72,16 +87,7 @@ struct CameraAccent: DynamicProperty {
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
 
-    var color: Color {
-        switch preset {
-        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
-        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
-        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
-        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
-        case "Custom": return Color(red: red, green: green, blue: blue)
-        default: return Color(red: 0.65, green: 0.88, blue: 1)
-        }
-    }
+    var color: Color { CameraAccentPalette.color(for: preset, red: red, green: green, blue: blue) }
 }
 
 struct CapturePreferencesView: View {

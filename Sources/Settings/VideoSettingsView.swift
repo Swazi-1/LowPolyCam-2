@@ -330,6 +330,9 @@ struct VideoSettingsView: View {
             .init("Capture Mode", "Settings › Camera Setup", "video photo slo mo slow motion mode", "video.fill", .blue, .cameraSetup),
             .init("Remember Camera Setup", "Settings › Camera Setup", "remember restore startup launch last capture mode camera setup", "arrow.counterclockwise.circle.fill", .green, .cameraSetup),
             .init("Keep Screen Awake", "Settings › Camera Setup", "keep screen awake auto lock display", "sun.max.fill", .orange, .cameraSetup),
+            .init("Capture Orientation", "Settings › Camera Setup", "orientation auto portrait landscape left right rotation mirror photo video slo mo", "rectangle.rotate", .blue, .cameraSetup),
+            .init("Zoom Controls", "Settings › Camera Setup", "zoom buttons shortcuts 0.5 1 2 4 5 custom", "plus.magnifyingglass", .purple, .cameraSetup),
+            .init("Zoom Buttons", "Settings › Camera Setup › Zoom Controls", "custom zoom shortcut buttons 3 4 5 button values lens ramp", "plus.magnifyingglass", .purple, .cameraSetup),
 
             .init("Appearance", "Settings › Appearance", "app appearance system light dark theme", "sun.max.fill", .gray, .appearance),
             .init("Camera Accent", "Settings › Appearance", "accent color ice sunset mint lavender coral custom preview", "sun.max.fill", .purple, .appearance),
@@ -339,6 +342,9 @@ struct VideoSettingsView: View {
             .init("Video Resolution", "Settings › Record Video", "4k 2160p 1080p 720p quality", "video.fill", .red, .recordVideo),
             .init("Video Frame Rate", "Settings › Record Video", "24 30 60 fps frame rate", "video.fill", .red, .recordVideo),
             .init("Codec & Compression", "Settings › Record Video › Codec & Compression", "codec compression hevc h264 h265 bitrate", "internaldrive.fill", .blue, .codecCompression),
+            .init("Compression", "Settings › Record Video › Codec & Compression", "video compression auto manual high medium data saver bitrate", "internaldrive.fill", .blue, .codecCompression),
+            .init("Compression Level", "Settings › Record Video › Codec & Compression", "video compression level high medium data saver quality", "internaldrive.fill", .blue, .codecCompression),
+            .init("Bitrate", "Settings › Record Video › Codec & Compression", "manual bitrate mbps 1 200 video compression", "internaldrive.fill", .blue, .codecCompression),
             .init("HEVC", "Settings › Record Video › Codec & Compression", "hevc h265 h 265 codec", "internaldrive.fill", .blue, .codecCompression),
             .init("H.264", "Settings › Record Video › Codec & Compression", "h264 h 264 avc codec", "internaldrive.fill", .blue, .codecCompression),
             .init("Data Saver", "Settings › Record Video › Codec & Compression", "compression smallest files low bitrate", "internaldrive.fill", .blue, .codecCompression),
@@ -349,6 +355,9 @@ struct VideoSettingsView: View {
             .init("Record Slo-Mo", "Settings › Record Slo-Mo", "slow motion slo mo slowmo quality fps", "slowmo", .orange, .slowMotion),
             .init("Slo-Mo Resolution", "Settings › Record Slo-Mo", "1080p 720p slow motion resolution", "slowmo", .orange, .slowMotion),
             .init("Slo-Mo Frame Rate", "Settings › Record Slo-Mo", "120 240 fps slow motion frame rate", "slowmo", .orange, .slowMotion),
+            .init("Slo-Mo Compression", "Settings › Record Slo-Mo", "slow motion compression auto manual high medium data saver bitrate", "slowmo", .orange, .slowMotion),
+            .init("Slo-Mo Compression Level", "Settings › Record Slo-Mo", "slow motion compression level high medium data saver quality", "slowmo", .orange, .slowMotion),
+            .init("Slo-Mo Bitrate", "Settings › Record Slo-Mo", "slow motion manual bitrate mbps", "slowmo", .orange, .slowMotion),
 
             .init("Photo Capture", "Settings › Photo Capture", "photo camera megapixels format aspect extras", "camera.fill", .green, .photoCapture),
             .init("Megapixels", "Settings › Photo Capture", "mp photo resolution quality megapixel", "camera.fill", .green, .photoCapture),
@@ -362,6 +371,7 @@ struct VideoSettingsView: View {
             .init("Quick Controls", "Settings › Quick Controls", "camera composition controls", "slider.horizontal.3", .gray, .quickControls),
             .init("Grid", "Settings › Quick Controls", "composition grid guides", "grid", .blue, .quickControls),
             .init("Grid Opacity", "Settings › Quick Controls", "grid opacity transparency percent", "grid", .blue, .quickControls),
+            .init("Grid Style", "Settings › Quick Controls", "rule of thirds square diagonal golden ratio composition", "grid", .blue, .quickControls),
             .init("Level", "Settings › Quick Controls", "horizon level meter gyroscope", "gyroscope", .orange, .quickControls),
             .init("Center Crosshair", "Settings › Quick Controls", "center marker crosshair", "plus", .gray, .quickControls),
 
@@ -378,6 +388,10 @@ struct VideoSettingsView: View {
             .init("Countdown Haptics", "Settings › Preferences", "timer countdown haptic feedback vibration", "timer", .orange, .preferences),
             .init("Mirror Saved Selfies", "Settings › Preferences", "mirror saved selfie front camera", "camera.metering.center.weighted", .gray, .preferences),
             .init("Reset Exposure & White Balance", "Settings › Preferences", "reset exposure ev white balance wb auto", "arrow.counterclockwise", .gray, .preferences),
+            .init("Torch Brightness", "Camera Preview", "torch flashlight brightness long press level remembered lens handoff", "bolt.fill", .orange, .cameraSetup),
+            .init("White Balance Preset", "Camera Preview › Pro Tools", "white balance auto daylight cloudy tungsten fluorescent custom temperature tint kelvin", "thermometer.sun.fill", .orange, .cameraHUDContent),
+            .init("Custom White Balance", "Camera Preview › Pro Tools", "custom wb temperature 2500 10000 kelvin tint gains", "thermometer.sun.fill", .orange, .cameraHUDContent),
+            .init("Reset Temporary Camera Controls", "Camera Preview › Pro Tools", "reset temporary exposure zoom white balance focus", "arrow.counterclockwise", .gray, .cameraHUDContent),
 
             .init("Camera HUD", "Settings › Camera HUD", "hud display camera capsule", "rectangle.inset.filled", .blue, .cameraHUD),
             .init("Show Camera HUD", "Settings › Camera HUD", "show camera hud capsule", "rectangle.inset.filled", .blue, .cameraHUD),
@@ -391,6 +405,8 @@ struct VideoSettingsView: View {
             .init("Thermal Status HUD", "Settings › Camera HUD › HUD Content & Style", "thermal temperature status hud", "waveform.path.ecg", .orange, .cameraHUDContent),
             .init("Frame Gaps HUD", "Settings › Camera HUD › HUD Content & Style", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .cameraHUDContent),
             .init("HUD Text Size", "Settings › Camera HUD › HUD Content & Style", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUDContent),
+            .init("Audio Level Meter", "Settings › Camera HUD › HUD Content & Style", "audio recording microphone level meter bars db decibels clipping recording only", "mic.fill", .green, .cameraHUDContent),
+            .init("Clean Preview Gesture", "Settings › Camera HUD › HUD Content & Style", "clean preview hide ui two finger tap double tap temporary", "rectangle.inset.filled", .blue, .cameraHUDContent),
 
             .init("Advanced Recording", "Settings › Advanced Recording", "recording advanced live stats split longevity safety", "waveform.path.ecg", .purple, .advancedRecording),
             .init("Live Recording Stats", "Settings › Advanced Recording", "live stats fps bitrate frame drops", "chart.bar.fill", .blue, .advancedRecording),
@@ -405,6 +421,9 @@ struct VideoSettingsView: View {
             .init("Recording Recovery", "Settings › Advanced Recording", "recovery retry failed photos import recordings", "arrow.counterclockwise.circle.fill", .purple, .advancedRecording),
             .init("Low-Storage Protection", "Settings › Advanced Recording", "critical low storage protection safely finalize clip", "externaldrive.fill.badge.checkmark", .blue, .advancedRecording),
             .init("Background Save Protection", "Settings › Advanced Recording", "background save protection pending photo video saves", "square.and.arrow.down.fill", .green, .advancedRecording),
+            .init("Recording Start Countdown", "Settings › Advanced Recording", "recording countdown off 1 3 5 seconds video slo mo start cancel", "timer", .orange, .advancedRecording),
+            .init("Zebra Exposure Warning", "Settings › Advanced Recording", "zebra exposure highlights clipping diagonal stripes preview only", "stripe.3.horizontal", .yellow, .advancedRecording),
+            .init("Audio Recording", "Settings › Advanced Recording", "microphone audio recording mic permission status", "mic.fill", .green, .advancedRecording),
 
             .init("Video Presets", "Settings › Video Presets", "video presets balanced high quality all rounder all day social", "star.fill", .yellow, .videoPresets),
             .init("Balanced Preset", "Settings › Video Presets", "balanced 1080p medium 30 fps hevc", "slider.horizontal.3", .blue, .videoPresets),
@@ -412,6 +431,7 @@ struct VideoSettingsView: View {
             .init("All Rounder Preset", "Settings › Video Presets", "all rounder 1080p 60 fps hevc high", "square.grid.2x2.fill", .green, .videoPresets),
             .init("All Day Preset", "Settings › Video Presets", "all day 720p 30 fps hevc data saver battery", "battery.100percent", .orange, .videoPresets),
             .init("Social Preset", "Settings › Video Presets", "social 1080p 30 fps hevc data saver", "person.2.fill", .pink, .videoPresets),
+            .init("Custom Presets", "Settings › Video Presets", "custom camera presets save apply rename delete setup", "slider.horizontal.3", .purple, .videoPresets),
 
             .init("Diagnostics", "Settings › Diagnostics", "diagnostics logs logging bug report", "waveform.path.ecg", .red, .diagnostics),
             .init("Save Diagnostic Logs", "Settings › Diagnostics", "save diagnostic logs logging bug report", "doc.text.fill", .red, .diagnostics),

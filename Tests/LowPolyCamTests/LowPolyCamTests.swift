@@ -54,12 +54,41 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(clock.elapsedSeconds, 0)
     }
 
+    func testRecordingClockExcludesPausedWallTime() {
+        var uptime = 100.0
+        let clock = RecordingClockState(uptimeProvider: { uptime })
+
+        clock.startIfNeeded()
+        uptime = 103.9
+        clock.update()
+        XCTAssertEqual(clock.elapsedSeconds, 3)
+
+        clock.pause()
+        uptime = 120.0
+        clock.update()
+        XCTAssertEqual(clock.elapsedSeconds, 3)
+
+        clock.resume()
+        uptime = 121.2
+        clock.update()
+        XCTAssertEqual(clock.elapsedSeconds, 5)
+        clock.stopAndReset()
+    }
+
     func testPreferenceMigrationNormalizesInvalidValues() {
         let suiteName = "LowPolyCamTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.set("invalid", forKey: LowPolyCamPreferences.Key.selectedVideoResolution)
         defaults.set(999, forKey: LowPolyCamPreferences.Key.selectedVideoFrameRate)
         defaults.set(4.5, forKey: LowPolyCamPreferences.Key.gridOpacity)
+        defaults.set("invalid", forKey: LowPolyCamPreferences.Key.gridStyle)
+        defaults.set("invalid", forKey: LowPolyCamPreferences.Key.audioLevelMeter)
+        defaults.set("invalid", forKey: LowPolyCamPreferences.Key.cleanPreviewGesture)
+        defaults.set("invalid", forKey: LowPolyCamPreferences.Key.captureOrientation)
+        defaults.set(2, forKey: LowPolyCamPreferences.Key.recordingStartCountdown)
+        defaults.set(999, forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps)
+        defaults.set(-1, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature)
+        defaults.set(999, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint)
         defaults.set("Whatever", forKey: LowPolyCamPreferences.Key.focusExposureLockMode)
         defaults.set(2, forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds)
 
@@ -68,6 +97,14 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.selectedVideoResolution), "1080p")
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.selectedVideoFrameRate), 60)
         XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.gridOpacity), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.gridStyle), GridStyle.ruleOfThirds.rawValue)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.audioLevelMeter), AudioLevelMeterMode.bars.rawValue)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.cleanPreviewGesture), CleanPreviewGesture.twoFingerTap.rawValue)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.captureOrientation), CaptureOrientationPreference.auto.rawValue)
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.recordingStartCountdown), 0)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps), ManualBitratePolicy.maximumMbps, accuracy: 0.0001)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature), WhiteBalancePreferencePolicy.minimumTemperature, accuracy: 0.0001)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint), WhiteBalancePreferencePolicy.maximumTint, accuracy: 0.0001)
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.focusExposureLockMode), "AE/AF")
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds), 1)
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.schemaVersion), LowPolyCamPreferences.currentSchemaVersion)
@@ -115,5 +152,236 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(decoded.segmentIndex, segment.segmentIndex)
         XCTAssertEqual(decoded.frameRate, segment.frameRate)
         XCTAssertEqual(decoded.duration, segment.duration, accuracy: 0.001)
+    }
+
+    func testManualBitratePolicyClampsInvalidValues() {
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(.nan), ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(.infinity), ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(.nan, fallback: .infinity), ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(0), ManualBitratePolicy.minimumMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(999), ManualBitratePolicy.maximumMbps)
+        XCTAssertEqual(ManualBitratePolicy.bitsPerSecond(forMbps: 12.5), 12_500_000)
+    }
+
+    func testManualBitratePolicyUsesFormatAwareEffectiveRangesWithoutMutatingRequest() {
+        let expectedMaximums: [(resolution: VideoResolution, fps: Double, isSlowMotion: Bool, maximum: Double)] = [
+            (.p720, 24, false, 12), (.p720, 30, false, 12), (.p720, 60, false, 18),
+            (.p1080, 24, false, 24), (.p1080, 30, false, 24), (.p1080, 60, false, 40),
+            (.p4k, 24, false, 80), (.p4k, 30, false, 80), (.p4k, 60, false, 140),
+            (.p720, 120, true, 40), (.p720, 240, true, 60),
+            (.p1080, 120, true, 90), (.p1080, 240, true, 140)
+        ]
+        for expected in expectedMaximums {
+            XCTAssertEqual(
+                ManualBitratePolicy.recommendation(
+                    resolution: expected.resolution,
+                    fps: expected.fps,
+                    isSlowMotion: expected.isSlowMotion,
+                    codec: "HEVC"
+                ).maximumMbps,
+                expected.maximum
+            )
+        }
+
+        let video720p60 = ManualBitratePolicy.recommendation(
+            resolution: .p720,
+            fps: 60,
+            isSlowMotion: false,
+            codec: "HEVC"
+        )
+        XCTAssertEqual(video720p60.recommendedMbps, 10)
+        XCTAssertEqual(video720p60.maximumMbps, 18)
+        XCTAssertEqual(
+            ManualBitratePolicy.effectiveMbps(
+                requested: 100,
+                resolution: .p720,
+                fps: 60,
+                isSlowMotion: false,
+                codec: "HEVC"
+            ),
+            18
+        )
+
+        let video4K60 = ManualBitratePolicy.recommendation(
+            resolution: .p4k,
+            fps: 60,
+            isSlowMotion: false,
+            codec: "HEVC"
+        )
+        XCTAssertEqual(video4K60.maximumMbps, 140)
+        XCTAssertEqual(
+            ManualBitratePolicy.effectiveMbps(
+                requested: 100,
+                resolution: .p4k,
+                fps: 60,
+                isSlowMotion: false,
+                codec: "HEVC"
+            ),
+            100
+        )
+
+        let sloMo1080p240 = ManualBitratePolicy.recommendation(
+            resolution: .p1080,
+            fps: 240,
+            isSlowMotion: true,
+            codec: "HEVC"
+        )
+        XCTAssertEqual(sloMo1080p240.recommendedMbps, 70)
+        XCTAssertEqual(sloMo1080p240.maximumMbps, 140)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(100), 100)
+    }
+
+    func testWhiteBalanceAndZoomPoliciesClampAndDeduplicate() {
+        XCTAssertEqual(WhiteBalancePreferencePolicy.validatedTemperature(.nan), 5_200)
+        XCTAssertEqual(WhiteBalancePreferencePolicy.validatedTemperature(2_000), 2_500)
+        XCTAssertEqual(WhiteBalancePreferencePolicy.validatedTemperature(20_000), 10_000)
+        XCTAssertEqual(WhiteBalancePreferencePolicy.validatedTint(-999), -150)
+        XCTAssertEqual(WhiteBalancePreferencePolicy.validatedTint(999), 150)
+
+        XCTAssertEqual(
+            ZoomShortcutPolicy.validated([0.5, 0.501, 2, .infinity, 999]),
+            [0.5, 2, 100]
+        )
+    }
+
+    func testRecordingPauseMachineRejectsInvalidTransitions() {
+        var machine = RecordingPauseMachine()
+        XCTAssertFalse(machine.requestPause())
+        XCTAssertTrue(machine.start())
+        XCTAssertFalse(machine.start())
+        XCTAssertTrue(machine.requestPause())
+        XCTAssertFalse(machine.requestPause())
+        XCTAssertFalse(machine.requestResume())
+        XCTAssertTrue(machine.confirmPaused())
+        XCTAssertFalse(machine.confirmPaused())
+        XCTAssertTrue(machine.requestResume())
+        XCTAssertFalse(machine.requestResume())
+        XCTAssertFalse(machine.requestPause())
+        XCTAssertTrue(machine.confirmResumed())
+        XCTAssertFalse(machine.requestResume())
+        XCTAssertTrue(machine.requestStop())
+        XCTAssertFalse(machine.requestStop())
+        XCTAssertTrue(machine.completeStop())
+        XCTAssertFalse(machine.completeStop())
+    }
+
+    func testRecordingPauseMachineStopsWhilePaused() {
+        var machine = RecordingPauseMachine()
+        XCTAssertTrue(machine.start())
+        XCTAssertTrue(machine.requestPause())
+        XCTAssertTrue(machine.confirmPaused())
+        XCTAssertTrue(machine.requestStop())
+        XCTAssertEqual(machine.state, .stopping)
+        XCTAssertTrue(machine.completeStop())
+        XCTAssertEqual(machine.state, .idle)
+    }
+
+    func testRecordingPauseMachineLifecycleCleanupFromPausedState() {
+        var machine = RecordingPauseMachine()
+        XCTAssertTrue(machine.start())
+        XCTAssertTrue(machine.requestPause())
+        XCTAssertTrue(machine.confirmPaused())
+        XCTAssertTrue(machine.requestStop())
+        XCTAssertTrue(machine.completeStop())
+        machine.reset()
+        XCTAssertEqual(machine.state, .idle)
+    }
+
+    func testRecordingSplitTimingWaitsUntilRecordingIsActive() {
+        XCTAssertEqual(
+            RecordingSplitTimingPolicy.remainingDuration(splitDuration: 30, recordedDuration: 10),
+            20
+        )
+        XCTAssertFalse(
+            RecordingSplitTimingPolicy.shouldSplit(
+                splitDuration: 30,
+                recordedDuration: 30,
+                pauseState: .paused
+            )
+        )
+        XCTAssertTrue(
+            RecordingSplitTimingPolicy.shouldSplit(
+                splitDuration: 30,
+                recordedDuration: 30,
+                pauseState: .recording
+            )
+        )
+    }
+
+    func testZebraAvailabilitySeparatesPreferenceFromActiveCapability() {
+        XCTAssertFalse(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: false, isProtectedRear4K60: true))
+        XCTAssertTrue(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: false, isProtectedRear4K60: false))
+        XCTAssertFalse(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: true, isProtectedRear4K60: false))
+        XCTAssertFalse(ZebraAvailabilityPolicy.isActive(requested: true, available: false))
+        XCTAssertTrue(ZebraAvailabilityPolicy.isActive(requested: true, available: true))
+        XCTAssertFalse(ZebraAvailabilityPolicy.isActive(requested: false, available: true))
+    }
+
+    func testRecordingCountdownMachineTicksAndCancels() {
+        var machine = RecordingCountdownMachine()
+        XCTAssertFalse(machine.start(seconds: 2))
+        XCTAssertTrue(machine.start(seconds: 3))
+        XCTAssertEqual(machine.state, .countingDown(remaining: 3))
+        XCTAssertTrue(machine.tick())
+        XCTAssertEqual(machine.state, .countingDown(remaining: 2))
+        XCTAssertTrue(machine.tick())
+        XCTAssertTrue(machine.tick())
+        XCTAssertEqual(machine.state, .idle)
+        XCTAssertFalse(machine.cancel())
+    }
+
+    func testCameraPresetMigrationAndPersistence() throws {
+        let invalid = CameraPreset(
+            name: "  ",
+            captureMode: "invalid",
+            videoResolution: "invalid",
+            videoFrameRate: 999,
+            slowMotionResolution: "invalid",
+            slowMotionFrameRate: 999,
+            codec: "invalid",
+            videoCompressionMode: "invalid",
+            videoCompressionLevel: "invalid",
+            videoManualBitrateMbps: .infinity,
+            slowMotionCompressionMode: "invalid",
+            slowMotionCompressionLevel: "invalid",
+            slowMotionManualBitrateMbps: .nan,
+            zoom: .nan,
+            stabilization: true,
+            whiteBalance: "invalid",
+            customWhiteBalanceTemperature: 50,
+            customWhiteBalanceTint: -999,
+            cameraPosition: "invalid"
+        )
+        let migrated = invalid.migrated()
+        XCTAssertEqual(migrated.name, "Custom Preset")
+        XCTAssertEqual(migrated.captureMode, "VIDEO")
+        XCTAssertEqual(migrated.videoResolution, "1080p")
+        XCTAssertEqual(migrated.videoFrameRate, 60)
+        XCTAssertEqual(migrated.videoManualBitrateMbps, ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(migrated.slowMotionManualBitrateMbps, ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(migrated.customWhiteBalanceTemperature, 2_500)
+        XCTAssertEqual(migrated.customWhiteBalanceTint, -150)
+        XCTAssertEqual(migrated.cameraPosition, "back")
+
+        let suiteName = "LowPolyCamPresetTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        CameraPresetStore.save([migrated], to: defaults)
+        let loaded = CameraPresetStore.load(from: defaults)
+        XCTAssertEqual(loaded, [migrated])
+
+        var independent = migrated
+        independent.videoCompressionMode = CompressionMode.manual.rawValue
+        independent.videoManualBitrateMbps = 100
+        independent.slowMotionCompressionMode = CompressionMode.auto.rawValue
+        independent.slowMotionCompressionLevel = VideoCompression.high.rawValue
+        independent.slowMotionManualBitrateMbps = 25
+        let roundTripped = try JSONDecoder().decode(
+            CameraPreset.self,
+            from: JSONEncoder().encode(independent)
+        )
+        XCTAssertEqual(roundTripped.videoManualBitrateMbps, 100)
+        XCTAssertEqual(roundTripped.slowMotionManualBitrateMbps, 25)
+        XCTAssertNotEqual(roundTripped.videoCompressionMode, roundTripped.slowMotionCompressionMode)
+        defaults.removePersistentDomain(forName: suiteName)
     }
 }

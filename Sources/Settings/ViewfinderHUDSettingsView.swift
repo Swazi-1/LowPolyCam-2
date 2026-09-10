@@ -47,6 +47,8 @@ struct CameraHUDContentSettingsView: View {
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
+    @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
 
     var body: some View {
         List {
@@ -74,6 +76,31 @@ struct CameraHUDContentSettingsView: View {
                     Text("Large").tag(12.0)
                 }
                 .pickerStyle(.menu)
+            }
+
+            Section {
+                Picker("Audio Level Meter", selection: $audioLevelMeter) {
+                    ForEach(AudioLevelMeterMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: audioLevelMeter) { _, rawValue in
+                    if let mode = AudioLevelMeterMode(rawValue: rawValue) {
+                        camera.setAudioLevelMeterMode(mode)
+                    }
+                }
+
+                Picker("Clean Preview Gesture", selection: $cleanPreviewGesture) {
+                    ForEach(CleanPreviewGesture.allCases) { gesture in
+                        Text(gesture.rawValue).tag(gesture.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("CAPTURE HUD")
+            } footer: {
+                Text("The audio meter reads the authorized microphone data output and appears only while recording. Clean Preview hides non-essential UI temporarily; capture and stop remain available.")
             }
         }
         .listStyle(.insetGrouped)

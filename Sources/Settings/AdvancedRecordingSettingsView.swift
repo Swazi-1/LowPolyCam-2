@@ -9,6 +9,8 @@ struct AdvancedRecordingSettingsView: View {
     @AppStorage("splitMinutes") private var splitMinutes = 0
     @AppStorage("longevityMode") private var longevity = false
     @AppStorage("liveRecordingStats") private var liveStats = false
+    @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
+    @AppStorage("zebraExposureWarning") private var zebraExposureWarning = false
     @State private var showingRecoveryDeleteConfirmation = false
     @State private var recoveryFileToDelete: URL?
 
@@ -39,6 +41,36 @@ struct AdvancedRecordingSettingsView: View {
                         )
                     }
                     .disabled(!liveStats)
+                }
+            }
+
+            if camera.captureMode != .photo {
+                Section {
+                    Picker("Recording Start Countdown", selection: $recordingStartCountdown) {
+                        ForEach(RecordingStartCountdown.allCases) { countdown in
+                            Text(countdown.label).tag(countdown.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Toggle(isOn: $zebraExposureWarning) {
+                        SettingsToggleLabel(
+                            symbol: "stripe.3.horizontal",
+                            color: .yellow,
+                            title: "Zebra Exposure Warning",
+                            subtitle: camera.isZebraAvailableForCurrentConfiguration
+                                ? "Show diagonal stripes over clipped highlights in the live preview only."
+                                : "Unavailable at \(camera.hudResolutionLabel) \(camera.hudFrameRateLabel ?? "current") fps."
+                        )
+                    }
+                    .disabled(!camera.isZebraAvailableForCurrentConfiguration)
+                    .onChange(of: zebraExposureWarning) { _, enabled in
+                        camera.setZebraExposureWarningEnabled(enabled)
+                    }
+                } header: {
+                    Text("RECORDING CONTROLS")
+                } footer: {
+                    Text("The recording countdown is separate from the photo shutter timer. Cancel it from the camera preview before recording starts.")
                 }
             }
 
@@ -137,9 +169,9 @@ struct AdvancedRecordingSettingsView: View {
                 if camera.captureMode != .photo {
                     SettingsInfoRow(
                         symbol: "mic.fill",
-                        color: camera.audioStatusLabel == "Audio" ? .green : .orange,
-                        title: "Audio: \(camera.audioStatusLabel)",
-                        detail: camera.audioStatusLabel == "Audio"
+                        color: camera.audioStatusLabel == "Microphone" ? .green : .orange,
+                        title: "Audio Recording",
+                        detail: camera.audioStatusLabel == "Microphone"
                             ? "The microphone is attached to video recording."
                             : "Recording can continue silently. To enable audio, allow LowPolyCam under Settings > Privacy & Security > Microphone."
                     )

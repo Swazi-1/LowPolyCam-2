@@ -8,7 +8,7 @@ struct AppearanceSettingsView: View {
     @AppStorage("iconCustomBlue") private var blue = 1.0
     @AppStorage("appColorScheme") private var appColorScheme = "dark"
 
-    private let accentNames = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
+    private let accentNames = CameraAccentPalette.names
 
     var body: some View {
         List {
@@ -56,9 +56,6 @@ struct AppearanceSettingsView: View {
                             .frame(width: 18, height: 18)
                         Text(appearance)
                             .foregroundStyle(.secondary)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.tertiary)
                     }
                     .contentShape(Rectangle())
                 }
@@ -100,14 +97,7 @@ struct AppearanceSettingsView: View {
     }
 
     private func color(for name: String) -> Color {
-        switch name {
-        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
-        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
-        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
-        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
-        case "Custom": return Color(red: red, green: green, blue: blue)
-        default: return Color(red: 0.65, green: 0.88, blue: 1)
-        }
+        CameraAccentPalette.color(for: name, red: red, green: green, blue: blue)
     }
 }
 
@@ -163,6 +153,12 @@ struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
     @Environment(\.dismiss) private var dismiss
     @State private var preview: VideoQuickPreset = .balanced
+    @State private var customPresets: [CameraPreset] = []
+    @State private var newPresetName = ""
+    @State private var showingSavePresetAlert = false
+    @State private var renamePresetName = ""
+    @State private var renamePresetID: UUID?
+    @State private var showingRenamePresetAlert = false
 
     var body: some View {
         List {
@@ -198,6 +194,66 @@ struct VideoPresetsView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+
+            Section("CUSTOM PRESETS") {
+                if customPresets.isEmpty {
+                    Text("Save the current camera setup to create a reusable preset.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(customPresets) { preset in
+                        HStack(spacing: 12) {
+                            Button {
+                                applyCustomPreset(preset)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    SettingsListIcon(symbol: "slider.horizontal.3", color: .purple)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(preset.name)
+                                            .foregroundStyle(.primary)
+                                        Text(presetSummary(preset))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Menu {
+                                Button("Apply") { applyCustomPreset(preset) }
+                                Button("Rename") {
+                                    renamePresetID = preset.id
+                                    renamePresetName = preset.name
+                                    showingRenamePresetAlert = true
+                                }
+                                Button("Delete", role: .destructive) { deletePreset(preset) }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.title3)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 34, height: 34)
+                            }
+                            .accessibilityLabel("Actions for \(preset.name)")
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) { deletePreset(preset) } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    newPresetName = ""
+                    showingSavePresetAlert = true
+                } label: {
+                    Label("Save Current Setup", systemImage: "plus.circle.fill")
+                }
+            } footer: {
+                Text("Presets store capture mode, formats, codec, independent compression, bitrate, zoom, stabilization, white balance and camera position. Applying one uses a single coordinated camera configuration.")
             }
 
             Section {
@@ -241,12 +297,27 @@ struct VideoPresetsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .tint(.blue)
         .onAppear {
+            customPresets = CameraPresetStore.load()
             preview = VideoQuickPreset.allCases.first {
                 $0.resolution == camera.selectedResolution &&
                 $0.frameRate == camera.selectedFrameRate &&
                 $0.compression == camera.videoCompression &&
                 camera.selectedVideoCodec == "HEVC"
             } ?? .balanced
+        }
+        .alert("Save Current Setup", isPresented: $showingSavePresetAlert) {
+            TextField("Preset name", text: $newPresetName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { savePreset() }
+        } message: {
+            Text("Give this camera setup a name.")
+        }
+        .alert("Rename Preset", isPresented: $showingRenamePresetAlert) {
+            TextField("Preset name", text: $renamePresetName)
+            Button("Cancel", role: .cancel) { renamePresetID = nil }
+            Button("Save") { renamePreset() }
+        } message: {
+            Text("The updated name is saved locally with the preset.")
         }
     }
 
@@ -268,5 +339,75 @@ struct VideoPresetsView: View {
         case .allDay: return .orange
         case .social: return .pink
         }
+    }
+
+    private func applyCustomPreset(_ preset: CameraPreset) {
+        CameraHaptics.fire()
+        camera.applyCameraPreset(preset) { success in
+            guard success else { return }
+            DispatchQueue.main.async { dismiss() }
+        }
+    }
+
+    private func savePreset() {
+        let name = newPresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let preset = camera.makeCameraPreset(named: name)
+        customPresets.append(preset)
+        CameraPresetStore.save(customPresets)
+        newPresetName = ""
+    }
+
+    private func renamePreset() {
+        let name = renamePresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let renamePresetID,
+              let index = customPresets.firstIndex(where: { $0.id == renamePresetID }) else { return }
+        customPresets[index].name = name
+        CameraPresetStore.save(customPresets)
+        self.renamePresetID = nil
+        renamePresetName = ""
+    }
+
+    private func deletePreset(_ preset: CameraPreset) {
+        customPresets.removeAll { $0.id == preset.id }
+        CameraPresetStore.save(customPresets)
+    }
+
+    private func presetSummary(_ preset: CameraPreset) -> String {
+        let mode: String
+        let resolution: String
+        let frameRate: Int
+        let compressionMode: String
+        let compressionLevel: String
+        let manualBitrate: Double
+
+        switch preset.captureMode {
+        case "PHOTO":
+            mode = "Photo"
+            resolution = "Still"
+            frameRate = 0
+            compressionMode = ""
+            compressionLevel = ""
+            manualBitrate = 0
+        case "SLO-MO":
+            mode = "Slo-Mo"
+            resolution = preset.slowMotionResolution
+            frameRate = preset.slowMotionFrameRate
+            compressionMode = preset.slowMotionCompressionMode
+            compressionLevel = preset.slowMotionCompressionLevel
+            manualBitrate = preset.slowMotionManualBitrateMbps
+        default:
+            mode = "Video"
+            resolution = preset.videoResolution
+            frameRate = preset.videoFrameRate
+            compressionMode = preset.videoCompressionMode
+            compressionLevel = preset.videoCompressionLevel
+            manualBitrate = preset.videoManualBitrateMbps
+        }
+
+        let compression = compressionMode == CompressionMode.manual.rawValue
+            ? "Manual \(String(format: "%.1f", manualBitrate)) Mbps"
+            : "Auto \(compressionLevel)"
+        return frameRate > 0 ? "\(mode) · \(resolution) · \(frameRate) fps · \(compression)" : "\(mode) · \(compression)"
     }
 }

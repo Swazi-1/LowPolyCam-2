@@ -33,6 +33,92 @@ struct CameraIconButton: View {
     }
 }
 
+struct TorchButton: View {
+    @Environment(\.cameraTint) private var theme
+    @ObservedObject var camera: CameraManager
+    var isEnabled = true
+    @State private var showingBrightness = false
+    @State private var isPressing = false
+    @State private var longPressTriggered = false
+    @State private var holdTask: Task<Void, Never>?
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Image(systemName: camera.isTorchOn ? "flashlight.on.fill" : "bolt.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 48, height: 48)
+                .background(.black.opacity(0.28), in: Circle())
+                .foregroundStyle(camera.torchAvailable && isEnabled ? theme : .white.opacity(0.35))
+                .contentShape(Circle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in
+                            guard isEnabled, !isPressing else { return }
+                            isPressing = true
+                            longPressTriggered = false
+                            holdTask?.cancel()
+                            holdTask = Task { @MainActor in
+                                do { try await Task.sleep(nanoseconds: 650_000_000) } catch { return }
+                                guard isEnabled, isPressing, camera.torchBrightnessSupported else { return }
+                                longPressTriggered = true
+                                CameraHaptics.fire()
+                                showingBrightness = true
+                            }
+                        }
+                        .onEnded { _ in
+                            isPressing = false
+                            holdTask?.cancel()
+                            holdTask = nil
+                            if !longPressTriggered, isEnabled, camera.torchAvailable {
+                                CameraHaptics.fire()
+                                camera.toggleTorch()
+                            }
+                            longPressTriggered = false
+                        }
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Torch")
+                .accessibilityValue(camera.isTorchOn ? "On" : "Off")
+                .accessibilityHint("Tap to toggle. Hold to adjust brightness.")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction {
+                    guard isEnabled, camera.torchAvailable else { return }
+                    CameraHaptics.fire()
+                    camera.toggleTorch()
+                }
+
+            if showingBrightness && isEnabled {
+                VStack(spacing: 8) {
+                    Text("Torch brightness")
+                        .font(.caption2.weight(.semibold))
+                    Slider(
+                        value: Binding(
+                            get: { camera.torchBrightnessLevel },
+                            set: { camera.setTorchBrightness($0) }
+                        ),
+                        in: 0.05...1.0
+                    )
+                    .tint(theme)
+                    Text(String(format: "%.0f%%", camera.torchBrightnessLevel * 100))
+                        .font(.caption2.monospacedDigit())
+                }
+                .foregroundStyle(.white)
+                .padding(10)
+                .frame(width: 170)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .offset(y: 54)
+                .onTapGesture { }
+            }
+        }
+        .onDisappear {
+            holdTask?.cancel()
+            holdTask = nil
+            isPressing = false
+            longPressTriggered = false
+        }
+    }
+}
+
 struct PhotoFlashButton: View {
     let mode: CameraManager.PhotoFlashMode
     let isEnabled: Bool
@@ -83,6 +169,33 @@ struct RecordButton: View {
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.55)
         .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+    }
+}
+
+struct RecordingPauseButton: View {
+    @Environment(\.cameraTint) private var theme
+    let isPaused: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            guard isEnabled else { return }
+            CameraHaptics.fire()
+            action()
+        } label: {
+            Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 16, weight: .bold))
+                .frame(width: 48, height: 48)
+                .background(.black.opacity(0.55), in: Circle())
+                .overlay {
+                    Circle().stroke(isEnabled ? theme.opacity(0.9) : .white.opacity(0.25), lineWidth: 1.5)
+                }
+        }
+        .foregroundStyle(isEnabled ? theme : .white.opacity(0.35))
+        .disabled(!isEnabled)
+        .accessibilityLabel(isPaused ? "Resume recording" : "Pause recording")
+        .accessibilityValue(isPaused ? "Paused" : "Recording")
     }
 }
 
@@ -245,6 +358,8 @@ struct CameraHUDSnapshot: Equatable {
     let audioStatusLabel: String
     let availableStorageBytes: Int64
     let lastFrameGaps: Int?
+    let audioMeterMode: AudioLevelMeterMode
+    let audioMeterSnapshot: AudioLevelMeterSnapshot
 }
 
 struct CameraHUD: View {
@@ -262,6 +377,8 @@ struct CameraHUD: View {
     let showRemaining: Bool
     let showWhiteBalance: Bool
     let maxWidth: CGFloat
+    let audioMeterMode: AudioLevelMeterMode
+    let audioMeterSnapshot: AudioLevelMeterSnapshot
 
     init(
         snapshot: CameraHUDSnapshot,
@@ -270,7 +387,9 @@ struct CameraHUD: View {
         showFPS: Bool,
         showRemaining: Bool,
         showWhiteBalance: Bool,
-        maxWidth: CGFloat
+        maxWidth: CGFloat,
+        audioMeterMode: AudioLevelMeterMode = .off,
+        audioMeterSnapshot: AudioLevelMeterSnapshot = .unavailable
     ) {
         self.snapshot = snapshot
         self.recordingClock = recordingClock
@@ -279,6 +398,8 @@ struct CameraHUD: View {
         self.showRemaining = showRemaining
         self.showWhiteBalance = showWhiteBalance
         self.maxWidth = maxWidth
+        self.audioMeterMode = audioMeterMode
+        self.audioMeterSnapshot = audioMeterSnapshot
     }
 
     var body: some View {
@@ -296,7 +417,9 @@ struct CameraHUD: View {
             thermalState: thermalState,
             showDroppedFrames: showDroppedFrames,
             textSize: hudTextSize,
-            maxWidth: maxWidth
+            maxWidth: maxWidth,
+            audioMeterMode: audioMeterMode,
+            audioMeterSnapshot: audioMeterSnapshot
         )
         .equatable()
             .task(id: showBattery) {
@@ -331,6 +454,8 @@ private struct CameraHUDContent: View, Equatable {
     let showDroppedFrames: Bool
     let textSize: Double
     let maxWidth: CGFloat
+    let audioMeterMode: AudioLevelMeterMode
+    let audioMeterSnapshot: AudioLevelMeterSnapshot
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.snapshot == rhs.snapshot &&
@@ -345,7 +470,9 @@ private struct CameraHUDContent: View, Equatable {
         lhs.thermalState.rawValue == rhs.thermalState.rawValue &&
         lhs.showDroppedFrames == rhs.showDroppedFrames &&
         lhs.textSize == rhs.textSize &&
-        lhs.maxWidth == rhs.maxWidth
+        lhs.maxWidth == rhs.maxWidth &&
+        lhs.audioMeterMode == rhs.audioMeterMode &&
+        lhs.audioMeterSnapshot == rhs.audioMeterSnapshot
     }
 
     var body: some View {
@@ -358,6 +485,9 @@ private struct CameraHUDContent: View, Equatable {
                     .foregroundStyle(theme)
                 if snapshot.isRecording {
                     RecordingClockText(clock: recordingClock)
+                    if audioMeterMode != .off {
+                        AudioLevelMeterView(snapshot: audioMeterSnapshot, mode: audioMeterMode)
+                    }
                 }
             }
             if !hudItems.isEmpty {
@@ -425,7 +555,7 @@ private struct CameraHUDContent: View, Equatable {
         if item.hasPrefix("BAT") { return "battery.100percent" }
         if item.contains("GB") { return "internaldrive" }
         if item.hasPrefix("Gaps") { return "waveform.path" }
-        if item.hasPrefix("Audio") || item == "Silent" { return "mic" }
+        if item.hasPrefix("Audio") || item.hasPrefix("Microphone") || item == "Silent" { return "mic" }
         if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
         if item.hasPrefix("~") { return snapshot.isPhotoMode ? "photo.on.rectangle" : "clock" }
         if item == snapshot.whiteBalanceLabel { return "sun.max" }
@@ -437,50 +567,27 @@ struct ProToolsPopup: View {
     @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
     @Binding var isLevelMeterEnabled: Bool
+    @AppStorage("shutterDelay") private var shutterDelay = 0
+    @State private var activeTool: ActiveTool?
+
+    private enum ActiveTool: Equatable {
+        case ev
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("PRO TOOLS")
-                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.75))
 
-            VStack(spacing: 8) {
-                HStack {
-                    Text("EV")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Button("Reset") {
-                        camera.setExposureBias(0)
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .buttonStyle(.plain)
-                    Text(evLabel)
-                        .font(.system(.subheadline, design: .monospaced).weight(.semibold))
-                        .foregroundStyle(theme)
-                        .frame(width: 42, alignment: .trailing)
+            HStack(spacing: 6) {
+                Button {
+                    CameraHaptics.fire()
+                    activeTool = activeTool == .ev ? nil : .ev
+                } label: {
+                    toolPill("EV", value: evLabel, isActive: activeTool == .ev)
                 }
-
-                Slider(
-                    value: Binding(
-                        get: { Double(camera.exposureBias) },
-                        set: { camera.setExposureBias(Float($0)) }
-                    ),
-                    in: -2...2,
-                    step: 0.1
-                )
-                .tint(theme)
-            }
-
-            Divider()
-                .overlay(.white.opacity(0.15))
-
-            HStack(spacing: 12) {
-                Text("White Balance")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-
-                Spacer(minLength: 8)
+                .buttonStyle(.plain)
 
                 Menu {
                     ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
@@ -495,27 +602,108 @@ struct ProToolsPopup: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        Text(camera.whiteBalancePreset.rawValue)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
+                    toolPill("WB", value: whiteBalanceLabel, isActive: camera.whiteBalancePreset == .custom)
+                }
+
+                Menu {
+                    Button {
+                        shutterDelay = 0
+                    } label: {
+                        timerMenuLabel("Off", isSelected: shutterDelay == 0)
                     }
-                    .frame(minWidth: 112, alignment: .trailing)
-                    .foregroundStyle(theme)
+                    Button {
+                        shutterDelay = 3
+                    } label: {
+                        timerMenuLabel("3s", isSelected: shutterDelay == 3)
+                    }
+                    Button {
+                        shutterDelay = 10
+                    } label: {
+                        timerMenuLabel("10s", isSelected: shutterDelay == 10)
+                    }
+                } label: {
+                    toolPill("Timer", value: timerLabel, isActive: shutterDelay > 0)
+                }
+
+                Button {
+                    CameraHaptics.fire()
+                    isLevelMeterEnabled.toggle()
+                } label: {
+                    toolPill("Level", value: isLevelMeterEnabled ? "On" : "Off", isActive: isLevelMeterEnabled)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    CameraHaptics.fire()
+                    activeTool = nil
+                    camera.resetTemporaryCameraControls()
+                } label: {
+                    toolPill("Reset", value: "", isActive: false)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if activeTool == .ev {
+                VStack(spacing: 5) {
+                    HStack {
+                        Text("Exposure")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(evLabel)
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(theme)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(camera.exposureBias) },
+                            set: { camera.setExposureBias(Float($0)) }
+                        ),
+                        in: -2...2,
+                        step: 0.1
+                    )
+                    .tint(theme)
                 }
             }
 
-            Divider()
-                .overlay(.white.opacity(0.15))
-
-            Toggle("Level Meter", isOn: $isLevelMeterEnabled)
-                .font(.subheadline.weight(.semibold))
-                .tint(theme)
+            if camera.whiteBalancePreset == .custom {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Custom WB")
+                        .font(.caption.weight(.semibold))
+                    HStack {
+                        Text("Temp")
+                        Spacer()
+                        Text(String(format: "%.0f K", camera.customWhiteBalanceTemperature))
+                            .font(.caption2.monospacedDigit())
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { camera.customWhiteBalanceTemperature },
+                            set: { camera.setCustomWhiteBalance(temperature: $0, tint: camera.customWhiteBalanceTint) }
+                        ),
+                        in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
+                        step: 50
+                    )
+                    .tint(theme)
+                    HStack {
+                        Text("Tint")
+                        Spacer()
+                        Text(String(format: "%+.0f", camera.customWhiteBalanceTint))
+                            .font(.caption2.monospacedDigit())
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { camera.customWhiteBalanceTint },
+                            set: { camera.setCustomWhiteBalance(temperature: camera.customWhiteBalanceTemperature, tint: $0) }
+                        ),
+                        in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
+                        step: 1
+                    )
+                    .tint(theme)
+                }
+            }
         }
         .foregroundStyle(.white)
-        .padding(16)
+        .padding(11)
         .frame(width: 310)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
@@ -524,8 +712,51 @@ struct ProToolsPopup: View {
         }
     }
 
+    private func toolPill(_ title: String, value: String, isActive: Bool) -> some View {
+        HStack(spacing: value.isEmpty ? 0 : 3) {
+            Text(title)
+            if !value.isEmpty {
+                Text(value)
+                    .foregroundStyle(isActive ? theme : .white.opacity(0.62))
+            }
+        }
+        .font(.system(size: 9, weight: .semibold, design: .rounded))
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+        .frame(maxWidth: .infinity, minHeight: 26)
+        .padding(.horizontal, 4)
+        .background(isActive ? theme.opacity(0.2) : .black.opacity(0.25), in: Capsule())
+        .overlay {
+            Capsule().stroke(isActive ? theme.opacity(0.65) : .white.opacity(0.15), lineWidth: 1)
+        }
+    }
+
+    private func timerMenuLabel(_ title: String, isSelected: Bool) -> some View {
+        HStack {
+            Text(title)
+            if isSelected {
+                Image(systemName: "checkmark")
+            }
+        }
+    }
+
     private var evLabel: String {
         abs(camera.exposureBias) < 0.05 ? "0.0" : String(format: "%+.1f", camera.exposureBias)
+    }
+
+    private var whiteBalanceLabel: String {
+        switch camera.whiteBalancePreset {
+        case .auto: return "Auto"
+        case .daylight: return "Day"
+        case .cloudy: return "Cloud"
+        case .tungsten: return "Tung"
+        case .fluorescent: return "Fluor"
+        case .custom: return "Custom"
+        }
+    }
+
+    private var timerLabel: String {
+        shutterDelay == 0 ? "Off" : "\(shutterDelay)s"
     }
 }
 
@@ -591,12 +822,33 @@ struct CameraLevelOverlay: View {
 
 struct CameraGridOverlay: View {
     @Environment(\.cameraTint) private var theme
+    let style: GridStyle
+
+    init(style: GridStyle = .ruleOfThirds) {
+        self.style = style
+    }
+
     var body: some View {
         GeometryReader { geometry in
             Path { path in
                 let width = geometry.size.width
                 let height = geometry.size.height
-                for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+                let fractions: [CGFloat]
+                switch style {
+                case .ruleOfThirds:
+                    fractions = [1.0 / 3.0, 2.0 / 3.0]
+                case .goldenRatio:
+                    fractions = [0.382, 0.618]
+                case .square:
+                    fractions = [0.25, 0.5, 0.75]
+                case .diagonal:
+                    path.move(to: CGPoint(x: 0, y: 0))
+                    path.addLine(to: CGPoint(x: width, y: height))
+                    path.move(to: CGPoint(x: width, y: 0))
+                    path.addLine(to: CGPoint(x: 0, y: height))
+                    return
+                }
+                for fraction in fractions {
                     path.move(to: CGPoint(x: width * fraction, y: 0))
                     path.addLine(to: CGPoint(x: width * fraction, y: height))
                     path.move(to: CGPoint(x: 0, y: height * fraction))

@@ -16,6 +16,11 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private var dropped = 0
     private var previousFrameTimestamp: Double?
 
+    private var zebraEnabled = false
+    private var zebraGeneration = 0
+    private var zebraLastAnalysisUptime: TimeInterval = 0
+    private var zebraHandler: ((ZebraMask) -> Void)?
+
     private weak var probeDevice: AVCaptureDevice?
     private var probeTraceID: String?
     private var probeExpectedDeviceZoom: CGFloat = 1
@@ -45,6 +50,17 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         previousFrameTimestamp = nil
         lock.unlock()
         AppEventLog.deepEvent("LIVE CAPTURE METRICS STATE", category: .performance, fields: ["running": String(value)])
+    }
+
+    func setZebraAnalysis(enabled: Bool, handler: ((ZebraMask) -> Void)? = nil) {
+        lock.lock()
+        zebraEnabled = enabled
+        zebraGeneration += 1
+        zebraLastAnalysisUptime = 0
+        zebraHandler = enabled ? handler : nil
+        lock.unlock()
+        if !enabled { handler?(.empty) }
+        AppEventLog.deepEvent("ZEBRA EXPOSURE ANALYSIS STATE", category: .exposure, fields: ["enabled": String(enabled)])
     }
 
     func beginZoomTransitionProbe(
@@ -163,6 +179,7 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         guard timestamp.isFinite else { return }
 
+        var zebraConfiguration: (generation: Int, handler: (ZebraMask) -> Void)?
         var probeRecord: (trace: String, frame: Int, device: String, actual: CGFloat, expected: CGFloat, expectedDisplayed: CGFloat, hud: String, delta: CGFloat, frameGapMs: Double?, luma: Double?, lumaDelta: Double?, zoomAnomaly: Bool, brightnessFlicker: Bool, anomaly: Bool)?
         var expiredProbe: (trace: String, frames: Int, anomalies: Int)?
 
@@ -172,6 +189,11 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         if running {
             if first == nil { first = timestamp } else { intervals += 1 }
             latest = timestamp
+        }
+
+        if zebraEnabled, now - zebraLastAnalysisUptime >= 0.075, let handler = zebraHandler {
+            zebraLastAnalysisUptime = now
+            zebraConfiguration = (zebraGeneration, handler)
         }
 
         if probeActive, let trace = probeTraceID, let device = probeDevice {
@@ -207,6 +229,14 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         }
         previousFrameTimestamp = timestamp
         lock.unlock()
+
+        if let zebraConfiguration {
+            let mask = ZebraExposureAnalyzer.analyze(sampleBuffer: sampleBuffer)
+            lock.lock()
+            let stillCurrent = zebraEnabled && zebraGeneration == zebraConfiguration.generation
+            lock.unlock()
+            if stillCurrent { zebraConfiguration.handler(mask) }
+        }
 
         if let record = probeRecord {
             let fields: [String: String] = [

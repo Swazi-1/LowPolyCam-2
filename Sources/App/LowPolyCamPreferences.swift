@@ -6,7 +6,7 @@ import Foundation
 /// settings. This layer makes the schema explicit and repairs values written by older betas before
 /// the first CameraManager is created.
 enum LowPolyCamPreferences {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     enum Key {
         static let schemaVersion = "lowPolyCamSettingsSchemaVersion"
@@ -19,9 +19,14 @@ enum LowPolyCamPreferences {
         static let selectedVideoFrameRate = "selectedVideoFrameRate"
         static let selectedVideoCodec = "selectedVideoCodec"
         static let videoCompression = "videoCompression"
+        static let videoCompressionMode = "videoCompressionMode"
+        static let videoManualBitrateMbps = "videoManualBitrateMbps"
         static let videoStabilizationEnabled = "videoStabilizationEnabled"
         static let selectedSlowMotionResolution = "selectedSlowMotionResolution"
         static let selectedSlowMotionFrameRate = "selectedSlowMotionFrameRate"
+        static let slowMotionCompressionMode = "slowMotionCompressionMode"
+        static let slowMotionCompressionLevel = "slowMotionCompressionLevel"
+        static let slowMotionManualBitrateMbps = "slowMotionManualBitrateMbps"
         static let selectedPhotoMegapixels = "selectedPhotoMegapixels"
         static let photoFileFormat = "photoFileFormat"
         static let photoFlashMode = "photoFlashMode"
@@ -43,7 +48,23 @@ enum LowPolyCamPreferences {
         static let mirrorSelfies = "mirrorSelfies"
         static let cameraGridEnabled = "cameraGridEnabled"
         static let gridOpacity = "gridOpacity"
+        static let gridStyle = "gridStyle"
         static let levelMeterEnabled = "levelMeterEnabled"
+        static let audioLevelMeter = "audioLevelMeter"
+        static let zebraExposureWarning = "zebraExposureWarning"
+        static let cleanPreviewGesture = "cleanPreviewGesture"
+        static let captureOrientation = "captureOrientation"
+        static let recordingStartCountdown = "recordingStartCountdown"
+        static let whiteBalancePreset = "whiteBalancePreset"
+        static let customWhiteBalanceTemperature = "customWhiteBalanceTemperature"
+        static let customWhiteBalanceTint = "customWhiteBalanceTint"
+        static let torchBrightness = "torchBrightness"
+        static let zoomButton1 = "zoomButton1"
+        static let zoomButton2 = "zoomButton2"
+        static let zoomButton3 = "zoomButton3"
+        static let zoomButton4 = "zoomButton4"
+        static let zoomButton5 = "zoomButton5"
+        static let zoomButtonCount = "zoomButtonCount"
         static let centerCrosshair = "centerCrosshair"
         static let keepScreenAwakeEnabled = "keepScreenAwakeEnabled"
         static let cameraHUDEnabled = "cameraHUDEnabled"
@@ -81,9 +102,14 @@ enum LowPolyCamPreferences {
             Key.selectedVideoFrameRate: 60,
             Key.selectedVideoCodec: "HEVC",
             Key.videoCompression: "High",
+            Key.videoCompressionMode: "Auto",
+            Key.videoManualBitrateMbps: ManualBitratePolicy.defaultMbps,
             Key.videoStabilizationEnabled: true,
             Key.selectedSlowMotionResolution: "1080p",
             Key.selectedSlowMotionFrameRate: 240,
+            Key.slowMotionCompressionMode: "Auto",
+            Key.slowMotionCompressionLevel: "High",
+            Key.slowMotionManualBitrateMbps: ManualBitratePolicy.defaultMbps,
             Key.selectedPhotoMegapixels: 12,
             Key.photoFileFormat: "HEIC",
             Key.photoFlashMode: "Auto",
@@ -105,7 +131,23 @@ enum LowPolyCamPreferences {
             Key.mirrorSelfies: false,
             Key.cameraGridEnabled: false,
             Key.gridOpacity: 1.0,
+            Key.gridStyle: GridStyle.ruleOfThirds.rawValue,
             Key.levelMeterEnabled: false,
+            Key.audioLevelMeter: AudioLevelMeterMode.bars.rawValue,
+            Key.zebraExposureWarning: false,
+            Key.cleanPreviewGesture: CleanPreviewGesture.twoFingerTap.rawValue,
+            Key.captureOrientation: CaptureOrientationPreference.auto.rawValue,
+            Key.recordingStartCountdown: RecordingStartCountdown.off.rawValue,
+            Key.whiteBalancePreset: "Auto",
+            Key.customWhiteBalanceTemperature: WhiteBalancePreferencePolicy.defaultTemperature,
+            Key.customWhiteBalanceTint: 0.0,
+            Key.torchBrightness: 0.35,
+            Key.zoomButton1: 0.5,
+            Key.zoomButton2: 1.0,
+            Key.zoomButton3: 2.0,
+            Key.zoomButton4: 4.0,
+            Key.zoomButton5: 8.0,
+            Key.zoomButtonCount: 4,
             Key.centerCrosshair: false,
             Key.keepScreenAwakeEnabled: false,
             Key.cameraHUDEnabled: true,
@@ -137,8 +179,11 @@ enum LowPolyCamPreferences {
         normalizeInt(Key.selectedVideoFrameRate, allowed: [24, 30, 60], fallback: 60, in: defaults)
         normalizeString(Key.selectedVideoCodec, allowed: ["HEVC", "H264"], fallback: "HEVC", in: defaults)
         normalizeString(Key.videoCompression, allowed: ["High", "Medium", "Data Saver"], fallback: "High", in: defaults)
+        normalizeString(Key.videoCompressionMode, allowed: CompressionMode.allCases.map(\.rawValue), fallback: CompressionMode.auto.rawValue, in: defaults)
         normalizeString(Key.selectedSlowMotionResolution, allowed: ["4K", "1080p", "720p"], fallback: "1080p", in: defaults)
         normalizeInt(Key.selectedSlowMotionFrameRate, allowed: [120, 240], fallback: 240, in: defaults)
+        normalizeString(Key.slowMotionCompressionMode, allowed: CompressionMode.allCases.map(\.rawValue), fallback: CompressionMode.auto.rawValue, in: defaults)
+        normalizeString(Key.slowMotionCompressionLevel, allowed: ["High", "Medium", "Data Saver"], fallback: "High", in: defaults)
         normalizeInt(Key.selectedPhotoMegapixels, allowed: [1, 2, 4, 8, 12], fallback: 12, in: defaults)
         normalizeString(Key.photoFileFormat, allowed: ["HEIC", "JPEG"], fallback: "HEIC", in: defaults)
         normalizeString(Key.photoFlashMode, allowed: ["Off", "Auto", "On"], fallback: "Auto", in: defaults)
@@ -152,6 +197,13 @@ enum LowPolyCamPreferences {
         normalizeString(Key.lastCameraPosition, allowed: ["back", "front"], fallback: "back", in: defaults)
         normalizeString(Key.liveStatsSize, allowed: ["Compact", "Normal"], fallback: "Normal", in: defaults)
         normalizeInt(Key.splitMinutes, allowed: [0, 15, 30, 60, 120], fallback: 0, in: defaults)
+        normalizeInt(Key.zoomButtonCount, allowed: [3, 4, 5], fallback: 4, in: defaults)
+        normalizeString(Key.gridStyle, allowed: GridStyle.allCases.map(\.rawValue), fallback: GridStyle.ruleOfThirds.rawValue, in: defaults)
+        normalizeString(Key.audioLevelMeter, allowed: AudioLevelMeterMode.allCases.map(\.rawValue), fallback: AudioLevelMeterMode.bars.rawValue, in: defaults)
+        normalizeString(Key.cleanPreviewGesture, allowed: CleanPreviewGesture.allCases.map(\.rawValue), fallback: CleanPreviewGesture.twoFingerTap.rawValue, in: defaults)
+        normalizeString(Key.captureOrientation, allowed: CaptureOrientationPreference.allCases.map(\.rawValue), fallback: CaptureOrientationPreference.auto.rawValue, in: defaults)
+        normalizeInt(Key.recordingStartCountdown, allowed: RecordingStartCountdown.allCases.map(\.rawValue), fallback: RecordingStartCountdown.off.rawValue, in: defaults)
+        normalizeString(Key.whiteBalancePreset, allowed: ["Auto", "Daylight", "Cloudy", "Tungsten", "Fluorescent", "Custom"], fallback: "Auto", in: defaults)
 
         normalizeDouble(Key.iconCustomRed, minimum: 0, maximum: 1, fallback: 0.55, in: defaults)
         normalizeDouble(Key.iconCustomGreen, minimum: 0, maximum: 1, fallback: 0.85, in: defaults)
@@ -161,6 +213,16 @@ enum LowPolyCamPreferences {
         normalizeDouble(Key.liveStatsX, minimum: 0, maximum: 1, fallback: 0.5, in: defaults)
         normalizeDouble(Key.liveStatsY, minimum: 0, maximum: 1, fallback: 0.28, in: defaults)
         normalizeDouble(Key.hudTextSize, minimum: 8, maximum: 16, fallback: 10, in: defaults)
+        normalizeDouble(Key.videoManualBitrateMbps, minimum: ManualBitratePolicy.minimumMbps, maximum: ManualBitratePolicy.maximumMbps, fallback: ManualBitratePolicy.defaultMbps, in: defaults)
+        normalizeDouble(Key.slowMotionManualBitrateMbps, minimum: ManualBitratePolicy.minimumMbps, maximum: ManualBitratePolicy.maximumMbps, fallback: ManualBitratePolicy.defaultMbps, in: defaults)
+        normalizeDouble(Key.customWhiteBalanceTemperature, minimum: WhiteBalancePreferencePolicy.minimumTemperature, maximum: WhiteBalancePreferencePolicy.maximumTemperature, fallback: WhiteBalancePreferencePolicy.defaultTemperature, in: defaults)
+        normalizeDouble(Key.customWhiteBalanceTint, minimum: WhiteBalancePreferencePolicy.minimumTint, maximum: WhiteBalancePreferencePolicy.maximumTint, fallback: 0, in: defaults)
+        normalizeDouble(Key.torchBrightness, minimum: 0.05, maximum: 1.0, fallback: 0.35, in: defaults)
+        normalizeDouble(Key.zoomButton1, minimum: 0.5, maximum: 100, fallback: 0.5, in: defaults)
+        normalizeDouble(Key.zoomButton2, minimum: 0.5, maximum: 100, fallback: 1.0, in: defaults)
+        normalizeDouble(Key.zoomButton3, minimum: 0.5, maximum: 100, fallback: 2.0, in: defaults)
+        normalizeDouble(Key.zoomButton4, minimum: 0.5, maximum: 100, fallback: 4.0, in: defaults)
+        normalizeDouble(Key.zoomButton5, minimum: 0.5, maximum: 100, fallback: 8.0, in: defaults)
 
         let storedVersion = defaults.object(forKey: Key.schemaVersion) as? Int ?? 0
         if storedVersion < currentSchemaVersion {
@@ -175,6 +237,12 @@ enum LowPolyCamPreferences {
         if defaults.object(forKey: Key.keepScreenAwakeEnabled) == nil,
            let legacy = defaults.object(forKey: "keepScreenAwake") as? Bool {
             defaults.set(legacy, forKey: Key.keepScreenAwakeEnabled)
+        }
+
+        // The old single compression level remains the compatibility source for the first Auto
+        // profile. Manual mode is opt-in, so existing recordings retain their prior level.
+        if defaults.object(forKey: Key.videoCompressionMode) == nil {
+            defaults.set(CompressionMode.auto.rawValue, forKey: Key.videoCompressionMode)
         }
     }
 

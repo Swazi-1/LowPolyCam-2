@@ -220,8 +220,11 @@ enum AppEventLog {
         ("iconCustomRed", "0.55"), ("iconCustomGreen", "0.85"), ("iconCustomBlue", "1.0"),
         ("selectedVideoResolution", "1080p"), ("selectedVideoFrameRate", "60"),
         ("selectedVideoCodec", "HEVC"), ("videoCompression", "High"),
+        ("videoCompressionMode", "Auto"), ("videoManualBitrateMbps", "50.0"),
         ("videoStabilizationEnabled", "true"),
         ("selectedSlowMotionResolution", "1080p"), ("selectedSlowMotionFrameRate", "240"),
+        ("slowMotionCompressionMode", "Auto"), ("slowMotionCompressionLevel", "High"),
+        ("slowMotionManualBitrateMbps", "50.0"),
         ("selectedPhotoMegapixels", "12"), ("photoFileFormat", "HEIC"),
         ("photoFlashMode", "Auto"), ("photoAspect", "4:3"), ("burstCount", "10"),
         ("shutterDelay", "0"), ("hapticCaptureEnabled", "true"), ("hapticStrength", "Medium"),
@@ -230,7 +233,15 @@ enum AppEventLog {
         ("recordingLock", "false"), ("lowStorageWarning", "true"),
         ("rememberCaptureMode", "false"), ("lastCaptureMode", "VIDEO"), ("lastCameraPosition", "back"),
         ("mirrorSelfies", "false"), ("centerCrosshair", "false"), ("cameraGridEnabled", "false"),
-        ("gridOpacity", "1.0"), ("levelMeterEnabled", "false"), ("keepScreenAwakeEnabled", "false"),
+        ("gridOpacity", "1.0"), ("gridStyle", "Rule of Thirds"), ("levelMeterEnabled", "false"),
+        ("audioLevelMeter", "Bars"), ("zebraExposureWarning", "false"),
+        ("cleanPreviewGesture", "Two-Finger Tap"), ("captureOrientation", "Auto"),
+        ("recordingStartCountdown", "0"), ("whiteBalancePreset", "Auto"),
+        ("customWhiteBalanceTemperature", "5200.0"), ("customWhiteBalanceTint", "0.0"),
+        ("torchBrightness", "0.35"), ("zoomButton1", "0.5"), ("zoomButton2", "1.0"),
+        ("zoomButton3", "2.0"), ("zoomButton4", "4.0"), ("zoomButton5", "8.0"),
+        ("zoomButtonCount", "4"), ("customCameraPresets", ""),
+        ("keepScreenAwakeEnabled", "false"),
         ("cameraHUDEnabled", "true"), ("cameraHUDResolution", "true"), ("cameraHUDFPS", "true"),
         ("cameraHUDRemaining", "true"), ("cameraHUDWhiteBalance", "false"), ("cameraHUDBattery", "true"),
         ("cameraHUDStorage", "false"), ("cameraHUDDroppedFrames", "false"), ("thermalHUD", "false"),
@@ -884,7 +895,7 @@ enum AppEventLog {
     private static let booleanSettingKeys: Set<String> = [
         "diagnosticLoggingEnabled", "diagnosticExtremeLoggingEnabled", "videoStabilizationEnabled", "hapticCaptureEnabled",
         "countdownHaptics", "tapZoomReset", "recordingLock", "lowStorageWarning", "rememberCaptureMode", "mirrorSelfies",
-        "centerCrosshair", "cameraGridEnabled", "levelMeterEnabled", "keepScreenAwakeEnabled", "cameraHUDEnabled",
+        "centerCrosshair", "cameraGridEnabled", "levelMeterEnabled", "zebraExposureWarning", "keepScreenAwakeEnabled", "cameraHUDEnabled",
         "cameraHUDResolution", "cameraHUDFPS", "cameraHUDRemaining", "cameraHUDWhiteBalance", "cameraHUDBattery",
         "cameraHUDStorage", "cameraHUDDroppedFrames", "thermalHUD", "longevityMode", "liveRecordingStats",
         "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops"
@@ -892,7 +903,9 @@ enum AppEventLog {
 
     private static let decimalSettingKeys: Set<String> = [
         "iconCustomRed", "iconCustomGreen", "iconCustomBlue", "zoomSpeed", "gridOpacity",
-        "hudTextSize", "liveStatsX", "liveStatsY"
+        "hudTextSize", "liveStatsX", "liveStatsY", "videoManualBitrateMbps", "slowMotionManualBitrateMbps",
+        "customWhiteBalanceTemperature", "customWhiteBalanceTint", "torchBrightness",
+        "zoomButton1", "zoomButton2", "zoomButton3", "zoomButton4", "zoomButton5"
     ]
 
     private static func currentSettingsLocked() -> [String: String] {
