@@ -26,25 +26,9 @@ struct AppearanceSettingsView: View {
             }
 
             Section {
-                Menu {
+                Picker(selection: $appearance) {
                     ForEach(accentNames, id: \.self) { name in
-                        Button {
-                            appearance = name
-                        } label: {
-                            HStack(spacing: 10) {
-                                Circle()
-                                    .fill(color(for: name))
-                                    .frame(width: 14, height: 14)
-                                    .overlay {
-                                        Circle().stroke(.white.opacity(0.28), lineWidth: 0.5)
-                                    }
-                                Text(name)
-                                if appearance == name {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(.blue)
-                                }
-                            }
-                        }
+                        Text(name).tag(name)
                     }
                 } label: {
                     HStack {
@@ -55,10 +39,11 @@ struct AppearanceSettingsView: View {
                             .fill(color(for: appearance))
                             .frame(width: 18, height: 18)
                         Text(appearance)
-                            .foregroundStyle(.secondary)
+                        .foregroundStyle(.secondary)
                     }
                     .contentShape(Rectangle())
                 }
+                .pickerStyle(.menu)
 
                 if appearance == "Custom" {
                     ColorPicker("Custom Accent", selection: customColorBinding, supportsOpacity: false)
@@ -285,8 +270,8 @@ struct VideoPresetsView: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
+                    .foregroundStyle(.blue)
+                    .frame(width: 44, height: 44)
             }
             .accessibilityLabel("Actions for \(preset.name)")
         }

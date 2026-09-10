@@ -94,11 +94,18 @@ struct TorchButton: View {
                     Slider(
                         value: Binding(
                             get: { camera.torchBrightnessLevel },
-                            set: { camera.setTorchBrightness($0) }
+                            set: { camera.setTorchBrightness($0, isFinal: false) }
                         ),
                         in: 0.05...1.0
                     )
                     .tint(theme)
+                    .onEditingChanged { editing in
+                        if editing {
+                            camera.beginTorchBrightnessInteraction()
+                        } else {
+                            camera.endTorchBrightnessInteraction()
+                        }
+                    }
                     Text(String(format: "%.0f%%", camera.torchBrightnessLevel * 100))
                         .font(.caption2.monospacedDigit())
                 }
@@ -583,7 +590,7 @@ struct ProToolsPopup: View {
             HStack(spacing: 6) {
                 Button {
                     CameraHaptics.fire()
-                    activeTool = activeTool == .ev ? nil : .ev
+                    setActiveTool(activeTool == .ev ? nil : .ev)
                 } label: {
                     toolPill("EV", value: evLabel, isActive: activeTool == .ev)
                 }
@@ -635,7 +642,7 @@ struct ProToolsPopup: View {
 
                 Button {
                     CameraHaptics.fire()
-                    activeTool = nil
+                    setActiveTool(nil)
                     camera.resetTemporaryCameraControls()
                 } label: {
                     toolPill("Reset", value: "", isActive: false)
@@ -662,6 +669,17 @@ struct ProToolsPopup: View {
                         step: 0.1
                     )
                     .tint(theme)
+                    Button {
+                        CameraHaptics.fire()
+                        camera.setExposureBias(0)
+                    } label: {
+                        Label("Reset EV", systemImage: "arrow.counterclockwise")
+                            .font(.caption2.weight(.semibold))
+                            .frame(minHeight: 36)
+                            .padding(.horizontal, 8)
+                            .background(.black.opacity(0.24), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -678,12 +696,19 @@ struct ProToolsPopup: View {
                     Slider(
                         value: Binding(
                             get: { camera.customWhiteBalanceTemperature },
-                            set: { camera.setCustomWhiteBalance(temperature: $0, tint: camera.customWhiteBalanceTint) }
+                            set: { camera.setCustomWhiteBalance(temperature: $0, tint: camera.customWhiteBalanceTint, isFinal: false) }
                         ),
                         in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
                         step: 50
                     )
                     .tint(theme)
+                    .onEditingChanged { editing in
+                        if editing {
+                            camera.beginCustomWhiteBalanceInteraction()
+                        } else {
+                            camera.endCustomWhiteBalanceInteraction()
+                        }
+                    }
                     HStack {
                         Text("Tint")
                         Spacer()
@@ -693,18 +718,39 @@ struct ProToolsPopup: View {
                     Slider(
                         value: Binding(
                             get: { camera.customWhiteBalanceTint },
-                            set: { camera.setCustomWhiteBalance(temperature: camera.customWhiteBalanceTemperature, tint: $0) }
+                            set: { camera.setCustomWhiteBalance(temperature: camera.customWhiteBalanceTemperature, tint: $0, isFinal: false) }
                         ),
                         in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
                         step: 1
                     )
                     .tint(theme)
+                    .onEditingChanged { editing in
+                        if editing {
+                            camera.beginCustomWhiteBalanceInteraction()
+                        } else {
+                            camera.endCustomWhiteBalanceInteraction()
+                        }
+                    }
+                    Button {
+                        CameraHaptics.fire()
+                        camera.setCustomWhiteBalance(
+                            temperature: WhiteBalancePreferencePolicy.defaultTemperature,
+                            tint: 0
+                        )
+                    } label: {
+                        Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
+                            .font(.caption2.weight(.semibold))
+                            .frame(minHeight: 36)
+                            .padding(.horizontal, 8)
+                            .background(.black.opacity(0.24), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
         .foregroundStyle(.white)
         .padding(11)
-        .frame(width: 310)
+        .frame(width: 342)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -720,11 +766,11 @@ struct ProToolsPopup: View {
                     .foregroundStyle(isActive ? theme : .white.opacity(0.62))
             }
         }
-        .font(.system(size: 9, weight: .semibold, design: .rounded))
+        .font(.system(size: 10, weight: .semibold, design: .rounded))
         .lineLimit(1)
         .minimumScaleFactor(0.72)
-        .frame(maxWidth: .infinity, minHeight: 26)
-        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, minHeight: 36)
+        .padding(.horizontal, 6)
         .background(isActive ? theme.opacity(0.2) : .black.opacity(0.25), in: Capsule())
         .overlay {
             Capsule().stroke(isActive ? theme.opacity(0.65) : .white.opacity(0.15), lineWidth: 1)
@@ -757,6 +803,14 @@ struct ProToolsPopup: View {
 
     private var timerLabel: String {
         shutterDelay == 0 ? "Off" : "\(shutterDelay)s"
+    }
+
+    private func setActiveTool(_ tool: ActiveTool?) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            activeTool = tool
+        }
     }
 }
 

@@ -30,7 +30,7 @@ struct DiagnosticsSettingsView: View {
     var body: some View {
         List {
             Section {
-                Toggle(isOn: loggingBinding) {
+                HapticFreeSettingsToggle(isOn: loggingBinding) {
                     SettingsToggleLabel(
                         symbol: "doc.text.fill",
                         color: .red,
@@ -40,7 +40,7 @@ struct DiagnosticsSettingsView: View {
                 }
 
 
-                Toggle(isOn: extremeBinding) {
+                HapticFreeSettingsToggle(isOn: extremeBinding) {
                     SettingsToggleLabel(
                         symbol: "waveform.path.ecg.rectangle.fill",
                         color: .orange,

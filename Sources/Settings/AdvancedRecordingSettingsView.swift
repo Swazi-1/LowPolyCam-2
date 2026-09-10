@@ -18,7 +18,7 @@ struct AdvancedRecordingSettingsView: View {
         List {
             if camera.captureMode != .photo {
                 Section("LIVE STATS") {
-                    Toggle(isOn: $liveStats) {
+                    HapticFreeSettingsToggle(isOn: $liveStats) {
                         SettingsToggleLabel(
                             symbol: "chart.bar.fill",
                             color: .blue,
@@ -53,7 +53,7 @@ struct AdvancedRecordingSettingsView: View {
                     }
                     .pickerStyle(.menu)
 
-                    Toggle(isOn: $zebraExposureWarning) {
+                    HapticFreeSettingsToggle(isOn: $zebraExposureWarning) {
                         SettingsToggleLabel(
                             symbol: "stripe.3.horizontal",
                             color: .yellow,
@@ -93,7 +93,7 @@ struct AdvancedRecordingSettingsView: View {
 
             if camera.captureMode == .video {
                 Section {
-                    Toggle(
+                    HapticFreeSettingsToggle(
                         isOn: Binding(
                             get: { longevity },
                             set: { camera.applyLongevityMode($0) }

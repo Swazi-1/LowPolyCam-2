@@ -3,41 +3,6 @@ import SwiftUI
 struct CameraHUDSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
-
-    var body: some View {
-        List {
-            Section("HUD") {
-                Toggle(isOn: $isHUDEnabled) {
-                    SettingsToggleLabel(
-                        symbol: "capsule.fill",
-                        color: .blue,
-                        title: "Show Camera HUD",
-                        subtitle: "Show the in-camera information capsule."
-                    )
-                }
-
-                NavigationLink {
-                    CameraHUDContentSettingsView(camera: camera)
-                } label: {
-                    SettingsNavigationLabel(
-                        symbol: "text.line.first.and.arrowtriangle.forward",
-                        color: .purple,
-                        title: "HUD Content & Style",
-                        subtitle: "Choose information and text size"
-                    )
-                }
-                .disabled(!isHUDEnabled)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Camera HUD")
-        .navigationBarTitleDisplayMode(.large)
-        .tint(.blue)
-    }
-}
-
-struct CameraHUDContentSettingsView: View {
-    @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
@@ -48,40 +13,46 @@ struct CameraHUDContentSettingsView: View {
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
     @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
-    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
 
     var body: some View {
         List {
-            Section("MAIN INFO") {
-                Toggle("Resolution", isOn: $hudResolution)
-                if camera.captureMode != .photo {
-                    Toggle("FPS", isOn: $hudFPS)
+            Section("HUD") {
+                HapticFreeSettingsToggle(isOn: $isHUDEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "capsule.fill",
+                        color: .blue,
+                        title: "Show Camera HUD",
+                        subtitle: "Show the in-camera information capsule."
+                    )
                 }
-                Toggle(camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining", isOn: $hudRemaining)
-                Toggle("White Balance", isOn: $hudWhiteBalance)
             }
+
+            Section("MAIN INFO") {
+                HapticFreeSettingsToggle(isOn: $hudResolution) { Text("Resolution") }
+                if camera.captureMode != .photo {
+                    HapticFreeSettingsToggle(isOn: $hudFPS) { Text("FPS") }
+                }
+                HapticFreeSettingsToggle(isOn: $hudRemaining) {
+                    Text(camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining")
+                }
+                HapticFreeSettingsToggle(isOn: $hudWhiteBalance) { Text("White Balance") }
+            }
+            .disabled(!isHUDEnabled)
 
             Section("DEVICE INFO") {
-                Toggle("Battery", isOn: $hudBattery)
-                Toggle("Free Storage", isOn: $hudStorage)
-                Toggle("Thermal Status", isOn: $hudThermal)
+                HapticFreeSettingsToggle(isOn: $hudBattery) { Text("Battery") }
+                HapticFreeSettingsToggle(isOn: $hudStorage) { Text("Free Storage") }
+                HapticFreeSettingsToggle(isOn: $hudThermal) { Text("Thermal Status") }
                 if camera.captureMode != .photo {
-                    Toggle("Frame Gaps", isOn: $hudDroppedFrames)
+                    HapticFreeSettingsToggle(isOn: $hudDroppedFrames) { Text("Frame Gaps") }
                 }
             }
+            .disabled(!isHUDEnabled)
 
-            Section("HUD APPEARANCE") {
-                Picker("Text Size", selection: $hudTextSize) {
-                    Text("Compact").tag(10.0)
-                    Text("Large").tag(12.0)
-                }
-                .pickerStyle(.menu)
-            }
-
-            Section {
+            Section("RECORDING HUD") {
                 Picker("Audio Level Meter", selection: $audioLevelMeter) {
                     ForEach(AudioLevelMeterMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode.rawValue)
+                        Text(mode.displayName).tag(mode.rawValue)
                     }
                 }
                 .pickerStyle(.menu)
@@ -90,21 +61,22 @@ struct CameraHUDContentSettingsView: View {
                         camera.setAudioLevelMeterMode(mode)
                     }
                 }
+            } footer: {
+                Text("The meter reads the authorized microphone data output and appears only while recording. Decibel readouts are digital dBFS, not SPL or dBA.")
+            }
+            .disabled(!isHUDEnabled)
 
-                Picker("Clean Preview Gesture", selection: $cleanPreviewGesture) {
-                    ForEach(CleanPreviewGesture.allCases) { gesture in
-                        Text(gesture.rawValue).tag(gesture.rawValue)
-                    }
+            Section("APPEARANCE") {
+                Picker("Text Size", selection: $hudTextSize) {
+                    Text("Compact").tag(10.0)
+                    Text("Large").tag(12.0)
                 }
                 .pickerStyle(.menu)
-            } header: {
-                Text("CAPTURE HUD")
-            } footer: {
-                Text("The audio meter reads the authorized microphone data output and appears only while recording. Clean Preview hides non-essential UI temporarily; capture and stop remain available.")
             }
+            .disabled(!isHUDEnabled)
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("HUD Content & Style")
+        .navigationTitle("Camera HUD")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
     }

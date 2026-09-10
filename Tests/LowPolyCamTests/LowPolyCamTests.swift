@@ -158,7 +158,11 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(ManualBitratePolicy.validatedMbps(.nan), ManualBitratePolicy.defaultMbps)
         XCTAssertEqual(ManualBitratePolicy.validatedMbps(.infinity), ManualBitratePolicy.defaultMbps)
         XCTAssertEqual(ManualBitratePolicy.validatedMbps(.nan, fallback: .infinity), ManualBitratePolicy.defaultMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(1), 1)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(50), 50)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(200), 200)
         XCTAssertEqual(ManualBitratePolicy.validatedMbps(0), ManualBitratePolicy.minimumMbps)
+        XCTAssertEqual(ManualBitratePolicy.validatedMbps(-10), ManualBitratePolicy.minimumMbps)
         XCTAssertEqual(ManualBitratePolicy.validatedMbps(999), ManualBitratePolicy.maximumMbps)
         XCTAssertEqual(ManualBitratePolicy.bitsPerSecond(forMbps: 12.5), 12_500_000)
     }
@@ -242,6 +246,89 @@ final class LowPolyCamTests: XCTestCase {
             ZoomShortcutPolicy.validated([0.5, 0.501, 2, .infinity, 999]),
             [0.5, 2, 100]
         )
+    }
+
+    func testTorchLevelPolicyStaysInNormalizedDomain() {
+        XCTAssertEqual(TorchLevelPolicy.validatedNormalized(0.35), 0.35, accuracy: 0.0001)
+        XCTAssertEqual(TorchLevelPolicy.validatedNormalized(-1), 0.05, accuracy: 0.0001)
+        XCTAssertEqual(TorchLevelPolicy.validatedNormalized(.infinity), 0.35, accuracy: 0.0001)
+        XCTAssertEqual(
+            TorchLevelPolicy.validatedNormalized(3.402823466e38),
+            1.0,
+            accuracy: 0.0001
+        )
+    }
+
+    func testCustomWhiteBalanceQueueKeepsOnlyLatestSubmission() {
+        var queue = CustomWhiteBalanceSubmissionQueue()
+        queue.submit(CustomWhiteBalanceSubmission(temperature: 3_200, tint: -10, isFinal: false))
+        queue.submit(CustomWhiteBalanceSubmission(temperature: 6_500, tint: 12, isFinal: true))
+
+        XCTAssertEqual(
+            queue.consumeLatest(),
+            CustomWhiteBalanceSubmission(temperature: 6_500, tint: 12, isFinal: true)
+        )
+        XCTAssertNil(queue.consumeLatest())
+    }
+
+    func testAudioBarsAreMonotonicAndClamped() {
+        let values = [-60.0, -48.0, -24.0, -12.0, 0.0]
+        let bars = values.map { AudioLevelMeterPolicy.barCount(forAveragePowerDBFS: $0) }
+
+        XCTAssertEqual(bars, bars.sorted())
+        XCTAssertEqual(bars.first, 0)
+        XCTAssertEqual(bars.last, AudioLevelMeterPolicy.defaultBarCount)
+        XCTAssertEqual(AudioLevelMeterPolicy.barCount(forAveragePowerDBFS: .nan), 0)
+    }
+
+    func testShutterRowKeepsTheCenterSlotStable() {
+        for width in [320.0, 390.0, 844.0] {
+            XCTAssertEqual(
+                ShutterRowLayoutPolicy.shutterCenterX(in: CGFloat(width)),
+                CGFloat(width / 2),
+                accuracy: 0.0001
+            )
+        }
+        XCTAssertEqual(ShutterRowLayoutPolicy.sideSlotWidth, 48)
+        XCTAssertEqual(ShutterRowLayoutPolicy.shutterSlotWidth, 76)
+    }
+
+    func testZoomButtonsDefaultOffWithoutResettingConfiguredValues() {
+        let suiteName = "LowPolyCamZoomTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set(5, forKey: LowPolyCamPreferences.Key.zoomButtonCount)
+        defaults.set(8.0, forKey: LowPolyCamPreferences.Key.zoomButton1)
+        defaults.set(12.0, forKey: LowPolyCamPreferences.Key.zoomButton2)
+
+        LowPolyCamPreferences.registerAndMigrate(defaults)
+
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.zoomButtonsEnabled))
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.zoomButtonCount), 5)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.zoomButton1), 8.0, accuracy: 0.0001)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.zoomButton2), 12.0, accuracy: 0.0001)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testSettingsSearchRoutesFollowTheFlattenedHierarchy() {
+        let entries = VideoSettingsView.searchEntries
+        XCTAssertEqual(
+            entries.first(where: { $0.title == "Custom Zoom Buttons" })?.destination,
+            .zoomControls
+        )
+        XCTAssertEqual(
+            entries.first(where: { $0.title == "Clean Preview Gesture" })?.destination,
+            .quickControls
+        )
+        XCTAssertEqual(
+            entries.first(where: { $0.title == "Audio Level Meter" })?.destination,
+            .cameraHUD
+        )
+        XCTAssertEqual(
+            entries.first(where: { $0.title == "Custom White Balance" })?.destination,
+            .preferences
+        )
+        let removedHUDRoute = ["HUD", "Content", "&", "Style"].joined(separator: " ")
+        XCTAssertFalse(entries.contains { $0.path.contains(removedHUDRoute) })
     }
 
     func testRecordingPauseMachineRejectsInvalidTransitions() {

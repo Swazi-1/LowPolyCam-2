@@ -67,16 +67,30 @@ enum CameraHaptics {
     /// Master entry point for every app-generated haptic. Keeping the preference check here
     /// guarantees controls, capture, countdown, and future haptics all respect the same switch.
     static func fire(strength selectedStrength: String? = nil) {
-        guard isEnabled else { return }
         let defaults = UserDefaults.standard
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
+        guard isEnabled else {
+            AppEventLog.deepEvent("HAPTIC SUPPRESSED", category: .ui, fields: [
+                "reason": "master disabled",
+                "strength": strength
+            ])
+            return
+        }
+        AppEventLog.deepEvent("HAPTIC REQUEST", category: .ui, fields: ["strength": strength])
         try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
         generator.prepare()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
             // The user can disable haptics while this short prepared-feedback delay is pending.
-            guard isEnabled else { return }
+            guard isEnabled else {
+                AppEventLog.deepEvent("HAPTIC SUPPRESSED", category: .ui, fields: [
+                    "reason": "master disabled during delay",
+                    "strength": strength
+                ])
+                return
+            }
             generator.impactOccurred(intensity: strength == "Low" ? 0.45 : strength == "Strong" ? 1 : 0.7)
+            AppEventLog.deepEvent("HAPTIC FIRED", category: .ui, fields: ["strength": strength])
         }
     }
 }
@@ -122,7 +136,9 @@ struct CapturePreferencesView: View {
                     Text("Fast").tag(1.5)
                 }
                 .pickerStyle(.menu)
-                Toggle("Tap Zoom to Reset", isOn: $tapZoomReset)
+                HapticFreeSettingsToggle(isOn: $tapZoomReset) {
+                    Text("Tap Zoom to Reset")
+                }
             }
 
             Section {
@@ -147,16 +163,136 @@ struct CapturePreferencesView: View {
             }
 
             Section {
-                Toggle("Lock Recording Controls", isOn: $recordingLock)
-                Toggle("Low Storage Warning", isOn: $lowStorageWarning)
+                HapticFreeSettingsToggle(isOn: $recordingLock) {
+                    Text("Lock Recording Controls")
+                }
+                HapticFreeSettingsToggle(isOn: $lowStorageWarning) {
+                    Text("Low Storage Warning")
+                }
             } header: {
                 Text("RECORDING SAFEGUARDS")
             } footer: {
                 Text("The optional warning appears below 1 GB. Critical low-storage protection remains active even when the warning is off.")
             }
 
+            Section("WHITE BALANCE") {
+                Picker("White Balance", selection: whiteBalanceBinding) {
+                    ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
+                        Text(preset.rawValue).tag(preset)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if camera.whiteBalancePreset == .custom {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Temperature")
+                            Spacer()
+                            Text(String(format: "%.0f K", camera.customWhiteBalanceTemperature))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { camera.customWhiteBalanceTemperature },
+                                set: {
+                                    camera.setCustomWhiteBalance(
+                                        temperature: $0,
+                                        tint: camera.customWhiteBalanceTint,
+                                        isFinal: false
+                                    )
+                                }
+                            ),
+                            in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
+                            step: 50
+                        )
+                        .onEditingChanged { editing in
+                            if editing {
+                                camera.beginCustomWhiteBalanceInteraction()
+                            } else {
+                                camera.endCustomWhiteBalanceInteraction()
+                            }
+                        }
+
+                        HStack {
+                            Text("Tint")
+                            Spacer()
+                            Text(String(format: "%+.0f", camera.customWhiteBalanceTint))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { camera.customWhiteBalanceTint },
+                                set: {
+                                    camera.setCustomWhiteBalance(
+                                        temperature: camera.customWhiteBalanceTemperature,
+                                        tint: $0,
+                                        isFinal: false
+                                    )
+                                }
+                            ),
+                            in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
+                            step: 1
+                        )
+                        .onEditingChanged { editing in
+                            if editing {
+                                camera.beginCustomWhiteBalanceInteraction()
+                            } else {
+                                camera.endCustomWhiteBalanceInteraction()
+                            }
+                        }
+
+                        Button {
+                            CameraHaptics.fire()
+                            camera.setCustomWhiteBalance(
+                                temperature: WhiteBalancePreferencePolicy.defaultTemperature,
+                                tint: 0
+                            )
+                        } label: {
+                            Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
+                        }
+                    }
+                }
+            } footer: {
+                Text("Custom White Balance uses 2,500–10,000 K and tint from −150 to +150. Reset returns to 5,200 K and 0 tint without switching to Auto.")
+            }
+
+            Section("TORCH") {
+                HStack {
+                    Label("Torch Brightness", systemImage: "bolt.fill")
+                    Spacer()
+                    Text(String(format: "%.0f%%", camera.torchBrightnessLevel * 100))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(
+                    value: Binding(
+                        get: { camera.torchBrightnessLevel },
+                        set: { camera.setTorchBrightness($0, isFinal: false) }
+                    ),
+                    in: TorchLevelPolicy.minimumNormalizedLevel...TorchLevelPolicy.maximumNormalizedLevel,
+                    step: 0.01
+                )
+                .disabled(!camera.torchAvailable || !camera.torchBrightnessSupported)
+                .onEditingChanged { editing in
+                    if editing {
+                        camera.beginTorchBrightnessInteraction()
+                    } else {
+                        camera.endTorchBrightnessInteraction()
+                    }
+                }
+                if !camera.torchAvailable {
+                    Text("Torch unavailable for the current camera or configuration.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } footer: {
+                Text("Brightness is a normalized 5–100% request. The active camera may apply a lower thermal maximum or fall back to its supported torch level.")
+            }
+
             Section("HAPTICS") {
-                Toggle(isOn: $hapticCaptureEnabled) {
+                HapticFreeSettingsToggle(isOn: $hapticCaptureEnabled) {
                     SettingsToggleLabel(
                         symbol: "waveform.path.ecg",
                         color: .orange,
@@ -177,7 +313,7 @@ struct CapturePreferencesView: View {
                     CameraHaptics.fire(strength: newValue)
                 }
 
-                Toggle(isOn: $countdownHaptics) {
+                HapticFreeSettingsToggle(isOn: $countdownHaptics) {
                     SettingsToggleLabel(
                         symbol: "timer",
                         color: .orange,
@@ -189,11 +325,16 @@ struct CapturePreferencesView: View {
             }
 
             Section("CAMERA") {
-                Toggle("Mirror Saved Selfies", isOn: $mirrorSelfies)
+                HapticFreeSettingsToggle(isOn: $mirrorSelfies) {
+                    Text("Mirror Saved Selfies")
+                }
 
                 Button {
                     camera.setExposureBias(0)
-                    camera.selectWhiteBalancePreset(.auto)
+                    camera.setCustomWhiteBalance(
+                        temperature: WhiteBalancePreferencePolicy.defaultTemperature,
+                        tint: 0
+                    )
                 } label: {
                     Label("Reset Exposure & White Balance", systemImage: "arrow.counterclockwise")
                 }
@@ -203,5 +344,12 @@ struct CapturePreferencesView: View {
         .navigationTitle("Preferences")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
+    }
+
+    private var whiteBalanceBinding: Binding<CameraManager.WhiteBalancePreset> {
+        Binding(
+            get: { camera.whiteBalancePreset },
+            set: { camera.selectWhiteBalancePreset($0) }
+        )
     }
 }

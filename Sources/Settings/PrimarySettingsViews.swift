@@ -5,11 +5,12 @@ struct CameraSetupSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("rememberCaptureMode") private var rememberCameraSetup = false
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
+    @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
 
     var body: some View {
         List {
             Section {
-                Toggle(isOn: $rememberCameraSetup) {
+                HapticFreeSettingsToggle(isOn: $rememberCameraSetup) {
                     SettingsToggleLabel(
                         symbol: "arrow.counterclockwise.circle.fill",
                         color: .green,
@@ -43,7 +44,7 @@ struct CameraSetupSettingsView: View {
                     CaptureOrientationSettingsView(camera: camera)
                 } label: {
                     SettingsNavigationLabel(
-                        symbol: "rectangle.rotate",
+                        symbol: "rectangle.portrait.rotate",
                         color: .blue,
                         title: "Capture Orientation",
                         value: camera.captureOrientation.rawValue
@@ -58,14 +59,14 @@ struct CameraSetupSettingsView: View {
                         symbol: "plus.magnifyingglass",
                         color: .purple,
                         title: "Zoom Controls",
-                        value: "\(camera.zoomShortcutValues.count) buttons"
+                        value: zoomButtonsEnabled ? "\(camera.zoomShortcutValues.count) buttons" : "Off"
                     )
                 }
                 .disabled(!cameraControlsEnabled)
             }
 
             Section("DISPLAY") {
-                Toggle(isOn: $keepScreenAwakeEnabled) {
+                HapticFreeSettingsToggle(isOn: $keepScreenAwakeEnabled) {
                     SettingsToggleLabel(
                         symbol: "sun.max.fill",
                         color: .orange,
@@ -152,6 +153,7 @@ struct CaptureOrientationSettingsView: View {
 
 struct ZoomControlsSettingsView: View {
     @ObservedObject var camera: CameraManager
+    @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
     @AppStorage("zoomButtonCount") private var buttonCount = 4
     @AppStorage("zoomButton1") private var zoom1 = 0.5
     @AppStorage("zoomButton2") private var zoom2 = 1.0
@@ -162,26 +164,39 @@ struct ZoomControlsSettingsView: View {
     var body: some View {
         List {
             Section {
-                Picker("Number of Buttons", selection: $buttonCount) {
-                    ForEach([3, 4, 5], id: \.self) { count in
-                        Text("\(count)").tag(count)
-                    }
+                HapticFreeSettingsToggle(isOn: $zoomButtonsEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "plus.magnifyingglass",
+                        color: .purple,
+                        title: "Zoom Buttons",
+                        subtitle: "Show shortcut buttons over the camera controls. Swipe zoom stays available when this is off."
+                    )
                 }
-                .pickerStyle(.menu)
 
-                zoomStepper(title: "Button 1", value: $zoom1)
-                zoomStepper(title: "Button 2", value: $zoom2)
-                zoomStepper(title: "Button 3", value: $zoom3)
-                zoomStepper(title: "Button 4", value: $zoom4)
-                    .opacity(buttonCount >= 4 ? 1 : 0.45)
-                    .disabled(buttonCount < 4)
-                zoomStepper(title: "Button 5", value: $zoom5)
-                    .opacity(buttonCount >= 5 ? 1 : 0.45)
-                    .disabled(buttonCount < 5)
+                if zoomButtonsEnabled {
+                    Picker("Number of Buttons", selection: $buttonCount) {
+                        ForEach([3, 4, 5], id: \.self) { count in
+                            Text("\(count)").tag(count)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    zoomStepper(title: "Button 1", value: $zoom1)
+                    zoomStepper(title: "Button 2", value: $zoom2)
+                    zoomStepper(title: "Button 3", value: $zoom3)
+                    zoomStepper(title: "Button 4", value: $zoom4)
+                        .opacity(buttonCount >= 4 ? 1 : 0.45)
+                        .disabled(buttonCount < 4)
+                    zoomStepper(title: "Button 5", value: $zoom5)
+                        .opacity(buttonCount >= 5 ? 1 : 0.45)
+                        .disabled(buttonCount < 5)
+                }
             } header: {
                 Text("ZOOM BUTTONS")
             } footer: {
-                Text("Choose 3–5 shortcuts. Values are clamped, de-duplicated and sent through the existing zoom request/ramp path.")
+                Text(zoomButtonsEnabled
+                    ? "Choose 3–5 shortcuts. Values are clamped, de-duplicated and sent through the existing zoom request/ramp path. Turning this off preserves the values for later."
+                    : "Zoom shortcut values are preserved while the buttons are off. Swipe zoom and the active zoom indicator remain available.")
             }
 
             Section {
@@ -198,6 +213,7 @@ struct ZoomControlsSettingsView: View {
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
         .onAppear { updateZoomShortcuts() }
+        .onChange(of: zoomButtonsEnabled) { _, _ in updateZoomShortcuts() }
         .onChange(of: buttonCount) { _, _ in updateZoomShortcuts() }
         .onChange(of: zoom1) { _, _ in updateZoomShortcuts() }
         .onChange(of: zoom2) { _, _ in updateZoomShortcuts() }
@@ -285,7 +301,7 @@ struct RecordVideoSettingsView: View {
             }
 
             Section {
-                Toggle(
+                HapticFreeSettingsToggle(
                     isOn: Binding(
                         get: { camera.isVideoStabilizationEnabled },
                         set: { camera.setVideoStabilizationEnabled($0) }
@@ -578,6 +594,8 @@ struct CodecCompressionSettingsView: View {
 struct CompressionSettingsSection: View {
     @ObservedObject var camera: CameraManager
     let isSlowMotion: Bool
+    @State private var manualBitrateText = ""
+    @FocusState private var bitrateFieldFocused: Bool
 
     var body: some View {
         Section {
@@ -598,16 +616,22 @@ struct CompressionSettingsSection: View {
                 .pickerStyle(.menu)
                 .disabled(!controlsEnabled)
             } else {
-                Stepper(value: manualBitrateBinding, in: ManualBitratePolicy.minimumMbps...ManualBitratePolicy.maximumMbps, step: 1) {
-                    HStack {
-                        Text("Bitrate")
-                        Spacer()
-                        Text(String(format: "%.1f Mbps", manualBitrateBinding.wrappedValue))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
+                HStack(spacing: 12) {
+                    Text("Bitrate")
+                    Spacer()
+                    TextField("Mbps", text: $manualBitrateText)
+                        .keyboardType(.decimalPad)
+                        .submitLabel(.done)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .frame(minWidth: 82, maxWidth: 100)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($bitrateFieldFocused)
+                        .disabled(!controlsEnabled)
+                        .onSubmit { commitManualBitrate() }
+                    Text("Mbps")
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(!controlsEnabled)
             }
         } header: {
             Text(isSlowMotion ? "SLO-MO COMPRESSION" : "COMPRESSION")
@@ -615,8 +639,33 @@ struct CompressionSettingsSection: View {
             if selectedMode == .auto {
                 Text("Auto exposes High, Medium and Data Saver using the existing device-aware bitrate policy. Video and Slo-Mo keep separate values.")
             } else {
-                Text("Bitrate is validated to 1–200 Mbps. For the current format, the effective value is \(formattedMbps(effectiveBitrate)) Mbps within \(formattedMbps(bitrateRecommendation.minimumMbps))–\(formattedMbps(bitrateRecommendation.maximumMbps)) Mbps; the requested value is preserved when formats change.")
+                Text("Enter 1–200 Mbps. Recommended for this \(currentResolution.rawValue) / \(Int(currentFPS)) fps \(currentCodec) format: \(formattedMbps(bitrateRecommendation.recommendedMbps)) Mbps. Effective: \(formattedMbps(effectiveBitrate)) Mbps (format range \(formattedMbps(bitrateRecommendation.minimumMbps))–\(formattedMbps(bitrateRecommendation.maximumMbps))). The requested value stays separate for Video and Slo-Mo.")
             }
+        }
+        .onAppear { syncBitrateDraft() }
+        .onChange(of: selectedMode) { _, _ in syncBitrateDraft() }
+        .onChange(of: requestedBitrate) { _, _ in
+            if !bitrateFieldFocused { syncBitrateDraft() }
+        }
+        .onChange(of: bitrateFieldFocused) { _, focused in
+            if !focused { commitManualBitrate() }
+        }
+    }
+
+    private func syncBitrateDraft() {
+        manualBitrateText = formattedMbps(requestedBitrate)
+    }
+
+    private func commitManualBitrate() {
+        guard selectedMode == .manual else { return }
+        let value = Double(manualBitrateText.replacingOccurrences(of: ",", with: "."))
+            ?? requestedBitrate
+        let validated = ManualBitratePolicy.validatedMbps(value, fallback: requestedBitrate)
+        manualBitrateText = formattedMbps(validated)
+        if isSlowMotion {
+            camera.setSlowMotionManualBitrateMbps(validated)
+        } else {
+            camera.setVideoManualBitrateMbps(validated)
         }
     }
 
@@ -699,18 +748,6 @@ struct CompressionSettingsSection: View {
         )
     }
 
-    private var manualBitrateBinding: Binding<Double> {
-        Binding(
-            get: { isSlowMotion ? camera.slowMotionManualBitrateMbps : camera.videoManualBitrateMbps },
-            set: { value in
-                if isSlowMotion {
-                    camera.setSlowMotionManualBitrateMbps(value)
-                } else {
-                    camera.setVideoManualBitrateMbps(value)
-                }
-            }
-        )
-    }
 }
 
 struct AboutSettingsView: View {

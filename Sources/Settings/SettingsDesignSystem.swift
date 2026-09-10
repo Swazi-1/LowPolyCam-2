@@ -85,6 +85,61 @@ struct SettingsToggleLabel: View {
     }
 }
 
+/// Settings-only switch that does not use the native UIKit Toggle control. UIKit can emit a
+/// system selection tick even when the app's haptic preference is disabled; this reusable control
+/// keeps the setting accessible while leaving all feedback under LowPolyCam's explicit haptic
+/// helper.
+struct HapticFreeSettingsToggle<Label: View>: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Binding var isOn: Bool
+    private let label: Label
+
+    init(isOn: Binding<Bool>, @ViewBuilder label: () -> Label) {
+        self._isOn = isOn
+        self.label = label()
+    }
+
+    var body: some View {
+        Button {
+            guard isEnabled else { return }
+            isOn.toggle()
+            AppEventLog.event("SETTINGS TOGGLE CHANGED", category: .ui, fields: [
+                "value": isOn ? "on" : "off"
+            ])
+        } label: {
+            HStack(spacing: 12) {
+                label
+                Spacer(minLength: 8)
+                switchView
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            guard isEnabled else { return }
+            isOn.toggle()
+        }
+        .opacity(isEnabled ? 1 : 0.55)
+    }
+
+    private var switchView: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(isOn ? Color.accentColor : Color.secondary.opacity(0.28))
+            .frame(width: 52, height: 32)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(.white)
+                    .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+                    .frame(width: 28, height: 28)
+                    .padding(2)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 struct SettingsHeroButton: View {
     let title: String
     let line1: String

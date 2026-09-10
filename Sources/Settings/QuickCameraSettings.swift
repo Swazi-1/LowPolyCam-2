@@ -7,27 +7,12 @@ struct QuickControlsSettingsView: View {
     @AppStorage("gridStyle") private var gridStyle = GridStyle.ruleOfThirds.rawValue
     @AppStorage("levelMeterEnabled") private var level = false
     @AppStorage("centerCrosshair") private var crosshair = false
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
 
     var body: some View {
         List {
-            Section("CAMERA") {
-                Toggle(
-                    isOn: Binding(
-                        get: { camera.isVideoStabilizationEnabled },
-                        set: { camera.setVideoStabilizationEnabled($0) }
-                    )
-                ) {
-                    SettingsToggleLabel(
-                        symbol: "dot.radiowaves.left.and.right",
-                        color: .green,
-                        title: "Stabilization",
-                        subtitle: "Reduce camera shake in Video mode."
-                    )
-                }
-            }
-
             Section("COMPOSITION") {
-                Toggle(isOn: $grid) {
+                HapticFreeSettingsToggle(isOn: $grid) {
                     SettingsToggleLabel(
                         symbol: "grid",
                         color: .blue,
@@ -57,7 +42,7 @@ struct QuickControlsSettingsView: View {
                     .padding(.vertical, 4)
                 }
 
-                Toggle(isOn: $level) {
+                HapticFreeSettingsToggle(isOn: $level) {
                     SettingsToggleLabel(
                         symbol: "gyroscope",
                         color: .orange,
@@ -66,7 +51,7 @@ struct QuickControlsSettingsView: View {
                     )
                 }
 
-                Toggle(isOn: $crosshair) {
+                HapticFreeSettingsToggle(isOn: $crosshair) {
                     SettingsToggleLabel(
                         symbol: "plus",
                         color: .gray,
@@ -74,6 +59,17 @@ struct QuickControlsSettingsView: View {
                         subtitle: "Show a marker at the center of the frame."
                     )
                 }
+            }
+
+            Section("PREVIEW") {
+                Picker("Clean Preview Gesture", selection: $cleanPreviewGesture) {
+                    ForEach(CleanPreviewGesture.allCases) { gesture in
+                        Text(gesture.rawValue).tag(gesture.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            } footer: {
+                Text("Clean Preview hides the HUD and controls while keeping one persistent shutter row. Use the configured gesture on the preview to toggle it.")
             }
         }
         .listStyle(.insetGrouped)

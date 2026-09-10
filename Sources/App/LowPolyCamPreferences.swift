@@ -6,7 +6,7 @@ import Foundation
 /// settings. This layer makes the schema explicit and repairs values written by older betas before
 /// the first CameraManager is created.
 enum LowPolyCamPreferences {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     enum Key {
         static let schemaVersion = "lowPolyCamSettingsSchemaVersion"
@@ -65,6 +65,7 @@ enum LowPolyCamPreferences {
         static let zoomButton4 = "zoomButton4"
         static let zoomButton5 = "zoomButton5"
         static let zoomButtonCount = "zoomButtonCount"
+        static let zoomButtonsEnabled = "zoomButtonsEnabled"
         static let centerCrosshair = "centerCrosshair"
         static let keepScreenAwakeEnabled = "keepScreenAwakeEnabled"
         static let cameraHUDEnabled = "cameraHUDEnabled"
@@ -141,13 +142,16 @@ enum LowPolyCamPreferences {
             Key.whiteBalancePreset: "Auto",
             Key.customWhiteBalanceTemperature: WhiteBalancePreferencePolicy.defaultTemperature,
             Key.customWhiteBalanceTint: 0.0,
-            Key.torchBrightness: 0.35,
+            Key.torchBrightness: TorchLevelPolicy.defaultNormalizedLevel,
             Key.zoomButton1: 0.5,
             Key.zoomButton2: 1.0,
             Key.zoomButton3: 2.0,
             Key.zoomButton4: 4.0,
             Key.zoomButton5: 8.0,
             Key.zoomButtonCount: 4,
+            // Keep the configured values, but require an explicit opt-in before showing the
+            // shortcut row in the camera. Swipe zoom and the zoom indicator remain available.
+            Key.zoomButtonsEnabled: false,
             Key.centerCrosshair: false,
             Key.keepScreenAwakeEnabled: false,
             Key.cameraHUDEnabled: true,
@@ -217,7 +221,13 @@ enum LowPolyCamPreferences {
         normalizeDouble(Key.slowMotionManualBitrateMbps, minimum: ManualBitratePolicy.minimumMbps, maximum: ManualBitratePolicy.maximumMbps, fallback: ManualBitratePolicy.defaultMbps, in: defaults)
         normalizeDouble(Key.customWhiteBalanceTemperature, minimum: WhiteBalancePreferencePolicy.minimumTemperature, maximum: WhiteBalancePreferencePolicy.maximumTemperature, fallback: WhiteBalancePreferencePolicy.defaultTemperature, in: defaults)
         normalizeDouble(Key.customWhiteBalanceTint, minimum: WhiteBalancePreferencePolicy.minimumTint, maximum: WhiteBalancePreferencePolicy.maximumTint, fallback: 0, in: defaults)
-        normalizeDouble(Key.torchBrightness, minimum: 0.05, maximum: 1.0, fallback: 0.35, in: defaults)
+        normalizeDouble(
+            Key.torchBrightness,
+            minimum: TorchLevelPolicy.minimumNormalizedLevel,
+            maximum: TorchLevelPolicy.maximumNormalizedLevel,
+            fallback: TorchLevelPolicy.defaultNormalizedLevel,
+            in: defaults
+        )
         normalizeDouble(Key.zoomButton1, minimum: 0.5, maximum: 100, fallback: 0.5, in: defaults)
         normalizeDouble(Key.zoomButton2, minimum: 0.5, maximum: 100, fallback: 1.0, in: defaults)
         normalizeDouble(Key.zoomButton3, minimum: 0.5, maximum: 100, fallback: 2.0, in: defaults)

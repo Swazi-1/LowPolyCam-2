@@ -240,7 +240,7 @@ enum AppEventLog {
         ("customWhiteBalanceTemperature", "5200.0"), ("customWhiteBalanceTint", "0.0"),
         ("torchBrightness", "0.35"), ("zoomButton1", "0.5"), ("zoomButton2", "1.0"),
         ("zoomButton3", "2.0"), ("zoomButton4", "4.0"), ("zoomButton5", "8.0"),
-        ("zoomButtonCount", "4"), ("customCameraPresets", ""),
+        ("zoomButtonCount", "4"), ("zoomButtonsEnabled", "false"), ("customCameraPresets", ""),
         ("keepScreenAwakeEnabled", "false"),
         ("cameraHUDEnabled", "true"), ("cameraHUDResolution", "true"), ("cameraHUDFPS", "true"),
         ("cameraHUDRemaining", "true"), ("cameraHUDWhiteBalance", "false"), ("cameraHUDBattery", "true"),
@@ -898,7 +898,7 @@ enum AppEventLog {
         "centerCrosshair", "cameraGridEnabled", "levelMeterEnabled", "zebraExposureWarning", "keepScreenAwakeEnabled", "cameraHUDEnabled",
         "cameraHUDResolution", "cameraHUDFPS", "cameraHUDRemaining", "cameraHUDWhiteBalance", "cameraHUDBattery",
         "cameraHUDStorage", "cameraHUDDroppedFrames", "thermalHUD", "longevityMode", "liveRecordingStats",
-        "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops"
+        "liveStatsShowFPS", "liveStatsShowBitrate", "liveStatsShowDrops", "zoomButtonsEnabled"
     ]
 
     private static let decimalSettingKeys: Set<String> = [

@@ -25,15 +25,14 @@ struct AudioLevelMeterSnapshot: Equatable {
     static func make(rms: Double, peak: Double, available: Bool = true) -> AudioLevelMeterSnapshot {
         let safeRMS = min(max(rms.isFinite ? rms : 0, 0), 1)
         let safePeak = min(max(peak.isFinite ? peak : 0, 0), 1)
-        let averageDB = min(0, max(-60, 20 * log10(max(safeRMS, 0.001))))
-        let peakDB = min(0, max(-60, 20 * log10(max(safePeak, 0.001))))
-        let normalized = min(max((averageDB + 48) / 48, 0), 1)
-        let bars = min(4, max(0, Int((normalized * 4).rounded(.up))))
+        let averageDB = min(0, max(AudioLevelMeterPolicy.minimumDBFS, 20 * log10(max(safeRMS, 0.001))))
+        let peakDB = min(0, max(AudioLevelMeterPolicy.minimumDBFS, 20 * log10(max(safePeak, 0.001))))
+        let bars = AudioLevelMeterPolicy.barCount(forAveragePowerDBFS: averageDB)
         return AudioLevelMeterSnapshot(
             averagePowerDBFS: averageDB,
             peakPowerDBFS: peakDB,
             bars: bars,
-            isClipping: peakDB >= -1.0,
+            isClipping: peakDB >= AudioLevelMeterPolicy.clippingDBFS,
             isAvailable: available
         )
     }
@@ -124,38 +123,86 @@ final class AudioLevelMeter: NSObject, ObservableObject, AVCaptureAudioDataOutpu
 
         let asbd = streamDescription.pointee
         let bits = Int(asbd.mBitsPerChannel)
-        let bytesPerSample = max(1, bits / 8)
+        let bytesPerSample = max(1, Int((asbd.mBitsPerChannel + 7) / 8))
+        let channels = max(1, Int(asbd.mChannelsPerFrame))
+        let declaredBytesPerFrame = Int(asbd.mBytesPerFrame)
         let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         let isSignedInteger = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
-        guard asbd.mFormatID == kAudioFormatLinearPCM, isFloat || isSignedInteger else { return nil }
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let isBigEndian = (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
+        guard asbd.mFormatID == kAudioFormatLinearPCM else { return nil }
 
         let bytes = UnsafeRawBufferPointer(start: dataPointer, count: totalLength)
-        let sampleCount = totalLength / bytesPerSample
-        guard sampleCount > 0 else { return nil }
+        let interleavedFrameStride = max(declaredBytesPerFrame, bytesPerSample * channels)
+        let frameCount: Int
+        let channelStride: Int
+        if isNonInterleaved {
+            frameCount = totalLength / max(bytesPerSample * channels, 1)
+            channelStride = frameCount * bytesPerSample
+        } else {
+            frameCount = totalLength / interleavedFrameStride
+            channelStride = 0
+        }
+        guard frameCount > 0 else { return nil }
 
         var sumSquares = 0.0
         var peak = 0.0
         var counted = 0
-        for index in 0..<sampleCount {
-            let offset = index * bytesPerSample
-            let value: Double
-            if isFloat && bytesPerSample >= 4 {
-                value = Double(bytes.load(fromByteOffset: offset, as: Float.self))
-            } else if bytesPerSample >= 4 {
-                value = Double(bytes.load(fromByteOffset: offset, as: Int32.self)) / Double(Int32.max)
-            } else if bytesPerSample >= 2 {
-                value = Double(bytes.load(fromByteOffset: offset, as: Int16.self)) / Double(Int16.max)
-            } else if isSignedInteger {
-                value = Double(Int8(bitPattern: bytes.load(fromByteOffset: offset, as: UInt8.self))) / Double(Int8.max)
-            } else {
-                value = (Double(bytes.load(fromByteOffset: offset, as: UInt8.self)) - 128) / 128
+        for frame in 0..<frameCount {
+            for channel in 0..<channels {
+                let offset = isNonInterleaved
+                    ? channel * channelStride + frame * bytesPerSample
+                    : frame * interleavedFrameStride + channel * bytesPerSample
+                guard offset >= 0, offset + bytesPerSample <= totalLength else { continue }
+
+                let value: Double
+                if isFloat && bytesPerSample >= 4 {
+                    let raw = Self.readUnsigned(bytes, offset: offset, byteCount: 4, bigEndian: isBigEndian)
+                    value = Double(Float(bitPattern: UInt32(raw)))
+                } else if isSignedInteger {
+                    let raw = Self.readUnsigned(bytes, offset: offset, byteCount: bytesPerSample, bigEndian: isBigEndian)
+                    let signed = Self.signExtend(raw, bitCount: min(bits, 63))
+                    let divisor = Double((Int64(1) << max(min(bits - 1, 62), 1)))
+                    value = Double(signed) / divisor
+                } else {
+                    let raw = Self.readUnsigned(bytes, offset: offset, byteCount: bytesPerSample, bigEndian: isBigEndian)
+                    let midpoint = Double(UInt64(1) << UInt64(max(bits - 1, 1)))
+                    value = (Double(raw) - midpoint) / midpoint
+                }
+                let normalized = min(max(abs(value.isFinite ? value : 0), 0), 1)
+                sumSquares += normalized * normalized
+                peak = max(peak, normalized)
+                counted += 1
             }
-            let normalized = min(max(abs(value.isFinite ? value : 0), 0), 1)
-            sumSquares += normalized * normalized
-            peak = max(peak, normalized)
-            counted += 1
         }
         return counted > 0 ? (sqrt(sumSquares / Double(counted)), peak) : nil
+    }
+
+    private static func readUnsigned(
+        _ bytes: UnsafeRawBufferPointer,
+        offset: Int,
+        byteCount: Int,
+        bigEndian: Bool
+    ) -> UInt64 {
+        var value: UInt64 = 0
+        if bigEndian {
+            for index in 0..<byteCount {
+                value = (value << 8) | UInt64(bytes[offset + index])
+            }
+        } else {
+            for index in 0..<byteCount {
+                value |= UInt64(bytes[offset + index]) << UInt64(index * 8)
+            }
+        }
+        return value
+    }
+
+    private static func signExtend(_ raw: UInt64, bitCount: Int) -> Int64 {
+        let bits = max(min(bitCount, 63), 1)
+        let signBit = UInt64(1) << UInt64(bits - 1)
+        guard raw & signBit != 0 else { return Int64(raw) }
+        let mask = ~UInt64(0) << UInt64(bits)
+        return Int64(bitPattern: raw | mask)
     }
 }
 
@@ -174,7 +221,7 @@ struct AudioLevelMeterView: View {
                     EmptyView()
                 case .bars:
                     HStack(spacing: 2) {
-                        ForEach(0..<4, id: \.self) { index in
+                        ForEach(0..<AudioLevelMeterPolicy.defaultBarCount, id: \.self) { index in
                             RoundedRectangle(cornerRadius: 1.5)
                                 .fill(color(for: index))
                                 .frame(width: 3, height: CGFloat(4 + index * 2))
@@ -182,13 +229,13 @@ struct AudioLevelMeterView: View {
                     }
                     .frame(height: 20, alignment: .bottom)
                     .accessibilityLabel("Audio level")
-                    .accessibilityValue(snapshot.isClipping ? "Clipping" : "\(snapshot.bars) of 4 bars")
+                    .accessibilityValue(snapshot.isClipping ? "Clipping" : "\(snapshot.bars) of \(AudioLevelMeterPolicy.defaultBarCount) bars")
                 case .decibels:
-                    Text(String(format: "%.0f dB", snapshot.averagePowerDBFS))
+                    Text(String(format: "%.0f dBFS", snapshot.averagePowerDBFS))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(snapshot.isClipping ? .red : .white)
-                        .accessibilityLabel("Audio level")
-                        .accessibilityValue(String(format: "%.0f dB", snapshot.averagePowerDBFS))
+                        .accessibilityLabel("Audio level in dBFS")
+                        .accessibilityValue(String(format: "%.0f dBFS", snapshot.averagePowerDBFS))
                 }
             }
         }

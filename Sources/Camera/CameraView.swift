@@ -42,6 +42,7 @@ struct CameraView: View {
     @AppStorage("zebraExposureWarning") private var zebraExposureWarning = false
     @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
+    @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
     @AppStorage("liveRecordingStats") private var liveStats = false
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("longevityMode") private var longevity = false
@@ -296,19 +297,19 @@ struct CameraView: View {
     @ViewBuilder
     private var proToolsOverlay: some View {
         if isShowingProTools && !isCleanPreview {
-            Color.black.opacity(0.001)
-                .ignoresSafeArea()
-                .onTapGesture { isShowingProTools = false }
-
             VStack {
                 Spacer()
                 HStack {
                     ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
+                        .allowsHitTesting(true)
                     Spacer()
                 }
             }
             .padding(.leading, 14)
             .padding(.bottom, 132)
+            // The old full-screen transparent dismiss layer intercepted preview focus and zoom.
+            // Dismissal is intentionally owned by the Pro Tools button, leaving the rest of the
+            // preview interactive while the popup is open.
             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
         }
     }
@@ -374,21 +375,7 @@ struct CameraView: View {
     @ViewBuilder
     private var bottomControls: some View {
         if isCleanPreview {
-            HStack {
-                Spacer()
-                ZStack {
-                    RecordButton(
-                        isRecording: camera.isRecording,
-                        isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning
-                    ) {
-                        shutterPressed()
-                    }
-                    recordingPauseControl
-                        .offset(x: 52)
-                }
-                Spacer()
-            }
-            .padding(.vertical, 14)
+            shutterRow
         } else {
             normalBottomControls
         }
@@ -411,25 +398,27 @@ struct CameraView: View {
                 .gesture(zoomGesture)
                 .allowsHitTesting(!(camera.isRecording && recordingLock))
 
-            HStack(spacing: 8) {
-                ForEach(Array(camera.zoomShortcutValues.enumerated()), id: \.offset) { item in
-                    let value = item.element
-                    Button {
-                        CameraHaptics.fire()
-                        camera.setZoomFactor(CGFloat(value))
-                    } label: {
-                        Text(cameraZoomLabel(value))
-                            .font(.caption2.weight(.bold).monospacedDigit())
-                            .foregroundStyle(abs(camera.zoomFactor - CGFloat(value)) < 0.05 ? accent.color : .white.opacity(0.78))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.34), in: Capsule())
+            if zoomButtonsEnabled {
+                HStack(spacing: 8) {
+                    ForEach(Array(camera.zoomShortcutValues.enumerated()), id: \.offset) { item in
+                        let value = item.element
+                        Button {
+                            CameraHaptics.fire()
+                            camera.setZoomFactor(CGFloat(value))
+                        } label: {
+                            Text(cameraZoomLabel(value))
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(abs(camera.zoomFactor - CGFloat(value)) < 0.05 ? accent.color : .white.opacity(0.78))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.34), in: Capsule())
+                        }
+                        .disabled(camera.isRecording && recordingLock)
+                        .accessibilityLabel("Set zoom \(cameraZoomLabel(value))")
                     }
-                    .disabled(camera.isRecording && recordingLock)
-                    .accessibilityLabel("Set zoom \(cameraZoomLabel(value))")
                 }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
 
             CaptureModeSelector(
                 selectedMode: camera.captureMode,
@@ -439,54 +428,89 @@ struct CameraView: View {
             )
                 .padding(.bottom, 8)
 
-            HStack {
-                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
-                    withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
-                }
-                Spacer()
-                ZStack {
-                    if camera.captureMode == .photo {
-                        PhotoButton(
-                            isCapturing: camera.isCapturingPhoto,
-                            onTap: {
-                                guard !editingStats else { return }
-                                shutterPressed()
-                            },
-                            onBurstStart: {
-                                guard !editingStats else { return }
-                                cancelCountdown()
-                                if camera.captureBurst() {
-                                    captureHaptic()
-                                }
-                            },
-                            onBurstEnd: {
-                                camera.stopBurst()
-                            }
-                        )
-                    } else if camera.isRecording && recordingLock {
-                        Image(systemName: "lock.fill")
-                            .font(.title2).foregroundStyle(accent.color)
-                            .frame(width: 76, height: 76)
-                            .background(.black.opacity(0.6), in: Circle())
-                            .overlay(Circle().stroke(.red, lineWidth: 3))
-                            .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
-                            .accessibilityLabel("Recording locked. Hold to stop")
-                            .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
-                    } else {
-                        RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning) {
-                            shutterPressed()
-                        }
-                    }
-                    recordingPauseControl
-                        .offset(x: 52)
-                }
-            Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
-                camera.switchCamera()
-            }
-            }
+            shutterRow
         }
         .padding(.bottom, 8)
+    }
+
+    /// One stable shutter row is used in both normal and Clean Preview modes. The side controls
+    /// occupy fixed 48-point slots and the pause control uses the left slot beside the centered
+    /// shutter while recording, so no offset or overlay can move the shutter when controls change.
+    private var shutterRow: some View {
+        HStack(spacing: 0) {
+            ZStack {
+                if camera.isRecording {
+                    recordingPauseControl
+                } else if !isCleanPreview {
+                    CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
+                        withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
+                    }
+                }
+            }
+            .frame(width: ShutterRowLayoutPolicy.sideSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+
+            Spacer(minLength: 0)
+
+            ZStack {
+                shutterContent
+            }
+            .frame(width: ShutterRowLayoutPolicy.shutterSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+
+            Spacer(minLength: 0)
+
+            ZStack {
+                if !camera.isRecording && !isCleanPreview {
+                    CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
+                        camera.switchCamera()
+                    }
+                }
+            }
+            .frame(width: ShutterRowLayoutPolicy.sideSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var shutterContent: some View {
+        if camera.captureMode == .photo {
+            PhotoButton(
+                isCapturing: camera.isCapturingPhoto,
+                onTap: {
+                    guard !editingStats else { return }
+                    shutterPressed()
+                },
+                onBurstStart: {
+                    guard !editingStats else { return }
+                    cancelCountdown()
+                    if camera.captureBurst() {
+                        captureHaptic()
+                    }
+                },
+                onBurstEnd: {
+                    camera.stopBurst()
+                }
+            )
+        } else if camera.isRecording && recordingLock {
+            Image(systemName: "lock.fill")
+                .font(.title2)
+                .foregroundStyle(accent.color)
+                .frame(width: 76, height: 76)
+                .background(.black.opacity(0.6), in: Circle())
+                .overlay(Circle().stroke(.red, lineWidth: 3))
+                .onLongPressGesture(minimumDuration: 1) {
+                    CameraHaptics.fire()
+                    camera.startOrStopRecording()
+                }
+                .accessibilityLabel("Recording locked. Hold to stop")
+                .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
+        } else {
+            RecordButton(
+                isRecording: camera.isRecording,
+                isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning
+            ) {
+                shutterPressed()
+            }
+        }
     }
 
     @ViewBuilder

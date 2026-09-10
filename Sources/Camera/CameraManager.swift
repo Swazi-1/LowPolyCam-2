@@ -261,7 +261,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var captureOrientation: CaptureOrientationPreference = .auto
     @Published private(set) var customWhiteBalanceTemperature = WhiteBalancePreferencePolicy.defaultTemperature
     @Published private(set) var customWhiteBalanceTint = 0.0
-    @Published private(set) var torchBrightnessLevel = 0.35
+    @Published private(set) var torchBrightnessLevel = TorchLevelPolicy.defaultNormalizedLevel
     @Published private(set) var torchBrightnessSupported = false
     @Published private(set) var videoCompressionMode: CompressionMode = .auto
     @Published private(set) var videoManualBitrateMbps = ManualBitratePolicy.defaultMbps
@@ -446,6 +446,16 @@ final class CameraManager: NSObject, ObservableObject {
     private let zoomSubmissionLock = NSLock()
     private var pendingZoomSubmission: ZoomSubmission?
     private var isZoomSubmissionScheduled = false
+    private let torchBrightnessSubmissionLock = NSLock()
+    private var pendingTorchBrightness: Double?
+    private var isTorchBrightnessSubmissionScheduled = false
+    private var torchBrightnessInteractionActive = false
+    private var torchBrightnessCoalescedCount = 0
+    private let customWhiteBalanceSubmissionLock = NSLock()
+    private var customWhiteBalanceSubmissionQueue = CustomWhiteBalanceSubmissionQueue()
+    private var isCustomWhiteBalanceSubmissionScheduled = false
+    private var customWhiteBalanceInteractionActive = false
+    private var customWhiteBalanceCoalescedCount = 0
     private var didLogRecordingLensClamp = false
     // Extreme diagnostics zoom interaction state; owned by sessionQueue.
     private var diagnosticZoomInteractionTraceID: String?
@@ -666,8 +676,8 @@ final class CameraManager: NSObject, ObservableObject {
             (defaults.object(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint) as? NSNumber)?.doubleValue
                 ?? 0
         )
-        let storedTorchBrightness = (defaults.object(forKey: LowPolyCamPreferences.Key.torchBrightness) as? NSNumber)?.doubleValue ?? 0.35
-        torchBrightnessLevel = min(max(storedTorchBrightness, 0.05), 1.0)
+        let storedTorchBrightness = (defaults.object(forKey: LowPolyCamPreferences.Key.torchBrightness) as? NSNumber)?.doubleValue ?? TorchLevelPolicy.defaultNormalizedLevel
+        torchBrightnessLevel = TorchLevelPolicy.validatedNormalized(storedTorchBrightness)
         requestedWhiteBalancePreset = WhiteBalancePreset(
             rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.whiteBalancePreset) ?? ""
         ) ?? .auto
@@ -1781,6 +1791,75 @@ final class CameraManager: NSObject, ObservableObject {
     /// Applies the requested torch state to whichever camera input is currently active.
     /// Mode changes can replace the AVCaptureDevice even though the user did not touch Flash,
     /// so this is also used immediately after a successful mode reconfiguration.
+    private struct TorchApplication {
+        let requestedNormalizedLevel: Double
+        let actualTorchLevel: Float
+        let torchAvailable: Bool
+        let deviceName: String
+        let isOn: Bool
+        let fallbackUsed: Bool
+    }
+
+    /// Must be called while `device` is locked for configuration. The Apple maximum-level
+    /// constant is a sentinel for the API, not a physical scalar, so it is intentionally never
+    /// read or multiplied here.
+    private func applyTorchConfigurationLocked(to device: AVCaptureDevice, enabled: Bool) -> TorchApplication {
+        let requested = TorchLevelPolicy.validatedNormalized(torchBrightnessLevel)
+        var fallbackUsed = false
+
+        if enabled {
+            guard device.isTorchAvailable else {
+                fallbackUsed = true
+                return TorchApplication(
+                    requestedNormalizedLevel: requested,
+                    actualTorchLevel: device.torchLevel,
+                    torchAvailable: false,
+                    deviceName: device.localizedName,
+                    isOn: false,
+                    fallbackUsed: fallbackUsed
+                )
+            }
+
+            do {
+                // Custom torch values are already normalized to the documented 0...1 range.
+                try device.setTorchModeOn(level: Float(requested))
+            } catch {
+                // Some devices/thermal states expose only on/off at this moment. Preserve the
+                // requested intent with the safe full-on fallback and make the fallback visible.
+                device.torchMode = .on
+                fallbackUsed = true
+                AppEventLog.event("TORCH LEVEL FALLBACK", category: .torch, level: .warning, fields: [
+                    "reason": "custom level rejected",
+                    "requestedNormalizedLevel": String(format: "%.3f", requested),
+                    "device": device.localizedName
+                ])
+            }
+        } else {
+            device.torchMode = .off
+        }
+
+        return TorchApplication(
+            requestedNormalizedLevel: requested,
+            actualTorchLevel: device.torchLevel,
+            torchAvailable: device.isTorchAvailable,
+            deviceName: device.localizedName,
+            isOn: device.torchMode == .on,
+            fallbackUsed: fallbackUsed
+        )
+    }
+
+    private func logTorchApplication(_ application: TorchApplication, reason: String) {
+        AppEventLog.event("TORCH LEVEL APPLIED", category: .torch, fields: [
+            "requestedNormalizedLevel": String(format: "%.3f", application.requestedNormalizedLevel),
+            "actualTorchLevel": String(format: "%.3f", application.actualTorchLevel),
+            "torchAvailable": String(application.torchAvailable),
+            "device": application.deviceName,
+            "fallbackUsed": String(application.fallbackUsed),
+            "isOn": String(application.isOn),
+            "reason": reason
+        ])
+    }
+
     private func setTorchEnabledOnCurrentDevice(_ enabled: Bool, showErrorOnFailure: Bool = false) {
         guard let device = videoInput?.device, device.hasTorch else {
             publish {
@@ -1798,53 +1877,47 @@ final class CameraManager: NSObject, ObservableObject {
                     if self.isTorchOn { self.isTorchOn = false }
                     if self.torchBrightnessSupported { self.torchBrightnessSupported = false }
                 }
+                logTorchApplication(
+                    TorchApplication(
+                        requestedNormalizedLevel: TorchLevelPolicy.validatedNormalized(torchBrightnessLevel),
+                        actualTorchLevel: device.torchLevel,
+                        torchAvailable: false,
+                        deviceName: device.localizedName,
+                        isOn: false,
+                        fallbackUsed: true
+                    ),
+                    reason: "temporarily unavailable"
+                )
                 if showErrorOnFailure { showError("Torch is temporarily unavailable.") }
                 return
             }
             try device.lockForConfiguration()
-            if enabled {
-                let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
-                let requestedTorchLevel = min(
-                    max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
-                    maximumTorchLevel
-                )
-                do {
-                    try device.setTorchModeOn(level: requestedTorchLevel)
-                } catch {
-                    // Some compatible torch implementations expose only on/off. Preserve the
-                    // normal tap behavior while recording the level fallback for diagnostics.
-                    device.torchMode = .on
-                    AppEventLog.event("Torch brightness level unavailable; fell back to full on",
-                                      category: .torch, fields: ["requestedLevel": String(format: "%.3f", torchBrightnessLevel)])
-                }
-            } else {
-                device.torchMode = .off
-            }
-            let actualState = device.torchMode == .on
-            let actualTorchLevel = device.torchLevel
-            let torchAvailable = device.isTorchAvailable
+            let application = applyTorchConfigurationLocked(to: device, enabled: enabled)
             device.unlockForConfiguration()
             publish {
-                if self.torchAvailable != torchAvailable {
-                    self.torchAvailable = torchAvailable
+                if self.torchAvailable != application.torchAvailable {
+                    self.torchAvailable = application.torchAvailable
                 }
-                if self.isTorchOn != actualState {
-                    self.isTorchOn = actualState
+                if self.isTorchOn != application.isOn {
+                    self.isTorchOn = application.isOn
                 }
                 let supportsIntensity = device.hasTorch && device.isTorchModeSupported(.on)
                 if self.torchBrightnessSupported != supportsIntensity {
                     self.torchBrightnessSupported = supportsIntensity
                 }
             }
-            AppEventLog.event("Torch applied: \(actualState ? "on" : "off") on \(device.localizedName)")
-            AppEventLog.event("TORCH BRIGHTNESS APPLIED", category: .torch, fields: [
-                "requestedLevel": String(format: "%.3f", torchBrightnessLevel),
-                "actualLevel": String(format: "%.3f", actualTorchLevel),
-                "maxAvailableLevel": String(format: "%.3f", AVCaptureDevice.maxAvailableTorchLevel),
-                "device": device.localizedName
-            ])
+            AppEventLog.event("Torch applied: \(application.isOn ? "on" : "off") on \(device.localizedName)")
+            logTorchApplication(application, reason: enabled ? "toggle or restore" : "disabled")
         } catch {
             synchronizeTorchState()
+            AppEventLog.event("TORCH LEVEL FALLBACK", category: .torch, level: .warning, fields: [
+                "reason": "configuration lock failed",
+                "requestedNormalizedLevel": String(format: "%.3f", TorchLevelPolicy.validatedNormalized(torchBrightnessLevel)),
+                "actualTorchLevel": String(format: "%.3f", device.torchLevel),
+                "torchAvailable": String(device.isTorchAvailable),
+                "device": device.localizedName,
+                "fallbackUsed": "true"
+            ])
             if showErrorOnFailure { showError("Couldn’t change the torch.") }
         }
     }
@@ -2902,9 +2975,20 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func setLiveMetricsConnectionEnabled(_ enabled: Bool) {
-        guard let connection = liveMetrics.output.connection(with: .video),
-              connection.isEnabled != enabled else { return }
-        connection.isEnabled = enabled
+        guard let connection = liveMetrics.output.connection(with: .video) else { return }
+        if enabled {
+            // Keep the optional preview-analysis stream in the same orientation/mirroring
+            // coordinate space as the camera preview. This does not touch the movie/photo
+            // outputs and therefore cannot change the protected rear 4K60 path.
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = cameraPosition == .front
+            }
+            applyCaptureRotation(to: connection)
+        }
+        if connection.isEnabled != enabled {
+            connection.isEnabled = enabled
+        }
     }
 
     private func stopLiveMetrics() {
@@ -4138,30 +4222,265 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func setCustomWhiteBalance(temperature: Double, tint: Double) {
+    func setCustomWhiteBalance(temperature: Double, tint: Double, isFinal: Bool = true) {
         let nextTemperature = WhiteBalancePreferencePolicy.validatedTemperature(temperature)
         let nextTint = WhiteBalancePreferencePolicy.validatedTint(tint)
         customWhiteBalanceTemperature = nextTemperature
         customWhiteBalanceTint = nextTint
-        let defaults = UserDefaults.standard
-        defaults.set(nextTemperature, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature)
-        defaults.set(nextTint, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint)
+
+        if isFinal {
+            persistCustomWhiteBalance(nextTemperature, tint: nextTint)
+        }
+
         guard requestedWhiteBalancePreset == .custom else { return }
-        selectWhiteBalancePreset(.custom)
+
+        customWhiteBalanceSubmissionLock.lock()
+        let replaced = customWhiteBalanceSubmissionQueue.pending != nil
+        if replaced { customWhiteBalanceCoalescedCount += 1 }
+        customWhiteBalanceSubmissionQueue.submit(
+            CustomWhiteBalanceSubmission(
+                temperature: nextTemperature,
+                tint: nextTint,
+                isFinal: isFinal
+            )
+        )
+        let shouldLogCoalesced = replaced &&
+            (customWhiteBalanceCoalescedCount == 1 || customWhiteBalanceCoalescedCount % 10 == 0)
+        let coalescedCount = customWhiteBalanceCoalescedCount
+        let shouldSchedule = !isCustomWhiteBalanceSubmissionScheduled
+        if shouldSchedule { isCustomWhiteBalanceSubmissionScheduled = true }
+        customWhiteBalanceSubmissionLock.unlock()
+
+        if shouldLogCoalesced {
+            AppEventLog.deepEvent("CUSTOM WB REQUEST COALESCED", category: .whiteBalance, fields: [
+                "pendingValue": String(format: "%.0fK/%+.0f", nextTemperature, nextTint),
+                "coalescedCount": String(coalescedCount)
+            ])
+        }
+
+        let delay: DispatchTimeInterval = isFinal ? .milliseconds(0) : .milliseconds(75)
+        if shouldSchedule {
+            sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.drainPendingCustomWhiteBalance()
+            }
+        } else if isFinal {
+            // A drag-end value must not wait behind the normal throttle window. The serial camera
+            // queue makes this safe even if the earlier delayed drain is still pending.
+            sessionQueue.async { [weak self] in
+                self?.drainPendingCustomWhiteBalance()
+            }
+        }
     }
 
-    func setTorchBrightness(_ level: Double) {
-        let validated = min(max(level.isFinite ? level : 0.35, 0.05), 1.0)
-        guard abs(torchBrightnessLevel - validated) > 0.000_001 else { return }
-        torchBrightnessLevel = validated
-        UserDefaults.standard.set(validated, forKey: LowPolyCamPreferences.Key.torchBrightness)
-        AppEventLog.event("TORCH BRIGHTNESS REQUEST", category: .torch, fields: [
-            "requestedLevel": String(format: "%.3f", validated),
-            "device": videoInput?.device.localizedName ?? "none"
+    private func persistCustomWhiteBalance(_ temperature: Double, tint: Double) {
+        let defaults = UserDefaults.standard
+        defaults.set(temperature, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTemperature)
+        defaults.set(tint, forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint)
+    }
+
+    func beginCustomWhiteBalanceInteraction() {
+        customWhiteBalanceSubmissionLock.lock()
+        let shouldLog = !customWhiteBalanceInteractionActive
+        customWhiteBalanceInteractionActive = true
+        customWhiteBalanceCoalescedCount = 0
+        customWhiteBalanceSubmissionLock.unlock()
+        guard shouldLog else { return }
+        AppEventLog.event("CUSTOM WB INTERACTION BEGIN", category: .whiteBalance, fields: [
+            "temperature": String(format: "%.0f", customWhiteBalanceTemperature),
+            "tint": String(format: "%+.0f", customWhiteBalanceTint)
+        ])
+    }
+
+    func endCustomWhiteBalanceInteraction() {
+        let finalTemperature = WhiteBalancePreferencePolicy.validatedTemperature(customWhiteBalanceTemperature)
+        let finalTint = WhiteBalancePreferencePolicy.validatedTint(customWhiteBalanceTint)
+        persistCustomWhiteBalance(finalTemperature, tint: finalTint)
+        customWhiteBalanceSubmissionLock.lock()
+        // Always enqueue the current published values at interaction end. The previous delayed
+        // worker may already have consumed the pending value, and the final value still needs an
+        // exact hardware apply in that case.
+        customWhiteBalanceSubmissionQueue.submit(
+            CustomWhiteBalanceSubmission(
+                temperature: finalTemperature,
+                tint: finalTint,
+                isFinal: true
+            )
+        )
+        customWhiteBalanceInteractionActive = false
+        isCustomWhiteBalanceSubmissionScheduled = true
+        let coalescedCount = customWhiteBalanceCoalescedCount
+        customWhiteBalanceSubmissionLock.unlock()
+        AppEventLog.event("CUSTOM WB INTERACTION END", category: .whiteBalance, fields: [
+            "temperature": String(format: "%.0f", finalTemperature),
+            "tint": String(format: "%+.0f", finalTint),
+            "coalescedCount": String(coalescedCount),
+            "finalApplyScheduled": "true"
         ])
         sessionQueue.async { [weak self] in
-            guard let self, self.isTorchOn else { return }
-            self.setTorchEnabledOnCurrentDevice(true)
+            self?.drainPendingCustomWhiteBalance()
+        }
+    }
+
+    private func drainPendingCustomWhiteBalance() {
+        customWhiteBalanceSubmissionLock.lock()
+        let submission = customWhiteBalanceSubmissionQueue.consumeLatest()
+        isCustomWhiteBalanceSubmissionScheduled = false
+        let coalescedCount = customWhiteBalanceCoalescedCount
+        customWhiteBalanceSubmissionLock.unlock()
+
+        guard let submission else { return }
+        guard requestedWhiteBalancePreset == .custom,
+              !movieOutput.isRecording,
+              !recordingState.requestsRecording,
+              !lensTransitionCoordinator.hasActiveTransition else {
+            AppEventLog.guardRejected("custom white balance hardware apply", reason: "camera busy or preset changed", fields: [
+                "isCustomPreset": String(requestedWhiteBalancePreset == .custom),
+                "movieRecording": String(movieOutput.isRecording),
+                "recordingRequested": String(recordingState.requestsRecording),
+                "lensTransition": String(lensTransitionCoordinator.hasActiveTransition)
+            ])
+            return
+        }
+
+        let requestID = whiteBalanceRequests.next(reason: "coalesced custom white balance")
+        let traceID = "WB-\(requestID)"
+        AppEventLog.deepEvent("CUSTOM WB HARDWARE APPLY", category: .whiteBalance, traceID: traceID, fields: [
+            "temperature": String(format: "%.0f", submission.temperature),
+            "tint": String(format: "%+.0f", submission.tint),
+            "isFinal": String(submission.isFinal),
+            "coalescedCount": String(coalescedCount)
+        ])
+        applyWhiteBalanceRequest(
+            .custom,
+            previousPreset: .custom,
+            requestID: requestID
+        )
+
+        customWhiteBalanceSubmissionLock.lock()
+        let needsAnotherDrain = customWhiteBalanceSubmissionQueue.pending != nil &&
+            !isCustomWhiteBalanceSubmissionScheduled
+        if needsAnotherDrain { isCustomWhiteBalanceSubmissionScheduled = true }
+        customWhiteBalanceSubmissionLock.unlock()
+        if needsAnotherDrain {
+            sessionQueue.async { [weak self] in
+                self?.drainPendingCustomWhiteBalance()
+            }
+        }
+    }
+
+    func beginTorchBrightnessInteraction() {
+        torchBrightnessSubmissionLock.lock()
+        let shouldLog = !torchBrightnessInteractionActive
+        torchBrightnessInteractionActive = true
+        torchBrightnessCoalescedCount = 0
+        torchBrightnessSubmissionLock.unlock()
+        guard shouldLog else { return }
+        AppEventLog.event("TORCH LEVEL INTERACTION BEGIN", category: .torch, fields: [
+            "requestedNormalizedLevel": String(format: "%.3f", TorchLevelPolicy.validatedNormalized(torchBrightnessLevel)),
+            "device": videoInput?.device.localizedName ?? "none"
+        ])
+    }
+
+    func endTorchBrightnessInteraction() {
+        let finalLevel = TorchLevelPolicy.validatedNormalized(torchBrightnessLevel)
+        UserDefaults.standard.set(finalLevel, forKey: LowPolyCamPreferences.Key.torchBrightness)
+        torchBrightnessSubmissionLock.lock()
+        // Always enqueue the current published value at interaction end. A delayed worker can have
+        // consumed the previous pending value before the slider sends its editing-ended callback.
+        pendingTorchBrightness = finalLevel
+        isTorchBrightnessSubmissionScheduled = true
+        torchBrightnessInteractionActive = false
+        let coalescedCount = torchBrightnessCoalescedCount
+        torchBrightnessSubmissionLock.unlock()
+        AppEventLog.event("TORCH LEVEL INTERACTION END", category: .torch, fields: [
+            "requestedNormalizedLevel": String(format: "%.3f", finalLevel),
+            "coalescedCount": String(coalescedCount),
+            "finalApplyScheduled": "true"
+        ])
+        sessionQueue.async { [weak self] in
+            self?.drainPendingTorchBrightness()
+        }
+    }
+
+    func setTorchBrightness(_ level: Double, isFinal: Bool = true) {
+        let validated = TorchLevelPolicy.validatedNormalized(level)
+        let changed = abs(torchBrightnessLevel - validated) > 0.000_001
+        guard changed || isFinal else { return }
+        if changed { torchBrightnessLevel = validated }
+        if isFinal {
+            UserDefaults.standard.set(validated, forKey: LowPolyCamPreferences.Key.torchBrightness)
+        }
+
+        torchBrightnessSubmissionLock.lock()
+        let replaced = pendingTorchBrightness != nil
+        if replaced { torchBrightnessCoalescedCount += 1 }
+        pendingTorchBrightness = validated
+        let shouldLogCoalesced = replaced &&
+            (torchBrightnessCoalescedCount == 1 || torchBrightnessCoalescedCount % 10 == 0)
+        let coalescedCount = torchBrightnessCoalescedCount
+        let isInteracting = torchBrightnessInteractionActive
+        let shouldSchedule = !isTorchBrightnessSubmissionScheduled
+        if shouldSchedule { isTorchBrightnessSubmissionScheduled = true }
+        torchBrightnessSubmissionLock.unlock()
+
+        if isFinal || !isInteracting {
+            AppEventLog.event("TORCH LEVEL REQUEST", category: .torch, fields: [
+                "requestedNormalizedLevel": String(format: "%.3f", validated),
+                "device": videoInput?.device.localizedName ?? "none",
+                "isFinal": String(isFinal)
+            ])
+        } else if shouldLogCoalesced {
+            AppEventLog.deepEvent("TORCH LEVEL REQUEST COALESCED", category: .torch, fields: [
+                "requestedNormalizedLevel": String(format: "%.3f", validated),
+                "coalescedCount": String(coalescedCount)
+            ])
+        }
+
+        let delay: DispatchTimeInterval = isFinal ? .milliseconds(0) : .milliseconds(75)
+        if shouldSchedule {
+            sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.drainPendingTorchBrightness()
+            }
+        } else if isFinal {
+            sessionQueue.async { [weak self] in
+                self?.drainPendingTorchBrightness()
+            }
+        }
+    }
+
+    private func drainPendingTorchBrightness() {
+        torchBrightnessSubmissionLock.lock()
+        let pending = pendingTorchBrightness
+        pendingTorchBrightness = nil
+        isTorchBrightnessSubmissionScheduled = false
+        torchBrightnessSubmissionLock.unlock()
+
+        guard pending != nil,
+              let device = videoInput?.device,
+              device.hasTorch,
+              device.torchMode == .on else { return }
+        do {
+            try device.lockForConfiguration()
+            let application = applyTorchConfigurationLocked(to: device, enabled: true)
+            device.unlockForConfiguration()
+            publish {
+                self.torchAvailable = application.torchAvailable
+                self.isTorchOn = application.isOn
+                self.torchBrightnessSupported = device.isTorchModeSupported(.on)
+            }
+            logTorchApplication(application, reason: "brightness slider")
+        } catch {
+            AppEventLog.log(error: error, prefix: "TORCH LEVEL APPLY FAILED", category: .torch)
+        }
+
+        torchBrightnessSubmissionLock.lock()
+        let shouldDrainAgain = pendingTorchBrightness != nil && !isTorchBrightnessSubmissionScheduled
+        if shouldDrainAgain { isTorchBrightnessSubmissionScheduled = true }
+        torchBrightnessSubmissionLock.unlock()
+        if shouldDrainAgain {
+            sessionQueue.async { [weak self] in
+                self?.drainPendingTorchBrightness()
+            }
         }
     }
 
@@ -4225,7 +4544,10 @@ final class CameraManager: NSObject, ObservableObject {
         ])
         setExposureBias(0)
         setZoomFactor(1)
-        selectWhiteBalancePreset(.auto)
+        setCustomWhiteBalance(
+            temperature: WhiteBalancePreferencePolicy.defaultTemperature,
+            tint: 0
+        )
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.resetFocusAndExposureState()
@@ -4915,21 +5237,15 @@ final class CameraManager: NSObject, ObservableObject {
                     AppEventLog.event("Torch could not be restored after camera input switch: unavailable on \(device.localizedName)")
                     return
                 }
-                do {
-                    let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
-                    let requestedTorchLevel = min(
-                        max(Float(self.torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
-                        maximumTorchLevel
-                    )
-                    try device.setTorchModeOn(level: requestedTorchLevel)
-                } catch {
-                    device.torchMode = .on
-                }
+                let application = self.applyTorchConfigurationLocked(to: device, enabled: true)
                 AppEventLog.event("Torch restored after camera input switch on \(device.localizedName)", category: .torch, fields: [
-                    "requestedLevel": String(format: "%.3f", self.torchBrightnessLevel),
-                    "actualLevel": String(format: "%.3f", device.torchLevel),
-                    "device": device.localizedName
+                    "requestedNormalizedLevel": String(format: "%.3f", application.requestedNormalizedLevel),
+                    "actualTorchLevel": String(format: "%.3f", application.actualTorchLevel),
+                    "torchAvailable": String(application.torchAvailable),
+                    "device": application.deviceName,
+                    "fallbackUsed": String(application.fallbackUsed)
                 ])
+                self.logTorchApplication(application, reason: "camera input switch restore")
             } catch {
                 AppEventLog.event("Torch could not be restored after camera input switch: \(error.localizedDescription)")
             }
@@ -5059,16 +5375,8 @@ final class CameraManager: NSObject, ObservableObject {
                 desiredDevice.videoZoomFactor = deviceZoomFactor(for: displayedZoom, device: desiredDevice)
                 if shouldPreserveTorch, !isSwitchingInput,
                    desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
-                    do {
-                        let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
-                        let requestedTorchLevel = min(
-                            max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
-                            maximumTorchLevel
-                        )
-                        try desiredDevice.setTorchModeOn(level: requestedTorchLevel)
-                    } catch {
-                        desiredDevice.torchMode = .on
-                    }
+                    let application = applyTorchConfigurationLocked(to: desiredDevice, enabled: true)
+                    logTorchApplication(application, reason: "capture configuration transaction")
                 }
             }
 

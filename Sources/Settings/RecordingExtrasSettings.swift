@@ -104,9 +104,15 @@ struct LiveStatsSettings: View {
             }
 
             Section {
-                Toggle("Capture FPS", isOn: $showFPS)
-                Toggle("File Bitrate", isOn: $showBitrate)
-                Toggle("Capture Drops", isOn: $showDrops)
+                HapticFreeSettingsToggle(isOn: $showFPS) {
+                    Text("Capture FPS")
+                }
+                HapticFreeSettingsToggle(isOn: $showBitrate) {
+                    Text("File Bitrate")
+                }
+                HapticFreeSettingsToggle(isOn: $showDrops) {
+                    Text("Capture Drops")
+                }
             } header: {
                 Text("INFORMATION")
             } footer: {

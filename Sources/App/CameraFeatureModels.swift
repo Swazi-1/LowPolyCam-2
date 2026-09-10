@@ -14,6 +14,12 @@ enum AudioLevelMeterMode: String, CaseIterable, Codable, Identifiable {
     case decibels = "dB"
 
     var id: String { rawValue }
+
+    /// Keep the historical stored value (`dB`) so existing installs migrate safely, while the
+    /// user-facing name accurately describes the normalized digital audio measurement.
+    var displayName: String {
+        self == .decibels ? "dBFS" : rawValue
+    }
 }
 
 enum CaptureOrientationPreference: String, CaseIterable, Codable, Identifiable {
@@ -157,6 +163,71 @@ enum WhiteBalancePreferencePolicy {
     static func validatedTint(_ value: Double) -> Double {
         let candidate = value.isFinite ? value : 0
         return min(max(candidate, minimumTint), maximumTint)
+    }
+}
+
+/// Normalized torch intensity policy. Apple's maximum torch-level value is a sentinel intended to
+/// be passed directly to the API; it is not a physical multiplier. All
+/// user-controlled intensity values therefore stay in the documented normalized 0...1 domain.
+enum TorchLevelPolicy {
+    static let minimumNormalizedLevel = 0.05
+    static let maximumNormalizedLevel = 1.0
+    static let defaultNormalizedLevel = 0.35
+
+    static func validatedNormalized(_ value: Double, fallback: Double = defaultNormalizedLevel) -> Double {
+        let safeFallback = fallback.isFinite ? fallback : defaultNormalizedLevel
+        let candidate = value.isFinite ? value : safeFallback
+        return min(max(candidate, minimumNormalizedLevel), maximumNormalizedLevel)
+    }
+}
+
+struct CustomWhiteBalanceSubmission: Equatable {
+    let temperature: Double
+    let tint: Double
+    let isFinal: Bool
+}
+
+/// Latest-value semantics used by the UI slider coalescer. The camera queue consumes one value,
+/// so stale intermediate slider positions never become a hardware request.
+struct CustomWhiteBalanceSubmissionQueue: Equatable {
+    private(set) var pending: CustomWhiteBalanceSubmission?
+
+    mutating func submit(_ value: CustomWhiteBalanceSubmission) {
+        pending = value
+    }
+
+    mutating func consumeLatest() -> CustomWhiteBalanceSubmission? {
+        defer { pending = nil }
+        return pending
+    }
+}
+
+enum AudioLevelMeterPolicy {
+    static let minimumDBFS = -60.0
+    static let clippingDBFS = -1.0
+    static let defaultBarCount = 4
+
+    static func barCount(
+        forAveragePowerDBFS value: Double,
+        barCount: Int = defaultBarCount
+    ) -> Int {
+        let count = max(barCount, 0)
+        guard count > 0 else { return 0 }
+        let safeValue = value.isFinite ? value : minimumDBFS
+        let normalized = min(max((safeValue + 48.0) / 48.0, 0), 1)
+        return min(count, max(0, Int((normalized * Double(count)).rounded(.up))))
+    }
+}
+
+/// Fixed-slot contract shared by normal and Clean Preview shutter rows. The SwiftUI view keeps
+/// the shutter in the center slot and swaps only the side-slot content as camera state changes.
+enum ShutterRowLayoutPolicy {
+    static let sideSlotWidth: CGFloat = 48
+    static let shutterSlotWidth: CGFloat = 76
+    static let rowHeight: CGFloat = 80
+
+    static func shutterCenterX(in containerWidth: CGFloat) -> CGFloat {
+        max(containerWidth, 0) / 2
     }
 }
 
