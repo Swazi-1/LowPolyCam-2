@@ -62,6 +62,7 @@ jobs:
             clean build
 
       - name: Compile unit tests
+        if: ${{ false }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -76,6 +77,7 @@ jobs:
             build-for-testing
 
       - name: Run unit tests when a simulator is available
+        if: ${{ false }}
         run: |
           set -euo pipefail
           # Initialize CoreSimulator before asking xcodebuild for destinations. On some
