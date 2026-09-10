@@ -42,7 +42,10 @@ enum MediaValidator {
             )
         }
 
-        let formatDescription = track.formatDescriptions.compactMap { $0 as? CMFormatDescription }.first
+        // AVAssetTrack exposes format descriptions as Any, but each video description is
+        // guaranteed to be a CMFormatDescription. A conditional cast triggers Swift 6's
+        // "always succeeds" diagnostic for this CoreFoundation type.
+        let formatDescription = track.formatDescriptions.first.map { $0 as! CMFormatDescription }
         let dimensions = formatDescription.map(CMVideoFormatDescriptionGetDimensions)
         guard let dimensions, dimensions.width > 0, dimensions.height > 0 else {
             return MediaValidationResult(

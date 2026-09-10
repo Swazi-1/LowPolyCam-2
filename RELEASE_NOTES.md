@@ -14,6 +14,7 @@ This archive is the v5.0.11 beta source with the v5 release-closure pass applied
 - Unit-test target plus CI build, test, plist, bundle, arm64, IPA, and checksum checks.
 - Motion usage description required by the horizon level meter.
 - Native launch-screen background asset and dead declaration cleanup.
+- Xcode 26/Swift 6 CoreMedia format-description cast fix.
 
 ## Version
 
