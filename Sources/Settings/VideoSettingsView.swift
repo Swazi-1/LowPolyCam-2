@@ -373,7 +373,7 @@ struct VideoSettingsView: View {
             .init("Tap Focus Reset", "Settings › Preferences", "tap focus reset auto focus exposure continuous 1 3 5 seconds never", "scope", .orange, .preferences),
             .init("Lock Recording Controls", "Settings › Preferences", "lock recording controls safeguard", "lock.fill", .blue, .preferences),
             .init("Low Storage Warning", "Settings › Preferences", "low storage warning 1 gb", "externaldrive.fill.badge.checkmark", .blue, .preferences),
-            .init("Haptic Capture", "Settings › Preferences", "haptic feedback shutter vibration", "waveform.path.ecg", .orange, .preferences),
+            .init("Haptics", "Settings › Preferences", "app haptics haptic feedback vibration buttons controls shutter capture countdown", "waveform.path.ecg", .orange, .preferences),
             .init("Haptic Strength", "Settings › Preferences", "haptic low medium strong feedback strength", "waveform.path.ecg", .orange, .preferences),
             .init("Countdown Haptics", "Settings › Preferences", "timer countdown haptic feedback vibration", "timer", .orange, .preferences),
             .init("Mirror Saved Selfies", "Settings › Preferences", "mirror saved selfie front camera", "camera.metering.center.weighted", .gray, .preferences),

@@ -536,6 +536,10 @@ final class CameraManager: NSObject, ObservableObject {
     private var inFlightVideoSaves: Set<URL> = []
     private var backgroundSaveTask: UIBackgroundTaskIdentifier = .invalid
     private var awaitingMicrophonePermission = false
+    // iOS can deliver an inactive/active lifecycle bounce around the system microphone
+    // permission sheet. Keep that transient bounce from cancelling the very recording
+    // request that caused the permission prompt. Backgrounding is never suppressed.
+    private var microphonePermissionPromptLifecyclePending = false
     private var storageProtectionStopIssued = false
     private var storageWarningEpisodeActive = false
     private var activeCriticalStorageReserveBytes = StorageGuard.minimumCriticalReserveBytes
@@ -1218,6 +1222,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = recordingStartRequests.next()
         _ = microphonePermissionRequests.next()
         awaitingMicrophonePermission = false
+        microphonePermissionPromptLifecyclePending = false
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         stopLiveMetrics()
@@ -1245,6 +1250,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = recordingStartRequests.next()
         _ = microphonePermissionRequests.next()
         awaitingMicrophonePermission = false
+        microphonePermissionPromptLifecyclePending = false
         let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue ?? -1
         AppEventLog.event("SESSION INTERRUPTED: reason=\(reason), running=\(session.isRunning), recording=\(movieOutput.isRecording), requestedRecording=\(recordingState.requestsRecording)")
         invalidatePendingVideoConfiguration()
@@ -1380,6 +1386,7 @@ final class CameraManager: NSObject, ObservableObject {
         _ = recordingStartRequests.next()
         _ = microphonePermissionRequests.next()
         awaitingMicrophonePermission = false
+        microphonePermissionPromptLifecyclePending = false
         segmentTimer?.cancel()
         storageGuard.stopMonitoring()
         AppEventLog.event(
@@ -1476,6 +1483,7 @@ final class CameraManager: NSObject, ObservableObject {
             _ = self.recordingStartRequests.next()
             _ = self.microphonePermissionRequests.next()
             self.awaitingMicrophonePermission = false
+            self.microphonePermissionPromptLifecyclePending = false
             self.storageGuard.stopMonitoring()
             self.invalidatePendingVideoConfiguration()
             _ = self.qualityRequests.next()
@@ -1504,6 +1512,19 @@ final class CameraManager: NSObject, ObservableObject {
         let requestedPhase: AppLifecyclePhase = isBackground ? .background : .inactive
         sessionQueue.async { [weak self] in
             guard let self else { return }
+
+            // The system microphone permission UI can emit a short .inactive transition even
+            // after requestAccess has completed. Treat only that one permission-sheet bounce as
+            // transient so a just-started first recording is not discarded. A real background
+            // transition still performs the full cleanup below.
+            if requestedPhase == .inactive && self.microphonePermissionPromptLifecyclePending {
+                AppEventLog.event("App lifecycle inactive ignored during microphone permission prompt")
+                return
+            }
+            if requestedPhase == .background {
+                self.microphonePermissionPromptLifecyclePending = false
+            }
+
             guard self.appLifecyclePhase != requestedPhase else {
                 AppEventLog.event("App lifecycle ignored: \(requestedPhase.rawValue) already handled")
                 return
@@ -1515,6 +1536,7 @@ final class CameraManager: NSObject, ObservableObject {
             _ = self.recordingStartRequests.next()
             _ = self.microphonePermissionRequests.next()
             self.awaitingMicrophonePermission = false
+            self.microphonePermissionPromptLifecyclePending = false
             self.storageGuard.stopMonitoring()
             // ACTIVE -> INACTIVE/BACKGROUND owns the cleanup. INACTIVE -> BACKGROUND is a
             // distinct lifecycle transition, but has no additional camera work today.
@@ -1558,6 +1580,10 @@ final class CameraManager: NSObject, ObservableObject {
     func appDidBecomeActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            if self.microphonePermissionPromptLifecyclePending {
+                self.microphonePermissionPromptLifecyclePending = false
+                AppEventLog.event("Microphone permission lifecycle bounce completed")
+            }
             guard self.appLifecyclePhase != .active else {
                 AppEventLog.event("App lifecycle ignored: active already handled")
                 return
@@ -3458,6 +3484,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         if authorization == .notDetermined {
             awaitingMicrophonePermission = true
+            microphonePermissionPromptLifecyclePending = true
             publishAudioStatus()
             AppEventLog.event("Microphone permission requested lazily before recording")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
@@ -3496,6 +3523,22 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         awaitingMicrophonePermission = false
+
+        // Keep the lifecycle suppression armed briefly after the permission callback because
+        // iOS may enqueue the permission sheet's .inactive notification after this callback.
+        // If no lifecycle bounce arrives, expire the guard so an unrelated later inactive event
+        // is never suppressed.
+        let permissionLifecycleRequestID = requestID
+        sessionQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self,
+                  self.microphonePermissionPromptLifecyclePending,
+                  self.microphonePermissionRequests.isLatest(permissionLifecycleRequestID) else { return }
+            self.microphonePermissionPromptLifecyclePending = false
+            AppEventLog.deepEvent("MICROPHONE PERMISSION LIFECYCLE GUARD EXPIRED", category: .audio, fields: [
+                "requestID": String(permissionLifecycleRequestID)
+            ])
+        }
+
         let attached = granted && attachAudioInputIfAuthorized()
         publishAudioStatus()
         AppEventLog.event("Microphone permission result: granted=\(granted), audioInputAttached=\(attached)")
@@ -3529,6 +3572,7 @@ final class CameraManager: NSObject, ObservableObject {
                 _ = self.recordingStartRequests.next(reason: "user requested recording stop")
                 _ = self.microphonePermissionRequests.next(reason: "recording stop invalidates microphone request")
                 self.awaitingMicrophonePermission = false
+                self.microphonePermissionPromptLifecyclePending = false
                 self.storageGuard.stopMonitoring()
                 self.stopLiveMetrics()
                 self.segmentTimer?.cancel()

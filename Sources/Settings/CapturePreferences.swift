@@ -44,14 +44,23 @@ enum CameraHaptics {
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
 
-    static func fire(strength selectedStrength: String? = nil, captureOnly: Bool = false) {
+    private static var isEnabled: Bool {
+        let stored = UserDefaults.standard.object(forKey: "hapticCaptureEnabled")
+        return (stored as? Bool) ?? true
+    }
+
+    /// Master entry point for every app-generated haptic. Keeping the preference check here
+    /// guarantees controls, capture, countdown, and future haptics all respect the same switch.
+    static func fire(strength selectedStrength: String? = nil) {
+        guard isEnabled else { return }
         let defaults = UserDefaults.standard
-        if captureOnly, !(defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true) { return }
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
         try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
         generator.prepare()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            // The user can disable haptics while this short prepared-feedback delay is pending.
+            guard isEnabled else { return }
             generator.impactOccurred(intensity: strength == "Low" ? 0.45 : strength == "Strong" ? 1 : 0.7)
         }
     }
@@ -145,8 +154,8 @@ struct CapturePreferencesView: View {
                     SettingsToggleLabel(
                         symbol: "waveform.path.ecg",
                         color: .orange,
-                        title: "Haptic Capture",
-                        subtitle: "Feel feedback when the shutter starts or stops."
+                        title: "Haptics",
+                        subtitle: "Enable haptic feedback throughout LowPolyCam."
                     )
                 }
 
@@ -170,6 +179,7 @@ struct CapturePreferencesView: View {
                         subtitle: "Add feedback during the photo timer countdown."
                     )
                 }
+                .disabled(!hapticCaptureEnabled)
             }
 
             Section("CAMERA") {

@@ -226,6 +226,7 @@ enum AppEventLog {
         ("photoFlashMode", "Auto"), ("photoAspect", "4:3"), ("burstCount", "10"),
         ("shutterDelay", "0"), ("hapticCaptureEnabled", "true"), ("hapticStrength", "Medium"),
         ("countdownHaptics", "false"), ("zoomSpeed", "1.0"), ("tapZoomReset", "true"),
+        ("focusExposureLockMode", "AE/AF"), ("tapFocusResetSeconds", "1"),
         ("recordingLock", "false"), ("lowStorageWarning", "true"),
         ("rememberCaptureMode", "false"), ("lastCaptureMode", "VIDEO"), ("lastCameraPosition", "back"),
         ("mirrorSelfies", "false"), ("centerCrosshair", "false"), ("cameraGridEnabled", "false"),

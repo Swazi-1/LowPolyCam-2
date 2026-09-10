@@ -20,7 +20,7 @@ struct CameraView: View {
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
     @AppStorage("appColorScheme") private var appColorScheme = "dark"
-    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
+    @AppStorage("hapticCaptureEnabled") private var isHapticsEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
@@ -375,7 +375,7 @@ struct CameraView: View {
                         .frame(width: 76, height: 76)
                         .background(.black.opacity(0.6), in: Circle())
                         .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(captureOnly: true); camera.startOrStopRecording() }
+                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(); camera.startOrStopRecording() }
                         .accessibilityLabel("Recording locked. Hold to stop")
                         .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
                 } else {
@@ -444,9 +444,9 @@ struct CameraView: View {
     }
 
     private func captureHaptic() {
-        guard isHapticCaptureEnabled else { return }
-        AppEventLog.event("Capture haptic requested")
-        CameraHaptics.fire(captureOnly: true)
+        guard isHapticsEnabled else { return }
+        AppEventLog.event("App haptic requested: capture")
+        CameraHaptics.fire()
     }
 
     private var hudWhiteBalanceLabel: String {

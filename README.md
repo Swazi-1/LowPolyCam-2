@@ -68,7 +68,7 @@ LowPolyCam is designed to stay responsive while avoiding unnecessary camera work
 **Focus / Exposure Lock** — Lock AF and AE directly from the viewfinder.<br>
 **Horizon Level** — Gyroscope-based level indicator.<br>
 **Tap Focus** — Quickly focus and expose anywhere in the preview.<br>
-**Haptic Feedback** — Adjustable capture haptics.
+**Haptic Feedback** — App-wide haptics with adjustable strength and optional countdown feedback.
 
 ---
 
@@ -171,7 +171,7 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 * Shutter timer
 * Zoom speed and tap-to-reset
 * Recording safeguards
-* Haptic capture and countdown feedback
+* App-wide haptic feedback with adjustable strength and optional countdown feedback
 * Selfie mirroring and exposure/white-balance reset
 
 ### Camera HUD
