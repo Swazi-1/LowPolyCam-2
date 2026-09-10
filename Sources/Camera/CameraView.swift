@@ -360,8 +360,9 @@ struct CameraView: View {
                         onBurstStart: {
                             guard !editingStats else { return }
                             cancelCountdown()
-                            captureHaptic()
-                            camera.captureBurst()
+                            if camera.captureBurst() {
+                                captureHaptic()
+                            }
                         },
                         onBurstEnd: {
                             camera.stopBurst()
@@ -487,8 +488,14 @@ struct CameraView: View {
             }
             guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else { return }
             AppEventLog.event("Shutter executing: mode=\(mode.rawValue)")
-            captureHaptic()
-            if mode == .photo { camera.capturePhoto() } else { camera.startOrStopRecording() }
+            if mode == .photo {
+                if camera.capturePhoto() {
+                    captureHaptic()
+                }
+            } else {
+                captureHaptic()
+                camera.startOrStopRecording()
+            }
             shutterTask = nil
         }
     }

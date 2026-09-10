@@ -101,6 +101,38 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         ])
     }
 
+    /// Moves an active probe to the device that actually owns the capture stream after a
+    /// physical lens handoff. Reset the frame-to-frame baselines because the old and new
+    /// devices are separate sensors; otherwise the first callback after the swap can be
+    /// compared with stale zoom/luma state and reported as a flicker.
+    func retargetZoomTransitionProbe(
+        traceID: String,
+        device: AVCaptureDevice,
+        expectedDeviceZoom: CGFloat,
+        expectedDisplayedZoom: CGFloat,
+        hudZoom: String,
+        reason: String
+    ) {
+        guard AppEventLog.extremeDiagnosticsEnabled else { return }
+        lock.lock()
+        guard probeTraceID == traceID else { lock.unlock(); return }
+        probeDevice = device
+        probeExpectedDeviceZoom = expectedDeviceZoom
+        probeExpectedDisplayedZoom = expectedDisplayedZoom
+        probeHUDZoom = hudZoom
+        probeUntilUptime = max(probeUntilUptime, ProcessInfo.processInfo.systemUptime + 0.6)
+        probeLastActualZoom = nil
+        probeLastLuma = nil
+        lock.unlock()
+        AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE RETARGETED", category: .zoom, traceID: traceID, fields: [
+            "reason": reason,
+            "device": device.localizedName,
+            "expectedDeviceZoom": String(format: "%.3f", Double(expectedDeviceZoom)),
+            "expectedDisplayedZoom": String(format: "%.3f", Double(expectedDisplayedZoom)),
+            "hudZoom": hudZoom
+        ])
+    }
+
     func endZoomTransitionProbe(traceID: String, reason: String) {
         lock.lock()
         guard probeTraceID == traceID else { lock.unlock(); return }

@@ -1557,6 +1557,10 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.didLogRecordingLensClamp = false
+            if let previousTrace = self.diagnosticZoomInteractionTraceID,
+               self.diagnosticZoomProbeStarted {
+                self.liveMetrics.endZoomTransitionProbe(traceID: previousTrace, reason: "zoom interaction superseded")
+            }
             self.diagnosticZoomInteractionTraceID = trace
             self.diagnosticZoomProbeStarted = false
             AppEventLog.deepEvent("ZOOM GESTURE BEGIN", category: .zoom, traceID: trace, fields: [
@@ -1741,13 +1745,28 @@ final class CameraManager: NSObject, ObservableObject {
                 let wantsDifferentLens = desiredPhysical?.uniqueID != currentDevice.uniqueID
 
                 if wantsDifferentLens {
-                    self.beginExtremeZoomTransitionProbeIfPossible(
-                        device: currentDevice,
-                        targetDisplayedZoom: requested,
-                        requestTraceID: requestTraceID,
-                        reason: "physical lens handoff"
-                    )
                     let recordingOrStarting = self.movieOutput.isRecording || self.recordingState.requestsRecording || self.isRecordingStarting
+                    if recordingOrStarting {
+                        // Recording keeps the physical input fixed. There is no physical
+                        // handoff to probe here, and the optional video-data diagnostics
+                        // output is intentionally disabled for protected capture paths.
+                        AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE SKIPPED WHILE RECORDING",
+                                              category: .zoom,
+                                              traceID: diagnosticZoomInteractionTraceID ?? requestTraceID,
+                                              fields: [
+                                                "reason": "recording keeps the current physical lens; zoom is digital only",
+                                                "mode": self.captureMode.rawValue,
+                                                "device": currentDevice.localizedName,
+                                                "requestedDisplayedZoom": String(format: "%.3f", Double(requested))
+                                              ])
+                    } else {
+                        self.beginExtremeZoomTransitionProbeIfPossible(
+                            device: currentDevice,
+                            targetDisplayedZoom: requested,
+                            requestTraceID: requestTraceID,
+                            reason: "physical lens handoff"
+                        )
+                    }
                     if recordingOrStarting && self.captureMode != .video {
                         // HFR recording must keep its physical input for the whole file. Do not
                         // reject the zoom gesture when it crosses the optical boundary; keep the
@@ -2018,6 +2037,18 @@ final class CameraManager: NSObject, ObservableObject {
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
         logCaptureConfiguration("Lens handoff")
+
+        if let interactionTrace = diagnosticZoomInteractionTraceID,
+           diagnosticZoomProbeStarted {
+            liveMetrics.retargetZoomTransitionProbe(
+                traceID: interactionTrace,
+                device: prepared.device,
+                expectedDeviceZoom: prepared.device.videoZoomFactor,
+                expectedDisplayedZoom: displayed,
+                hudZoom: formattedZoomLabel(for: displayed),
+                reason: "physical lens handoff committed"
+            )
+        }
 
         // applyAtomicCaptureConfiguration has already validated the input replacement, locked the
         // target device, applied the requested format/FPS/zoom, and successfully committed the
@@ -2550,7 +2581,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func captureBurst() {
+    @discardableResult
+    func captureBurst() -> Bool {
         guard captureMode == .photo, !isCapturingPhoto, !isRecordingStarting, !isFinalizingRecording else {
             AppEventLog.guardRejected("captureBurst", reason: "camera busy or not in Photo mode", fields: [
                 "mode": captureMode.rawValue,
@@ -2558,7 +2590,7 @@ final class CameraManager: NSObject, ObservableObject {
                 "recordingStarting": String(isRecordingStarting),
                 "finalizing": String(isFinalizingRecording)
             ])
-            return
+            return false
         }
         let savedCount = UserDefaults.standard.integer(forKey: "burstCount")
         let count = Self.photoBurstCountOptions.contains(savedCount) ? savedCount : Self.defaultPhotoBurstCount
@@ -2582,6 +2614,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.refreshAvailableStorage()
             self.beginPhotoCapture()
         }
+        return true
     }
 
     func stopBurst() {
@@ -2593,7 +2626,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func capturePhoto() {
+    @discardableResult
+    func capturePhoto() -> Bool {
         guard captureMode == .photo, !isRecording, !isRecordingStarting, !isFinalizingRecording, !isCapturingPhoto else {
             AppEventLog.guardRejected("capturePhoto", reason: "camera busy or not in Photo mode", fields: [
                 "mode": captureMode.rawValue,
@@ -2602,7 +2636,7 @@ final class CameraManager: NSObject, ObservableObject {
                 "finalizing": String(isFinalizingRecording),
                 "capturingPhoto": String(isCapturingPhoto)
             ])
-            return
+            return false
         }
         isCapturingPhoto = true
         sessionQueue.async { [weak self] in
@@ -2613,6 +2647,7 @@ final class CameraManager: NSObject, ObservableObject {
             self.burstStopRequested = false
             self.beginPhotoCapture()
         }
+        return true
     }
 
     func focusAndExpose(at point: CGPoint) {
