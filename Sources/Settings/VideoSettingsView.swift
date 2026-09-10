@@ -262,13 +262,64 @@ struct VideoSettingsView: View {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
         return Self.searchEntries
-            .filter { $0.matches(query) }
+            .filter { $0.matches(query) && isSearchEntryAvailable($0) }
             .sorted {
                 let left = $0.score(for: query)
                 let right = $1.score(for: query)
                 if left == right { return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
                 return left > right
             }
+    }
+
+    private func isSearchEntryAvailable(_ entry: SettingsSearchEntry) -> Bool {
+        switch entry.destination {
+        case .recordVideo:
+            guard camera.capabilitySnapshot.isReady else { return true }
+            let title = entry.title.lowercased()
+            let resolution: VideoResolution? = title.contains("4k")
+                ? .p4k
+                : title.contains("1080") ? .p1080
+                : title.contains("720") ? .p720
+                : nil
+            let frameRate: VideoFrameRate? = title.contains("60 fps")
+                ? .fps60
+                : title.contains("30 fps") ? .fps30
+                : title.contains("24 fps") ? .fps24
+                : nil
+            if let resolution, let frameRate {
+                return camera.capabilitySnapshot.videoPairs.contains {
+                    $0.resolution == resolution && $0.frameRate == frameRate
+                }
+            }
+            return !camera.capabilitySnapshot.videoPairs.isEmpty
+        case .codecCompression:
+            guard camera.capabilitySnapshot.isReady else { return true }
+            if entry.title == "H.264" {
+                return camera.capabilitySnapshot.availableVideoCodecs.contains("H264")
+            }
+            if entry.title == "HEVC" {
+                return camera.capabilitySnapshot.availableVideoCodecs.contains("HEVC")
+            }
+            return !camera.capabilitySnapshot.availableVideoCodecs.isEmpty
+        case .slowMotion:
+            guard camera.capabilitySnapshot.isReady else { return true }
+            let title = entry.title.lowercased()
+            let resolution: VideoResolution? = title.contains("1080") ? .p1080 : title.contains("720") ? .p720 : nil
+            let frameRate: CameraManager.SlowMotionFrameRate? = title.contains("240 fps")
+                ? .fps240
+                : title.contains("120 fps") ? .fps120
+                : nil
+            if let resolution, let frameRate {
+                return camera.capabilitySnapshot.slowMotionPairs.contains {
+                    $0.resolution == resolution && $0.frameRate == frameRate
+                }
+            }
+            return !camera.capabilitySnapshot.slowMotionPairs.isEmpty
+        case .liveStats:
+            return camera.captureMode != .photo
+        default:
+            return true
+        }
     }
 
     private static let searchEntries: [SettingsSearchEntry] = {

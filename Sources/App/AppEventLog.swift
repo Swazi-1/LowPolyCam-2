@@ -280,6 +280,52 @@ enum AppEventLog {
         }
     }
 
+    static func logURLs() -> [URL] {
+        let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(logFolderName, isDirectory: true)
+        guard let folder else { return [] }
+        return ((try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix(logFilenamePrefix) && $0.pathExtension.lowercased() == "log" }
+            .sorted { lhs, rhs in
+                lhs.lastPathComponent.localizedStandardCompare(rhs.lastPathComponent) == .orderedAscending
+            }
+    }
+
+    static func latestLogURL() -> URL? {
+        logURLs().last
+    }
+
+    static func deleteArchivedLogs() {
+        queue.async {
+            flushPendingSettingsLogLocked()
+            flushWriteBufferLocked()
+            try? handle?.synchronize()
+            let current = currentFilename
+            let files = logURLs()
+            var deleted = 0
+            var failures = 0
+            for file in files where file.lastPathComponent != current {
+                do {
+                    try FileManager.default.removeItem(at: file)
+                    deleted += 1
+                } catch {
+                    failures += 1
+                    NSLog("LowPolyCam could not delete diagnostic log: %@", error.localizedDescription)
+                }
+            }
+            event(
+                "Archived diagnostic logs deleted",
+                category: .settings,
+                level: failures == 0 ? .info : .warning,
+                fields: ["deleted": String(deleted), "failures": String(failures)]
+            )
+        }
+    }
+
     /// Compatibility entry point used throughout the app. Existing calls now automatically receive
     /// event number, elapsed time, source file/function/line and caller-thread information.
     static func event(

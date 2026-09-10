@@ -82,28 +82,6 @@ struct LiveStatsOverlay: View {
     }
 }
 
-struct RecordingExtrasSettings: View {
-    @ObservedObject var camera: CameraManager
-    var positionStats: () -> Void
-    @AppStorage("longevityMode") private var longevity = false
-    @AppStorage("liveRecordingStats") private var stats = false
-
-    var body: some View {
-        Group {
-            if camera.captureMode == .video {
-                Toggle("Longevity Mode", isOn: Binding(
-                    get: { longevity },
-                    set: { camera.applyLongevityMode($0) }
-                ))
-                Toggle("Live Recording Stats", isOn: $stats)
-            } else if camera.captureMode == .sloMo {
-                Toggle("Live Recording Stats", isOn: $stats)
-            }
-        }
-        .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
-    }
-}
-
 struct LiveStatsSettings: View {
     var positionStats: () -> Void
     @AppStorage("liveStatsSize") private var size = "Normal"

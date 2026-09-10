@@ -243,6 +243,12 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var lastFrameGaps: Int?
     @Published private(set) var codecAvailabilityMessage: String?
     @Published private(set) var recoverableRecordingCount = 0
+    @Published private(set) var recoverablePhotoCount = 0
+    @Published private(set) var recoverableRecordingFiles: [URL] = []
+    @Published private(set) var recoverablePhotoFiles: [URL] = []
+    @Published private(set) var audioStatusLabel = "Audio —"
+    @Published private(set) var capabilitySnapshot = CameraCapabilitySnapshot.empty
+    @Published private(set) var isCapabilitySnapshotLoading = false
     @Published var selectedVideoCodec = UserDefaults.standard.string(forKey: "selectedVideoCodec") ?? "HEVC" {
         didSet {
             guard selectedVideoCodec != oldValue else { return }
@@ -252,6 +258,7 @@ final class CameraManager: NSObject, ObservableObject {
             isVideoAvailabilityKnown = false
             isVideoAvailable = true
             UserDefaults.standard.set(selectedVideoCodec, forKey: "selectedVideoCodec")
+            scheduleCapabilitySnapshotRefresh(reason: "codec changed")
             guard captureMode == .video, !suppressAutomaticReconfiguration else { return }
             scheduleVideoConfiguration(
                 formatAffecting: true,
@@ -295,6 +302,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.resolutionKey, value: selectedResolution.rawValue)
                 }
+                scheduleCapabilitySnapshotRefresh(reason: "video resolution changed")
             }
         }
     }
@@ -306,6 +314,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.frameRateKey, value: selectedFrameRate.rawValue)
                 }
+                scheduleCapabilitySnapshotRefresh(reason: "video frame rate changed")
             }
         }
     }
@@ -316,6 +325,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.slowMotionResolutionKey, value: selectedSlowMotionResolution.rawValue)
                 }
+                scheduleCapabilitySnapshotRefresh(reason: "slow motion resolution changed")
             }
         }
     }
@@ -326,6 +336,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if !suppressPreferencePersistence {
                     persistCameraPreference(Self.slowMotionFrameRateKey, value: selectedSlowMotionFrameRate.rawValue)
                 }
+                scheduleCapabilitySnapshotRefresh(reason: "slow motion frame rate changed")
             }
         }
     }
@@ -355,6 +366,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var recordingRequestStartedAt: TimeInterval = 0
     private var movieStartCallAt: TimeInterval = 0
     private var recordingSegmentIndex: Int = 0
+    private var activeRecordingSessionID: String?
     private var lastExtremeRecordingHealthSecond: Int = -1
     private struct PhotoCaptureContext {
         let aspect: String
@@ -380,6 +392,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var activePhotoCaptureID: Int64?
     private var activePhotoCaptureIsBurst = false
     private var pendingPhotoSaves = 0
+    private var inFlightPhotoFileSaves: Set<URL> = []
 
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
@@ -421,6 +434,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let recordingStartRequests = RequestToken("recordingStartRequests")
     private let microphonePermissionRequests = RequestToken("microphonePermissionRequests")
     private let mediaSaveTaskRequests = RequestToken("mediaSaveTaskRequests")
+    private let capabilityRequests = RequestToken("capabilityRequests")
     private let codecSupportCacheLock = NSLock()
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
@@ -538,13 +552,13 @@ final class CameraManager: NSObject, ObservableObject {
 
     private var appLifecyclePhase: AppLifecyclePhase = .active
 
-    private static let resolutionKey = "selectedVideoResolution"
-    private static let frameRateKey = "selectedVideoFrameRate"
-    private static let slowMotionResolutionKey = "selectedSlowMotionResolution"
-    private static let slowMotionFrameRateKey = "selectedSlowMotionFrameRate"
-    private static let videoStabilizationKey = "videoStabilizationEnabled"
-    private static let photoMegapixelsKey = "selectedPhotoMegapixels"
-    private static let mediaSequenceKey = "lowPolyCamMediaSequence"
+    private static let resolutionKey = LowPolyCamPreferences.Key.selectedVideoResolution
+    private static let frameRateKey = LowPolyCamPreferences.Key.selectedVideoFrameRate
+    private static let slowMotionResolutionKey = LowPolyCamPreferences.Key.selectedSlowMotionResolution
+    private static let slowMotionFrameRateKey = LowPolyCamPreferences.Key.selectedSlowMotionFrameRate
+    private static let videoStabilizationKey = LowPolyCamPreferences.Key.videoStabilizationEnabled
+    private static let photoMegapixelsKey = LowPolyCamPreferences.Key.selectedPhotoMegapixels
+    private static let mediaSequenceKey = LowPolyCamPreferences.Key.mediaSequence
 
     override init() {
         let defaults = UserDefaults.standard
@@ -595,6 +609,7 @@ final class CameraManager: NSObject, ObservableObject {
         AppEventLog.event(
             "CAMERA SETUP INITIALIZED: remember=\(rememberCameraSetup), mode=\(captureMode.rawValue), position=\(cameraPosition.rawValue)"
         )
+        refreshRecoveryCount()
     }
 
     deinit {
@@ -711,6 +726,100 @@ final class CameraManager: NSObject, ObservableObject {
         codecSupportCacheGeneration &+= 1
         codecSupportSnapshot = nil
         codecSupportCacheLock.unlock()
+    }
+
+    /// Refreshes the Settings-facing capability answer away from SwiftUI body evaluation. The
+    /// existing synchronous helpers remain available for guarded user actions and hardware
+    /// configuration, but the UI reads this published snapshot so format scans do not repeat on
+    /// every render.
+    private func scheduleCapabilitySnapshotRefresh(reason: String) {
+        let requestID = capabilityRequests.next(reason: reason)
+        publish {
+            self.isCapabilitySnapshotLoading = true
+        }
+        sessionQueue.async { [weak self] in
+            guard let self, self.capabilityRequests.isLatest(requestID) else { return }
+            let snapshot = self.makeCapabilitySnapshot()
+            guard self.capabilityRequests.isLatest(requestID) else { return }
+            self.publish {
+                guard self.capabilityRequests.isLatest(requestID) else { return }
+                self.capabilitySnapshot = snapshot
+                self.isCapabilitySnapshotLoading = false
+            }
+        }
+    }
+
+    private func makeCapabilitySnapshot() -> CameraCapabilitySnapshot {
+        let devices = capabilityDevices(for: cameraPosition.avPosition)
+        let resolutions: [VideoResolution] = [.p720, .p1080, .p4k]
+        let position = cameraPosition.rawValue
+
+        let videoPairs = resolutions.flatMap { resolution in
+            VideoFrameRate.allCases.compactMap { frameRate -> CameraVideoFormatPair? in
+                let effectiveCodec = isKnownUnsupportedH264VideoSelection(
+                    codec: selectedVideoCodec,
+                    resolution: resolution,
+                    frameRate: frameRate
+                ) ? "HEVC" : selectedVideoCodec
+                let selector = CameraFormatSelector(
+                    selectedVideoCodec: effectiveCodec,
+                    selectedResolution: resolution,
+                    selectedFrameRate: frameRate
+                )
+                let supported = devices.contains { device in
+                    selector.preferredRecordingFormat(for: device, resolution: resolution, rate: frameRate) != nil
+                }
+                return supported ? CameraVideoFormatPair(resolution: resolution, frameRate: frameRate) : nil
+            }
+        }
+
+        let slowMotionSelector = CameraFormatSelector(
+            selectedVideoCodec: "HEVC",
+            selectedResolution: selectedResolution,
+            selectedFrameRate: selectedFrameRate
+        )
+        let slowMotionPairs = resolutions.flatMap { resolution in
+            SlowMotionFrameRate.allCases.compactMap { frameRate -> CameraSlowMotionFormatPair? in
+                let supported = devices.contains { device in
+                    device.formats.contains {
+                        slowMotionSelector.supportsSlowMotion($0, resolution: resolution, frameRate: frameRate)
+                    }
+                }
+                return supported
+                    ? CameraSlowMotionFormatPair(resolution: resolution, frameRate: frameRate)
+                    : nil
+            }
+        }
+
+        let availableCodecs = ["HEVC", "H264"].filter { codec in
+            guard !isKnownUnsupportedH264VideoSelection(
+                codec: codec,
+                resolution: selectedResolution,
+                frameRate: selectedFrameRate
+            ) else { return false }
+            let selector = CameraFormatSelector(
+                selectedVideoCodec: codec,
+                selectedResolution: selectedResolution,
+                selectedFrameRate: selectedFrameRate
+            )
+            return devices.contains { device in
+                selector.preferredRecordingFormat(
+                    for: device,
+                    resolution: selectedResolution,
+                    rate: selectedFrameRate
+                ) != nil
+            }
+        }
+
+        return CameraCapabilitySnapshot(
+            position: position,
+            deviceIDs: devices.map(\.uniqueID),
+            videoPairs: videoPairs,
+            slowMotionPairs: slowMotionPairs,
+            availableVideoCodecs: availableCodecs,
+            photoMegapixelOptions: supportedPhotoMegapixels,
+            isReady: !devices.isEmpty
+        )
     }
 
     private func isKnownUnsupportedH264VideoSelection(
@@ -1323,6 +1432,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.event("Camera start requested")
             self.requestedZoom = 1
             self.configureSessionIfNeeded()
+            self.scheduleCapabilitySnapshotRefresh(reason: "camera start")
             guard self.session.isRunning == false else {
                 self.publish { self.isSessionRunning = true }
                 self.applyDeferredWhiteBalanceIfPossible()
@@ -1441,6 +1551,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.event("App lifecycle transition: \(previousPhase.rawValue) -> active")
             self.invalidatePendingVideoConfiguration()
             self.configureSessionIfNeeded()
+            self.scheduleCapabilitySnapshotRefresh(reason: "app became active")
             if !self.session.isRunning {
                 self.session.startRunning()
             }
@@ -2121,6 +2232,11 @@ final class CameraManager: NSObject, ObservableObject {
         supportedSlowMotionFrameRates.removeAll(keepingCapacity: true)
         isSlowMotionAvailabilityKnown = false
         isSlowMotionAvailable = true
+        _ = capabilityRequests.next(reason: "camera switch invalidated capability snapshot")
+        publish {
+            self.capabilitySnapshot = .empty
+            self.isCapabilitySnapshotLoading = true
+        }
         let requestID = cameraSwitchRequests.next(reason: "camera switch \(previous.rawValue) -> \(target.rawValue)")
         let switchQueueTicket = AppEventLog.queueScheduled("camera switch", category: .device, traceID: switchTraceID)
         _ = zoomRequests.next() // Drop any drag command that belongs to the old camera.
@@ -2171,6 +2287,9 @@ final class CameraManager: NSObject, ObservableObject {
                     self.isSlowMotionAvailabilityKnown = previousSlowMotionAvailabilityKnown
                     self.isSlowMotionAvailable = previousSlowMotionAvailable
                     self.codecAvailabilityMessage = nil
+                    self.capabilitySnapshot = .empty
+                    self.isCapabilitySnapshotLoading = false
+                    self.scheduleCapabilitySnapshotRefresh(reason: "camera switch rolled back")
                 }
                 self.showError("That camera is unavailable.")
                 AppEventLog.event("========== CAMERA SWITCH END =========", category: .device, level: .warning, traceID: switchTraceID,
@@ -2183,6 +2302,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             self.synchronizeTorchState()
             self.persistRememberedCameraSetup()
+            self.scheduleCapabilitySnapshotRefresh(reason: "camera switch applied")
             let afterDevice = self.videoInput?.device
             AppEventLog.event("Camera switch applied: \(target == .back ? "back" : "front")", category: .device, traceID: switchTraceID, fields: [
                 "device": afterDevice?.localizedName ?? "none",
@@ -2251,12 +2371,14 @@ final class CameraManager: NSObject, ObservableObject {
                 self.isPreviewTransitioning = false
                 if success {
                     self.persistRememberedCameraSetup()
+                    self.scheduleCapabilitySnapshotRefresh(reason: "capture mode applied")
                 } else {
                     self.captureMode = previousMode
                     self.sessionQueue.async {
                         _ = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
                         self.synchronizeTorchState()
                     }
+                    self.scheduleCapabilitySnapshotRefresh(reason: "capture mode rolled back")
                 }
                 AppEventLog.event("========== MODE CHANGE END =========", category: .session,
                                   level: success ? .info : .warning, traceID: modeTraceID,
@@ -3213,6 +3335,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         if authorization == .notDetermined {
             awaitingMicrophonePermission = true
+            publishAudioStatus()
             AppEventLog.event("Microphone permission requested lazily before recording")
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 self?.sessionQueue.async { [weak self] in
@@ -3226,6 +3349,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         let attached = authorization == .authorized && attachAudioInputIfAuthorized()
+        publishAudioStatus()
         AppEventLog.event(
             "Microphone authorization before recording: state=\(authorization.rawValue), attached=\(attached)"
         )
@@ -3250,6 +3374,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         awaitingMicrophonePermission = false
         let attached = granted && attachAudioInputIfAuthorized()
+        publishAudioStatus()
         AppEventLog.event("Microphone permission result: granted=\(granted), audioInputAttached=\(attached)")
         if !granted {
             postStatus("Microphone access denied · recording without audio")
@@ -3308,6 +3433,7 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
             self.activeRecordingTraceID = AppEventLog.makeTraceID("RECORD")
+            self.activeRecordingSessionID = UUID().uuidString
             self.recordingRequestStartedAt = ProcessInfo.processInfo.systemUptime
             self.recordingSegmentIndex = 1
             self.lastExtremeRecordingHealthSecond = -1
@@ -3403,17 +3529,39 @@ final class CameraManager: NSObject, ObservableObject {
         return try? AVCaptureDeviceInput(device: audioDevice)
     }
 
+    private func currentAudioStatusLabel() -> String {
+        if audioInput != nil { return "Audio" }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .notDetermined: return "Audio —"
+        case .denied, .restricted: return "Silent"
+        case .authorized: return "Audio unavailable"
+        @unknown default: return "Audio —"
+        }
+    }
+
+    private func publishAudioStatus() {
+        let label = currentAudioStatusLabel()
+        publish {
+            self.audioStatusLabel = label
+        }
+    }
+
     /// Called only on sessionQueue. Lazy microphone permission can grant audio after the initial
     /// camera session has already been built, so the input can be attached in a small transaction.
     @discardableResult
     private func attachAudioInputIfAuthorized() -> Bool {
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return false }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            publishAudioStatus()
+            return false
+        }
         if let existingAudioInput = audioInput,
            session.inputs.contains(where: { $0 === existingAudioInput }) {
+            publishAudioStatus()
             return true
         }
         guard let newInput = makeAuthorizedAudioInput(), session.canAddInput(newInput) else {
             AppEventLog.event("Microphone audio input attach failed: unavailable or session rejected input")
+            publishAudioStatus()
             return false
         }
         session.beginConfiguration()
@@ -3421,6 +3569,7 @@ final class CameraManager: NSObject, ObservableObject {
         session.commitConfiguration()
         audioInput = newInput
         AppEventLog.event("Microphone audio input attached: \(newInput.device.localizedName)")
+        publishAudioStatus()
         return true
     }
 
@@ -3431,6 +3580,7 @@ final class CameraManager: NSObject, ObservableObject {
         let hasMovie = session.outputs.contains(where: { $0 === movieOutput })
         let hasPhoto = session.outputs.contains(where: { $0 === photoOutput })
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
+            publishAudioStatus()
             return
         }
 
@@ -3456,6 +3606,7 @@ final class CameraManager: NSObject, ObservableObject {
         }
         videoInput = nil
         audioInput = nil
+        publishAudioStatus()
 
         guard let device = preferredCamera(for: cameraPosition.avPosition) else {
             session.commitConfiguration()
@@ -3483,8 +3634,10 @@ final class CameraManager: NSObject, ObservableObject {
             session.addInput(input)
             audioInput = input
             AppEventLog.event("Microphone audio input attached during session configuration")
+            publishAudioStatus()
         } else {
             AppEventLog.event("Microphone audio input not attached during session configuration: authorization=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)")
+            publishAudioStatus()
         }
 
         guard session.canAddOutput(movieOutput) else {
@@ -5531,11 +5684,13 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func refreshRecoveryCount() {
-        let count = CameraRecoveryStore.recordingCount()
+        let recordings = CameraRecoveryStore.recordings()
+        let photos = CameraRecoveryStore.photoRecoveryFiles()
         publish {
-            if self.recoverableRecordingCount != count {
-                self.recoverableRecordingCount = count
-            }
+            self.recoverableRecordingCount = recordings.count
+            self.recoverableRecordingFiles = recordings
+            self.recoverablePhotoCount = photos.count
+            self.recoverablePhotoFiles = photos
         }
     }
 
@@ -5560,6 +5715,118 @@ final class CameraManager: NSObject, ObservableObject {
             } else {
                 self.postStatus("Recovery save already in progress…")
             }
+        }
+    }
+
+    @discardableResult
+    private func savePhotoFileToPhotos(_ fileURL: URL, recoveryRetry: Bool = true) -> Bool {
+        let sourceKey = fileURL.standardizedFileURL
+        guard inFlightPhotoFileSaves.insert(sourceKey).inserted else { return false }
+        pendingPhotoSaves += 1
+        beginBackgroundMediaSaveIfNeeded()
+
+        storageQueue.async { [weak self] in
+            guard let self else { return }
+            let validation = MediaValidator.validatePhotoFile(at: fileURL)
+            self.sessionQueue.async { [weak self] in
+                guard let self,
+                      self.inFlightPhotoFileSaves.contains(sourceKey) else { return }
+                AppEventLog.event(
+                    "RECOVERY PHOTO MEDIA VALIDATION",
+                    category: .save,
+                    level: validation.isValid ? .info : .error,
+                    fields: validation.fields.merging([
+                        "valid": String(validation.isValid),
+                        "summary": validation.summary
+                    ]) { current, _ in current }
+                )
+                guard validation.isValid else {
+                    self.showError("A Recovery photo is not readable and was left in Recovery.")
+                    self.inFlightPhotoFileSaves.remove(sourceKey)
+                    self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
+                    self.refreshRecoveryCount()
+                    self.endBackgroundMediaSaveIfPossible()
+                    return
+                }
+
+                PHPhotoLibrary.shared().performChanges({
+                    let request = PHAssetCreationRequest.forAsset()
+                    let options = PHAssetResourceCreationOptions()
+                    options.originalFilename = fileURL.lastPathComponent
+                    options.shouldMoveFile = true
+                    request.addResource(with: .photo, fileURL: fileURL, options: options)
+                }) { [weak self] success, error in
+                    guard let self else { return }
+                    self.sessionQueue.async {
+                        if success {
+                            self.postStatus(recoveryRetry ? "Recovered photo saved to Photos" : "Photo saved to Photos")
+                            AppEventLog.event("Recovery photo saved to Photos: \(fileURL.lastPathComponent)", category: .save)
+                        } else {
+                            let detail = error?.localizedDescription ?? "Unknown Photos error"
+                            self.showError("Couldn’t save the Recovery photo. It remains in Recovery. \(detail)")
+                            AppEventLog.event("Recovery photo save failed: \(detail)", category: .save, level: .error)
+                        }
+                        self.inFlightPhotoFileSaves.remove(sourceKey)
+                        self.pendingPhotoSaves = max(self.pendingPhotoSaves - 1, 0)
+                        self.refreshRecoveryCount()
+                        self.refreshAvailableStorage()
+                        self.endBackgroundMediaSaveIfPossible()
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    func retryRecoverablePhotos() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let files = CameraRecoveryStore.photoRecoveryFiles()
+            guard !files.isEmpty else {
+                self.refreshRecoveryCount()
+                return
+            }
+
+            var accepted = 0
+            for file in files {
+                if self.savePhotoFileToPhotos(file) {
+                    accepted += 1
+                }
+            }
+            if accepted > 0 {
+                self.postStatus("Retrying \(accepted) recovered photo\(accepted == 1 ? "" : "s")…")
+            } else {
+                self.postStatus("Recovery photo save already in progress…")
+            }
+        }
+    }
+
+    func deleteAllRecoveryFiles() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.inFlightVideoSaves.isEmpty, self.inFlightPhotoFileSaves.isEmpty else {
+                self.postStatus("Wait for the current Recovery save to finish.")
+                return
+            }
+            CameraRecoveryStore.removeAll()
+            self.refreshRecoveryCount()
+        }
+    }
+
+    func deleteRecoveryFile(_ fileURL: URL) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let sourceKey = fileURL.standardizedFileURL
+            guard !self.inFlightVideoSaves.contains(sourceKey), !self.inFlightPhotoFileSaves.contains(sourceKey) else {
+                self.postStatus("Wait for the current Recovery save to finish.")
+                return
+            }
+            guard CameraRecoveryStore.delete(fileURL) else {
+                self.showError("Couldn’t delete that Recovery file.")
+                return
+            }
+            self.refreshRecoveryCount()
+            self.refreshAvailableStorage()
         }
     }
 
@@ -5614,7 +5881,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func closeRecordingDiagnostics(reason: String, result: String) {
-        guard let traceID = activeRecordingTraceID else { return }
+        guard let traceID = activeRecordingTraceID else {
+            activeRecordingSessionID = nil
+            return
+        }
         AppEventLog.event("========== RECORDING TRACE END =========", category: .recording,
                           level: result == "success" ? .info : .warning, traceID: traceID, fields: [
                             "reason": reason,
@@ -5625,6 +5895,7 @@ final class CameraManager: NSObject, ObservableObject {
                                 : "unknown"
                           ])
         activeRecordingTraceID = nil
+        activeRecordingSessionID = nil
         recordingRequestStartedAt = 0
         movieStartCallAt = 0
         recordingSegmentIndex = 0
@@ -5646,6 +5917,35 @@ final class CameraManager: NSObject, ObservableObject {
             }
         case .photo:
             break
+        }
+    }
+
+    private func finishVideoSaveValidationFailure(
+        fileURL: URL,
+        sourceKey: URL,
+        reason: String,
+        recoveryRetry: Bool
+    ) {
+        let preserved = CameraRecoveryStore.preserve(fileURL)
+        if preserved != nil {
+            showError("The recording failed media validation and was kept in Recovery. \(reason)")
+        } else {
+            showError("The recording failed media validation and could not be preserved. \(reason)")
+        }
+        AppEventLog.event("Video media validation rejected save", category: .save, level: .error, fields: [
+            "file": fileURL.lastPathComponent,
+            "reason": reason,
+            "recoveryRetry": String(recoveryRetry),
+            "preserved": String(preserved != nil)
+        ])
+        inFlightVideoSaves.remove(sourceKey)
+        pendingVideoSaves = max(pendingVideoSaves - 1, 0)
+        refreshRecoveryCount()
+        refreshAvailableStorage()
+        if recordingState.isFinalizing {
+            finishFinalizingIfPossible()
+        } else {
+            endBackgroundMediaSaveIfPossible()
         }
     }
 
@@ -5702,12 +6002,43 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
+        let validateAndSave: (Int?) -> Void = { [weak self] gaps in
+            guard let self else { return }
+            self.storageQueue.async { [weak self] in
+                guard let self else { return }
+                let validation = MediaValidator.validateVideo(at: fileURL)
+                self.sessionQueue.async { [weak self] in
+                    guard let self,
+                          self.inFlightVideoSaves.contains(sourceKey) else { return }
+                    AppEventLog.event(
+                        "VIDEO MEDIA VALIDATION",
+                        category: .save,
+                        level: validation.isValid ? .info : .error,
+                        fields: validation.fields.merging([
+                            "valid": String(validation.isValid),
+                            "summary": validation.summary
+                        ]) { current, _ in current }
+                    )
+                    guard validation.isValid else {
+                        self.finishVideoSaveValidationFailure(
+                            fileURL: fileURL,
+                            sourceKey: sourceKey,
+                            reason: validation.summary,
+                            recoveryRetry: recoveryRetry
+                        )
+                        return
+                    }
+                    performSave(gaps)
+                }
+            }
+        }
+
         if runDiagnostics {
             ClipFrameDiagnostics.inspect(fileURL) { gaps in
-                performSave(gaps)
+                validateAndSave(gaps)
             }
         } else {
-            performSave(nil)
+            validateAndSave(nil)
         }
         return true
     }
@@ -5825,6 +6156,23 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
                 self.restoreIdleCaptureConfigurationAfterRecording()
                 self.closeRecordingDiagnostics(reason: "recording discarded/cancelled", result: "cancelled")
                 return
+            }
+
+            if successful, let sessionID = self.activeRecordingSessionID {
+                let isSlowMotion = self.captureMode == .sloMo
+                RecordingSessionStore.record(RecordingSessionSegment(
+                    sessionID: sessionID,
+                    segmentIndex: self.recordingSegmentIndex,
+                    filename: outputFileURL.lastPathComponent,
+                    mode: self.captureMode.rawValue,
+                    cameraPosition: self.cameraPosition.rawValue,
+                    resolution: (isSlowMotion ? self.selectedSlowMotionResolution : self.selectedResolution).rawValue,
+                    frameRate: Double((isSlowMotion ? self.selectedSlowMotionFrameRate.rawValue : self.selectedFrameRate.rawValue)),
+                    codec: self.activeVideoCodec,
+                    compression: self.videoCompression.rawValue,
+                    duration: max(self.movieOutput.recordedDuration.seconds, 0),
+                    recordedAt: Date()
+                ))
             }
 
             let splitDuration = self.recordingState.splitDuration
@@ -5964,7 +6312,41 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                     megapixels: context.megapixels,
                     traceID: context.traceID
                 ) else {
-                    self.showError("Couldn’t process the photo. Please try again.")
+                    let preserved = CameraRecoveryStore.preservePhotoData(data, named: context.filename)
+                    self.showError(
+                        preserved == nil
+                            ? "Couldn’t process the photo, and Recovery preservation could not be confirmed."
+                            : "Couldn’t process the photo. The original is kept in Recovery."
+                    )
+                    AppEventLog.event("PHOTO PROCESSING VALIDATION FAILED", category: .save, level: .error, traceID: context.traceID,
+                                      fields: ["filename": context.filename, "preserved": String(preserved != nil)])
+                    self.completePhotoSave(captureID: captureID, context: context, success: false)
+                    return
+                }
+
+                let validation = MediaValidator.validatePhoto(
+                    data: result,
+                    expectedAspect: context.aspect,
+                    requestedMegapixels: context.megapixels
+                )
+                AppEventLog.event(
+                    "PHOTO MEDIA VALIDATION",
+                    category: .save,
+                    level: validation.isValid ? .info : .error,
+                    traceID: context.traceID,
+                    fields: validation.fields.merging([
+                        "valid": String(validation.isValid),
+                        "summary": validation.summary,
+                        "filename": context.filename
+                    ]) { current, _ in current }
+                )
+                guard validation.isValid else {
+                    let preserved = CameraRecoveryStore.preservePhotoData(result, named: context.filename)
+                    self.showError(
+                        preserved == nil
+                            ? "The photo failed media validation, and Recovery preservation could not be confirmed."
+                            : "The photo failed media validation. It is kept in Recovery."
+                    )
                     self.completePhotoSave(captureID: captureID, context: context, success: false)
                     return
                 }
@@ -5988,7 +6370,15 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                         "filename": context.filename,
                         "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000)
                     ])
-                    if !success { self.showError(error?.localizedDescription ?? "Couldn’t save the photo.") }
+                    if !success {
+                        let preserved = CameraRecoveryStore.preservePhotoData(result, named: context.filename)
+                        let detail = error?.localizedDescription ?? "Couldn’t save the photo."
+                        self.showError(
+                            preserved == nil
+                                ? "\(detail) Recovery preservation could not be confirmed."
+                                : "\(detail) The photo is kept in Recovery."
+                        )
+                    }
                     self.completePhotoSave(captureID: captureID, context: context, success: success)
                 }
             }
@@ -6023,6 +6413,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             if self.pendingPhotoSaves == 0 {
                 self.refreshAvailableStorage()
             }
+            self.refreshRecoveryCount()
             self.endBackgroundMediaSaveIfPossible()
         }
     }

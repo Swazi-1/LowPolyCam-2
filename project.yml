@@ -18,11 +18,20 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.swazi.LowPolyCam
-        MARKETING_VERSION: "5.010"
-        CURRENT_PROJECT_VERSION: "516"
+        MARKETING_VERSION: "5.0.12"
+        CURRENT_PROJECT_VERSION: "517"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
         TARGETED_DEVICE_FAMILY: "1"
     scheme:
-      testTargets: []
+      testTargets:
+        - LowPolyCamTests
+  LowPolyCamTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - Tests/LowPolyCamTests
+    dependencies:
+      - target: LowPolyCam

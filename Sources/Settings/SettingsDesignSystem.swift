@@ -85,34 +85,6 @@ struct SettingsToggleLabel: View {
     }
 }
 
-struct SettingsCheckmarkRow: View {
-    let title: String
-    var subtitle: String? = nil
-    let selected: Bool
-    var enabled: Bool = true
-
-    var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: subtitle == nil ? 0 : 2) {
-                Text(title)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 8)
-            if selected {
-                Image(systemName: "checkmark")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.blue)
-            }
-        }
-        .foregroundStyle(enabled ? Color.primary : Color.secondary)
-        .contentShape(Rectangle())
-    }
-}
-
 struct SettingsHeroButton: View {
     let title: String
     let line1: String

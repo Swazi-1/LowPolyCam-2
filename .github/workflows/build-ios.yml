@@ -27,13 +27,16 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Show XcodeGen version
+        run: xcodegen --version
+
       - name: Generate Xcode project
         run: xcodegen generate
 
       - name: Select Xcode 26
         run: |
           set -euo pipefail
-          XCODE_APP=$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort -V | tail -1)
+          XCODE_APP=$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)
           if [ -z "$XCODE_APP" ]; then
             echo "Xcode 26 was not found on this runner." >&2
             ls -1 /Applications | grep '^Xcode' || true
@@ -58,6 +61,26 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             clean build
 
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          SIMULATOR_ID=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ {print $2; exit}')
+          if [ -z "$SIMULATOR_ID" ]; then
+            echo "No available iPhone simulator was found." >&2
+            xcrun simctl list devices available
+            exit 1
+          fi
+          xcodebuild \
+            -project LowPolyCam.xcodeproj \
+            -scheme LowPolyCam \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath build/TestDerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            test
+
       - name: Verify Files integration
         run: |
           set -euo pipefail
@@ -69,13 +92,26 @@ jobs:
               exit 1
             fi
           done
+          SHORT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_INFO")
+          BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_INFO")
+          if [ "$SHORT_VERSION" != "5.0.12" ] || [ "$BUILD_VERSION" != "517" ]; then
+            echo "Unexpected app version: $SHORT_VERSION ($BUILD_VERSION)" >&2
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_INFO" >/dev/null
+          plutil -lint "$APP_INFO"
+          APP_BINARY="build/DerivedData/Build/Products/Release-iphoneos/LowPolyCam.app/LowPolyCam"
+          lipo -info "$APP_BINARY" | grep -q arm64
 
       - name: Package unsigned IPA
         run: |
+          set -euo pipefail
           mkdir -p build/Payload
           cp -R build/DerivedData/Build/Products/Release-iphoneos/LowPolyCam.app build/Payload/
           cd build
           zip -r LowPolyCam-unsigned.ipa Payload
+          unzip -t LowPolyCam-unsigned.ipa
+          shasum -a 256 LowPolyCam-unsigned.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4

@@ -279,6 +279,7 @@ struct CameraView: View {
                 frameRateLabel: camera.hudFrameRateLabel,
                 remainingLabel: camera.hudRemainingLabel,
                 whiteBalanceLabel: hudWhiteBalanceLabel,
+                audioStatusLabel: camera.audioStatusLabel,
                 availableStorageBytes: camera.availableStorageBytes,
                 lastFrameGaps: camera.lastFrameGaps
             )

@@ -86,8 +86,8 @@ struct RecordVideoSettingsView: View {
     @ObservedObject var camera: CameraManager
 
     private var formatOptions: [VideoFormatOption] {
-        camera.supportedVideoFormatPairs()
-            .map { VideoFormatOption(resolution: $0.0, frameRate: $0.1) }
+        camera.capabilitySnapshot.videoPairs
+            .map { VideoFormatOption(resolution: $0.resolution, frameRate: $0.frameRate) }
             .sorted { lhs, rhs in
                 let left = formatSortKey(lhs)
                 let right = formatSortKey(rhs)
@@ -108,7 +108,9 @@ struct RecordVideoSettingsView: View {
     var body: some View {
         List {
             Section {
-                if formatOptions.isEmpty {
+                if camera.isCapabilitySnapshotLoading && !camera.capabilitySnapshot.isReady {
+                    ProgressView("Checking camera formats…")
+                } else if formatOptions.isEmpty {
                     Text("No supported video formats are available for this camera.")
                         .foregroundStyle(.secondary)
                 } else {
@@ -191,8 +193,8 @@ struct SlowMotionSettingsView: View {
     @ObservedObject var camera: CameraManager
 
     private var formatOptions: [SlowMotionFormatOption] {
-        camera.supportedSlowMotionFormatPairs().map {
-            SlowMotionFormatOption(resolution: $0.0, frameRate: $0.1)
+        camera.capabilitySnapshot.slowMotionPairs.map {
+            SlowMotionFormatOption(resolution: $0.resolution, frameRate: $0.frameRate)
         }.sorted { lhs, rhs in
             slowMotionSortKey(lhs) > slowMotionSortKey(rhs)
         }
@@ -211,7 +213,9 @@ struct SlowMotionSettingsView: View {
     var body: some View {
         List {
             Section {
-                if formatOptions.isEmpty {
+                if camera.isCapabilitySnapshotLoading && !camera.capabilitySnapshot.isReady {
+                    ProgressView("Checking Slo-Mo formats…")
+                } else if formatOptions.isEmpty {
                     Text("Slo-Mo isn’t available on this camera.")
                         .foregroundStyle(.secondary)
                 } else {
@@ -364,7 +368,9 @@ struct CodecCompressionSettingsView: View {
     var body: some View {
         List {
             Section {
-                if availableCodecs.isEmpty {
+                if camera.isCapabilitySnapshotLoading && !camera.capabilitySnapshot.isReady {
+                    ProgressView("Checking codecs…")
+                } else if availableCodecs.isEmpty {
                     Text("No video codec is available for the current camera format.")
                         .foregroundStyle(.secondary)
                 } else {
@@ -414,7 +420,7 @@ struct CodecCompressionSettingsView: View {
     }
 
     private var availableCodecs: [String] {
-        ["HEVC", "H264"].filter { camera.isVideoCodecSupported($0) }
+        camera.capabilitySnapshot.availableVideoCodecs
     }
 
     private var codecBinding: Binding<String> {

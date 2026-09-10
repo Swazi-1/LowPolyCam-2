@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Foundation
 import CoreMotion
 import UIKit
@@ -215,25 +216,6 @@ struct ZoomIndicator: View {
     }
 }
 
-struct RecordingTimer: View {
-    @Environment(\.cameraTint) private var theme
-    let duration: TimeInterval
-
-    var body: some View {
-        Text(timerText)
-            .font(.system(.body, design: .monospaced).weight(.bold))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(.red.opacity(0.92), in: Capsule())
-            .foregroundStyle(.white)
-    }
-
-    private var timerText: String {
-        let totalSeconds = Int(duration)
-        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
-    }
-}
-
 private struct RecordingClockText: View {
     @ObservedObject var clock: RecordingClockState
 
@@ -260,6 +242,7 @@ struct CameraHUDSnapshot: Equatable {
     let frameRateLabel: String?
     let remainingLabel: String
     let whiteBalanceLabel: String
+    let audioStatusLabel: String
     let availableStorageBytes: Int64
     let lastFrameGaps: Int?
 }
@@ -419,6 +402,7 @@ private struct CameraHUDContent: View, Equatable {
         if showFPS, let fps = snapshot.frameRateLabel { result.append("\(fps)fps") }
         if showRemaining { result.append(snapshot.remainingLabel) }
         if showWhiteBalance { result.append(snapshot.whiteBalanceLabel) }
+        if !snapshot.isPhotoMode { result.append(snapshot.audioStatusLabel) }
         if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
         if showStorage { result.append(String(format: "%.1f GB", Double(snapshot.availableStorageBytes) / 1_000_000_000)) }
         if showThermal {
@@ -441,6 +425,7 @@ private struct CameraHUDContent: View, Equatable {
         if item.hasPrefix("BAT") { return "battery.100percent" }
         if item.contains("GB") { return "internaldrive" }
         if item.hasPrefix("Gaps") { return "waveform.path" }
+        if item.hasPrefix("Audio") || item == "Silent" { return "mic" }
         if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
         if item.hasPrefix("~") { return snapshot.isPhotoMode ? "photo.on.rectangle" : "clock" }
         if item == snapshot.whiteBalanceLabel { return "sun.max" }

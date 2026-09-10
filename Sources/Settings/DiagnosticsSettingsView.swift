@@ -3,6 +3,9 @@ import SwiftUI
 struct DiagnosticsSettingsView: View {
     @State private var loggingEnabled = AppEventLog.diagnosticsEnabled
     @State private var extremeEnabled = AppEventLog.extremeDiagnosticsEnabled
+    @State private var latestLogURL: URL?
+    @State private var logCount = 0
+    @State private var showingDeleteConfirmation = false
 
     private var loggingBinding: Binding<Bool> {
         Binding(
@@ -68,15 +71,61 @@ struct DiagnosticsSettingsView: View {
                         ? "Each enabled launch keeps its own log so reopening the app never destroys the previous bug report."
                         : "No diagnostic file is created while logging is turned off."
                 )
+
+                if let latestLogURL {
+                    ShareLink(item: latestLogURL) {
+                        Label("Share Latest Log", systemImage: "square.and.arrow.up")
+                    }
+                }
+
+                Text("\(logCount) diagnostic log\(logCount == 1 ? "" : "s") currently stored.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Logs can include device and iOS details, locale/time zone, storage, permissions, settings, and media filenames. Review the file before sharing it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Delete Archived Logs", role: .destructive) {
+                    showingDeleteConfirmation = true
+                }
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Diagnostics")
         .navigationBarTitleDisplayMode(.large)
         .tint(.blue)
+        .confirmationDialog(
+            "Delete archived diagnostic logs?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Archived Logs", role: .destructive) {
+                AppEventLog.deleteArchivedLogs()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    refreshLogFiles()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current active log is kept. Older logs are permanently removed.")
+        }
         .onAppear {
             loggingEnabled = AppEventLog.diagnosticsEnabled
             extremeEnabled = AppEventLog.extremeDiagnosticsEnabled
+            refreshLogFiles()
         }
+        .onChange(of: loggingEnabled) { _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                refreshLogFiles()
+            }
+        }
+    }
+
+    private func refreshLogFiles() {
+        let files = AppEventLog.logURLs()
+        logCount = files.count
+        latestLogURL = files.last
     }
 }

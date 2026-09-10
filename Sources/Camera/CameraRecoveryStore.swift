@@ -1,6 +1,8 @@
 import Foundation
 
 enum CameraRecoveryStore {
+    private static let photoExtensions: Set<String> = ["heic", "jpg", "jpeg"]
+
     private static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("LowPolyCam/Recovery", isDirectory: true)
@@ -17,6 +19,22 @@ enum CameraRecoveryStore {
         return sorted ? recordings.sorted { $0.lastPathComponent < $1.lastPathComponent } : recordings
     }
 
+    private static func photoURLs(sorted: Bool) -> [URL] {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let photos = files.filter { photoExtensions.contains($0.pathExtension.lowercased()) }
+        return sorted ? photos.sorted { $0.lastPathComponent < $1.lastPathComponent } : photos
+    }
+
+    private static func recoveryURLs(sorted: Bool) -> [URL] {
+        let urls = recordingURLs(sorted: false) + photoURLs(sorted: false)
+        return sorted ? urls.sorted { $0.lastPathComponent < $1.lastPathComponent } : urls
+    }
+
     static func recordings() -> [URL] {
         let result = recordingURLs(sorted: true)
         AppEventLog.deepEvent("RECOVERY RECORDINGS ENUMERATED", category: .save, fields: ["count": String(result.count)])
@@ -29,6 +47,16 @@ enum CameraRecoveryStore {
 
     static func recordingCount() -> Int {
         recordingURLs(sorted: false).count
+    }
+
+    static func photoRecoveryFiles() -> [URL] {
+        let result = photoURLs(sorted: true)
+        AppEventLog.deepEvent("RECOVERY PHOTOS ENUMERATED", category: .save, fields: ["count": String(result.count)])
+        return result
+    }
+
+    static func photoRecoveryCount() -> Int {
+        photoURLs(sorted: false).count
     }
 
     @discardableResult
@@ -70,8 +98,52 @@ enum CameraRecoveryStore {
         }
     }
 
+    @discardableResult
+    static func preservePhotoData(_ data: Data, named filename: String) -> URL? {
+        let fm = FileManager.default
+        let requestedURL = URL(fileURLWithPath: filename).standardizedFileURL
+        let safeName = requestedURL.lastPathComponent.isEmpty ? "recovered-photo.jpg" : requestedURL.lastPathComponent
+        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("PHOTO-RECOVERY") : nil
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            var destination = directory.appendingPathComponent(safeName)
+            if fm.fileExists(atPath: destination.path) {
+                let stem = destination.deletingPathExtension().lastPathComponent
+                let ext = destination.pathExtension.isEmpty ? "jpg" : destination.pathExtension
+                destination = directory.appendingPathComponent("\(stem)_\(UUID().uuidString).\(ext)")
+            }
+            try data.write(to: destination, options: [.atomic])
+            AppEventLog.deepEvent("PHOTO RECOVERY PRESERVE COMPLETE", category: .save, traceID: traceID, fields: [
+                "destination": destination.lastPathComponent,
+                "bytes": String(data.count)
+            ])
+            return destination
+        } catch {
+            AppEventLog.log(error: error, prefix: "PHOTO RECOVERY PRESERVE FAILED", category: .save, traceID: traceID)
+            return nil
+        }
+    }
+
+    @discardableResult
+    static func delete(_ url: URL) -> Bool {
+        let root = directory.standardizedFileURL.path
+        let target = url.standardizedFileURL.path
+        guard target.hasPrefix(root + "/") else {
+            AppEventLog.guardRejected("recovery delete", reason: "file is outside recovery directory", fields: ["file": url.lastPathComponent])
+            return false
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+            AppEventLog.event("Recovery file deleted: \(url.lastPathComponent)", category: .save)
+            return true
+        } catch {
+            AppEventLog.log(error: error, prefix: "RECOVERY DELETE FAILED", category: .save)
+            return false
+        }
+    }
+
     static func removeAll() {
-        let urls = recordingURLs(sorted: false)
+        let urls = recoveryURLs(sorted: false)
         var failures = 0
         for url in urls {
             do { try FileManager.default.removeItem(at: url) }
