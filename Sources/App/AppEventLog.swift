@@ -179,6 +179,7 @@ enum AppEventLog {
 
     private static let diagnosticsKey = "diagnosticLoggingEnabled"
     private static let extremeDiagnosticsKey = "diagnosticExtremeLoggingEnabled"
+    private static let extremeDiagnosticsMigrationKey = "diagnosticExtremeLoggingDefaultMigrated"
     private static let logFolderName = "LowPolyCam Logs"
     private static let logFilenamePrefix = "LowPolyCam-Log-"
     private static let queue = DispatchQueue(label: "com.swazi.lowpolycam.eventLog", qos: .utility)
@@ -211,7 +212,7 @@ enum AppEventLog {
 
     private static let diagnosticSettings: [(key: String, defaultValue: String)] = [
         ("diagnosticLoggingEnabled", "false"),
-        ("diagnosticExtremeLoggingEnabled", "true"),
+        ("diagnosticExtremeLoggingEnabled", "false"),
         ("appColorScheme", "dark"),
         ("iconAppearance", "Ice"),
         ("iconCustomRed", "0.55"), ("iconCustomGreen", "0.85"), ("iconCustomBlue", "1.0"),
@@ -240,25 +241,36 @@ enum AppEventLog {
         UserDefaults.standard.bool(forKey: diagnosticsKey)
     }
 
-    /// New installs/builds default to Extreme while diagnostics are enabled. A stored false value is respected.
+    /// Extreme is an explicit opt-in layer on top of normal diagnostics. It never activates while
+    /// diagnostic logging is off, and a missing preference is always treated as false.
     static var extremeDiagnosticsEnabled: Bool {
         let defaults = UserDefaults.standard
         guard diagnosticsEnabled else { return false }
-        if defaults.object(forKey: extremeDiagnosticsKey) == nil { return true }
         return defaults.bool(forKey: extremeDiagnosticsKey)
+    }
+
+    /// v5.0.12 briefly treated a missing Extreme preference as enabled and wrote `true` when
+    /// normal diagnostics were enabled. Clear that legacy auto-enabled value once so an existing
+    /// install follows the new explicit opt-in contract. A user can enable Extreme again from
+    /// Settings after this migration, and that deliberate choice is preserved.
+    static func normalizeExtremeDiagnosticsPreference() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: extremeDiagnosticsMigrationKey) else { return }
+        defaults.set(false, forKey: extremeDiagnosticsKey)
+        defaults.set(true, forKey: extremeDiagnosticsMigrationKey)
     }
 
     static func setDiagnosticsEnabled(_ enabled: Bool) {
         let defaults = UserDefaults.standard
         if enabled, defaults.object(forKey: extremeDiagnosticsKey) == nil {
-            defaults.set(true, forKey: extremeDiagnosticsKey)
+            defaults.set(false, forKey: extremeDiagnosticsKey)
         }
         defaults.set(enabled, forKey: diagnosticsKey)
         queue.async {
             if enabled {
                 loggingEnabledLocked = true
                 beginNewSessionLocked()
-                appendStructuredLocked(
+                appendRecordWithDiagnosticsEnvelopeLocked(
                     PendingRecord(level: .info, category: .settings, message: "Diagnostic logging enabled", traceID: nil,
                                   fields: ["extreme": String(extremeDiagnosticsEnabled)], function: "setDiagnosticsEnabled", file: "AppEventLog.swift", line: 0,
                                   callerThread: "settings", callUptime: ProcessInfo.processInfo.systemUptime)
@@ -538,39 +550,43 @@ enum AppEventLog {
         queue.async {
             guard loggingEnabledLocked else { return }
             beginNewSessionLocked()
-            let extreme = extremeDiagnosticsEnabled
-            let receivedAt = ProcessInfo.processInfo.systemUptime
-            if extreme {
-                appendExtremeRecordLocked(
-                    "EXTREME EVENT RECEIVED",
-                    source: record,
-                    fields: [
-                        "sourceLevel": record.level.rawValue,
-                        "sourceCategory": record.category.rawValue,
-                        "sourceMessage": record.message,
-                        "callToLoggerMs": String(format: "%.2f", (receivedAt - record.callUptime) * 1000),
-                        "settingsRevision": String(settingsRevision),
-                        "settingsAgeMs": settingsAgeMilliseconds(now: receivedAt),
-                        "thermal": thermalStateName(ProcessInfo.processInfo.thermalState),
-                        "lowPowerMode": String(ProcessInfo.processInfo.isLowPowerModeEnabled)
-                    ]
-                )
-            }
-            appendStructuredLocked(record)
-            if extreme {
-                appendExtremeRecordLocked(
-                    "EXTREME EVENT COMMITTED",
-                    source: record,
-                    fields: [
-                        "sourceEventNumber": String(eventCounter),
-                        "loggerCommitMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - receivedAt) * 1000),
-                        "writeBufferBytes": String(writeBuffer.utf8.count),
-                        "flushScheduled": String(writeFlushScheduled),
-                        "settingsRevision": String(settingsRevision),
-                        "settingsAgeMs": settingsAgeMilliseconds(now: ProcessInfo.processInfo.systemUptime)
-                    ]
-                )
-            }
+            appendRecordWithDiagnosticsEnvelopeLocked(record)
+        }
+    }
+
+    private static func appendRecordWithDiagnosticsEnvelopeLocked(_ record: PendingRecord) {
+        let extreme = extremeDiagnosticsEnabled
+        let receivedAt = ProcessInfo.processInfo.systemUptime
+        if extreme {
+            appendExtremeRecordLocked(
+                "EXTREME EVENT RECEIVED",
+                source: record,
+                fields: [
+                    "sourceLevel": record.level.rawValue,
+                    "sourceCategory": record.category.rawValue,
+                    "sourceMessage": record.message,
+                    "callToLoggerMs": String(format: "%.2f", (receivedAt - record.callUptime) * 1000),
+                    "settingsRevision": String(settingsRevision),
+                    "settingsAgeMs": settingsAgeMilliseconds(now: receivedAt),
+                    "thermal": thermalStateName(ProcessInfo.processInfo.thermalState),
+                    "lowPowerMode": String(ProcessInfo.processInfo.isLowPowerModeEnabled)
+                ]
+            )
+        }
+        appendStructuredLocked(record)
+        if extreme {
+            appendExtremeRecordLocked(
+                "EXTREME EVENT COMMITTED",
+                source: record,
+                fields: [
+                    "sourceEventNumber": String(eventCounter),
+                    "loggerCommitMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - receivedAt) * 1000),
+                    "writeBufferBytes": String(writeBuffer.utf8.count),
+                    "flushScheduled": String(writeFlushScheduled),
+                    "settingsRevision": String(settingsRevision),
+                    "settingsAgeMs": settingsAgeMilliseconds(now: ProcessInfo.processInfo.systemUptime)
+                ]
+            )
         }
     }
 
@@ -812,22 +828,27 @@ enum AppEventLog {
 
     private static func logChangedSettingsLocked() {
         let current = currentSettingsLocked()
-        var changedKeys: [String] = []
+        var changedSettings: [(key: String, before: String, after: String)] = []
         for setting in diagnosticSettings {
             let oldValue = settingsSnapshot[setting.key] ?? setting.defaultValue
             let newValue = current[setting.key] ?? setting.defaultValue
             guard oldValue != newValue else { continue }
-            changedKeys.append(setting.key)
-            appendStructuredLocked(PendingRecord(
-                level: .info, category: .settings, message: "SETTING CHANGED \(setting.key)", traceID: nil,
-                fields: ["before": oldValue, "after": newValue], function: "UserDefaults.didChange", file: "UserDefaults", line: 0,
-                callerThread: "notification", callUptime: ProcessInfo.processInfo.systemUptime
-            ))
+            changedSettings.append((setting.key, oldValue, newValue))
         }
         settingsSnapshot = current
-        if !changedKeys.isEmpty {
-            settingsRevision &+= 1
-            lastSettingsChangeUptime = ProcessInfo.processInfo.systemUptime
+        guard !changedSettings.isEmpty else { return }
+
+        // Advance the revision before writing the records so every Extreme envelope describes
+        // the settings state that caused the batch, and its age starts at zero rather than at
+        // the previous revision.
+        settingsRevision &+= 1
+        lastSettingsChangeUptime = ProcessInfo.processInfo.systemUptime
+        for setting in changedSettings {
+            appendRecordWithDiagnosticsEnvelopeLocked(PendingRecord(
+                level: .info, category: .settings, message: "SETTING CHANGED \(setting.key)", traceID: nil,
+                fields: ["before": setting.before, "after": setting.after], function: "UserDefaults.didChange", file: "UserDefaults", line: 0,
+                callerThread: "notification", callUptime: ProcessInfo.processInfo.systemUptime
+            ))
         }
     }
 

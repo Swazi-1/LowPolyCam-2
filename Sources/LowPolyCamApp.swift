@@ -8,6 +8,7 @@ struct LowPolyCamApp: App {
 
     init() {
         LowPolyCamPreferences.registerAndMigrate()
+        AppEventLog.normalizeExtremeDiagnosticsPreference()
         AppEventLog.beginNewSession()
         AppEventLog.event("App initialized")
     }

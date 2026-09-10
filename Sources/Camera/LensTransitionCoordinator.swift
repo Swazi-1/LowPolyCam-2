@@ -349,7 +349,11 @@ final class LensTransitionCoordinator {
         sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self] in
             guard let self else { return }
             guard self.isActive(request.id) else {
-                AppEventLog.guardRejected("physical lens apply", reason: "transition no longer active", traceID: trace)
+                // A newer zoom request owns the cover now. This is the expected cancellation path
+                // during a fast drag, not a failed hardware apply; keep it in Extreme trace data
+                // without inflating the warning count or presenting a false failure.
+                AppEventLog.deepEvent("PHYSICAL LENS APPLY SUPERSEDED", category: .lens, traceID: trace,
+                                      fields: ["reason": "transition no longer active"])
                 return
             }
             guard self.zoomRequests.isLatest(request.id) else { return }

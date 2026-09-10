@@ -23,6 +23,8 @@ This archive is the v5.0.11 beta source with the v5 release-closure pass applied
 - HUD search results open the current content screen directly, and Extreme Bug Trace is indexed with the diagnostics settings.
 - Extreme Bug Trace now adds received/committed timing envelopes around every event; normal diagnostics are unchanged.
 - Extreme-only sampling is denser for settings changes, zoom-probe frames, dropped callbacks, and storage ticks.
+- Diagnostic logging now has an explicit three-state contract: off writes nothing, normal logging stays normal, and Extreme activates only after its own toggle is enabled; existing installs are migrated away from the old auto-enabled Extreme default.
+- Physical-lens zoom probes now compare pre-commit frames with the current lens and retarget only after the new input commits, removing false flicker warnings during handoff cancellation.
 
 ## Version
 

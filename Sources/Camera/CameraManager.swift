@@ -1875,7 +1875,8 @@ final class CameraManager: NSObject, ObservableObject {
                             device: currentDevice,
                             targetDisplayedZoom: requested,
                             requestTraceID: requestTraceID,
-                            reason: "physical lens handoff"
+                            reason: "physical lens handoff",
+                            probeExpectedDeviceZoom: currentDevice.videoZoomFactor
                         )
                     }
                     if recordingOrStarting && self.captureMode != .video {
@@ -2017,11 +2018,18 @@ final class CameraManager: NSObject, ObservableObject {
         device: AVCaptureDevice,
         targetDisplayedZoom: CGFloat,
         requestTraceID: String,
-        reason: String
+        reason: String,
+        probeExpectedDeviceZoom: CGFloat? = nil
     ) {
         guard AppEventLog.extremeDiagnosticsEnabled else { return }
         let interactionTrace = diagnosticZoomInteractionTraceID ?? requestTraceID
-        let expectedDeviceZoom = deviceZoomFactor(for: snappedZoomFactor(targetDisplayedZoom, for: device), device: device)
+        let targetDeviceZoom = deviceZoomFactor(for: snappedZoomFactor(targetDisplayedZoom, for: device), device: device)
+        // During a physical handoff the callback stream still belongs to the old input until
+        // commitConfiguration() succeeds. Compare those frames with the old input's current
+        // zoom; after commit, applyPreparedLensHardware retargets the probe to the new device
+        // and its committed zoom. Comparing the old stream with the future target creates false
+        // flicker warnings for every frame while the cover is up.
+        let expectedDeviceZoom = probeExpectedDeviceZoom ?? targetDeviceZoom
         let canObserveFrames = session.outputs.contains { $0 === liveMetrics.output } &&
             liveMetrics.output.connection(with: .video)?.isEnabled == true
         AppEventLog.deepEvent("EXTREME ZOOM TRANSITION MONITOR", category: .zoom, traceID: interactionTrace, fields: [
@@ -2031,7 +2039,9 @@ final class CameraManager: NSObject, ObservableObject {
             "device": device.localizedName,
             "actualDeviceZoomBefore": String(format: "%.3f", Double(device.videoZoomFactor)),
             "targetDisplayedZoom": String(format: "%.3f", Double(targetDisplayedZoom)),
-            "targetDeviceZoom": String(format: "%.3f", Double(expectedDeviceZoom))
+            "targetDeviceZoom": String(format: "%.3f", Double(targetDeviceZoom)),
+            "probeExpectedDeviceZoom": String(format: "%.3f", Double(expectedDeviceZoom)),
+            "probeExpectation": probeExpectedDeviceZoom == nil ? "future target" : "current device until handoff commit"
         ])
         guard canObserveFrames else {
             AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE UNAVAILABLE", category: .zoom, level: .warning, traceID: interactionTrace,
