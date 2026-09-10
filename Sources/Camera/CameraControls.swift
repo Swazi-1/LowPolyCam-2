@@ -96,16 +96,16 @@ struct TorchButton: View {
                             get: { camera.torchBrightnessLevel },
                             set: { camera.setTorchBrightness($0, isFinal: false) }
                         ),
-                        in: 0.05...1.0
+                        in: 0.05...1.0,
+                        onEditingChanged: { editing in
+                            if editing {
+                                camera.beginTorchBrightnessInteraction()
+                            } else {
+                                camera.endTorchBrightnessInteraction()
+                            }
+                        }
                     )
                     .tint(theme)
-                    .onEditingChanged { editing in
-                        if editing {
-                            camera.beginTorchBrightnessInteraction()
-                        } else {
-                            camera.endTorchBrightnessInteraction()
-                        }
-                    }
                     Text(String(format: "%.0f%%", camera.torchBrightnessLevel * 100))
                         .font(.caption2.monospacedDigit())
                 }
@@ -587,7 +587,21 @@ struct ProToolsPopup: View {
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.75))
 
-            HStack(spacing: 6) {
+            toolButtons
+            activeToolContent
+        }
+        .foregroundStyle(.white)
+        .padding(11)
+        .frame(width: 342)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private var toolButtons: some View {
+        HStack(spacing: 6) {
                 Button {
                     CameraHaptics.fire()
                     setActiveTool(activeTool == .ev ? nil : .ev)
@@ -648,113 +662,115 @@ struct ProToolsPopup: View {
                     toolPill("Reset", value: "", isActive: false)
                 }
                 .buttonStyle(.plain)
-            }
-
-            if activeTool == .ev {
-                VStack(spacing: 5) {
-                    HStack {
-                        Text("Exposure")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        Text(evLabel)
-                            .font(.caption.monospacedDigit().weight(.semibold))
-                            .foregroundStyle(theme)
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(camera.exposureBias) },
-                            set: { camera.setExposureBias(Float($0)) }
-                        ),
-                        in: -2...2,
-                        step: 0.1
-                    )
-                    .tint(theme)
-                    Button {
-                        CameraHaptics.fire()
-                        camera.setExposureBias(0)
-                    } label: {
-                        Label("Reset EV", systemImage: "arrow.counterclockwise")
-                            .font(.caption2.weight(.semibold))
-                            .frame(minHeight: 36)
-                            .padding(.horizontal, 8)
-                            .background(.black.opacity(0.24), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if camera.whiteBalancePreset == .custom {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Custom WB")
-                        .font(.caption.weight(.semibold))
-                    HStack {
-                        Text("Temp")
-                        Spacer()
-                        Text(String(format: "%.0f K", camera.customWhiteBalanceTemperature))
-                            .font(.caption2.monospacedDigit())
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { camera.customWhiteBalanceTemperature },
-                            set: { camera.setCustomWhiteBalance(temperature: $0, tint: camera.customWhiteBalanceTint, isFinal: false) }
-                        ),
-                        in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
-                        step: 50
-                    )
-                    .tint(theme)
-                    .onEditingChanged { editing in
-                        if editing {
-                            camera.beginCustomWhiteBalanceInteraction()
-                        } else {
-                            camera.endCustomWhiteBalanceInteraction()
-                        }
-                    }
-                    HStack {
-                        Text("Tint")
-                        Spacer()
-                        Text(String(format: "%+.0f", camera.customWhiteBalanceTint))
-                            .font(.caption2.monospacedDigit())
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { camera.customWhiteBalanceTint },
-                            set: { camera.setCustomWhiteBalance(temperature: camera.customWhiteBalanceTemperature, tint: $0, isFinal: false) }
-                        ),
-                        in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
-                        step: 1
-                    )
-                    .tint(theme)
-                    .onEditingChanged { editing in
-                        if editing {
-                            camera.beginCustomWhiteBalanceInteraction()
-                        } else {
-                            camera.endCustomWhiteBalanceInteraction()
-                        }
-                    }
-                    Button {
-                        CameraHaptics.fire()
-                        camera.setCustomWhiteBalance(
-                            temperature: WhiteBalancePreferencePolicy.defaultTemperature,
-                            tint: 0
-                        )
-                    } label: {
-                        Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
-                            .font(.caption2.weight(.semibold))
-                            .frame(minHeight: 36)
-                            .padding(.horizontal, 8)
-                            .background(.black.opacity(0.24), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
         }
-        .foregroundStyle(.white)
-        .padding(11)
-        .frame(width: 342)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
+    }
+
+    @ViewBuilder
+    private var activeToolContent: some View {
+        if activeTool == .ev {
+            exposureControls
+        }
+
+        if camera.whiteBalancePreset == .custom {
+            customWhiteBalanceControls
+        }
+    }
+
+    private var exposureControls: some View {
+        VStack(spacing: 5) {
+            HStack {
+                Text("Exposure")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(evLabel)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(theme)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(camera.exposureBias) },
+                    set: { camera.setExposureBias(Float($0)) }
+                ),
+                in: -2...2,
+                step: 0.1
+            )
+            .tint(theme)
+            Button {
+                CameraHaptics.fire()
+                camera.setExposureBias(0)
+            } label: {
+                Label("Reset EV", systemImage: "arrow.counterclockwise")
+                    .font(.caption2.weight(.semibold))
+                    .frame(minHeight: 36)
+                    .padding(.horizontal, 8)
+                    .background(.black.opacity(0.24), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var customWhiteBalanceControls: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Custom WB")
+                .font(.caption.weight(.semibold))
+            HStack {
+                Text("Temp")
+                Spacer()
+                Text(String(format: "%.0f K", camera.customWhiteBalanceTemperature))
+                    .font(.caption2.monospacedDigit())
+            }
+            Slider(
+                value: Binding(
+                    get: { camera.customWhiteBalanceTemperature },
+                    set: { camera.setCustomWhiteBalance(temperature: $0, tint: camera.customWhiteBalanceTint, isFinal: false) }
+                ),
+                in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
+                step: 50,
+                onEditingChanged: { editing in
+                    if editing {
+                        camera.beginCustomWhiteBalanceInteraction()
+                    } else {
+                        camera.endCustomWhiteBalanceInteraction()
+                    }
+                }
+            )
+            .tint(theme)
+            HStack {
+                Text("Tint")
+                Spacer()
+                Text(String(format: "%+.0f", camera.customWhiteBalanceTint))
+                    .font(.caption2.monospacedDigit())
+            }
+            Slider(
+                value: Binding(
+                    get: { camera.customWhiteBalanceTint },
+                    set: { camera.setCustomWhiteBalance(temperature: camera.customWhiteBalanceTemperature, tint: $0, isFinal: false) }
+                ),
+                in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
+                step: 1,
+                onEditingChanged: { editing in
+                    if editing {
+                        camera.beginCustomWhiteBalanceInteraction()
+                    } else {
+                        camera.endCustomWhiteBalanceInteraction()
+                    }
+                }
+            )
+            .tint(theme)
+            Button {
+                CameraHaptics.fire()
+                camera.setCustomWhiteBalance(
+                    temperature: WhiteBalancePreferencePolicy.defaultTemperature,
+                    tint: 0
+                )
+            } label: {
+                Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
+                    .font(.caption2.weight(.semibold))
+                    .frame(minHeight: 36)
+                    .padding(.horizontal, 8)
+                    .background(.black.opacity(0.24), in: Capsule())
+            }
+            .buttonStyle(.plain)
         }
     }
 

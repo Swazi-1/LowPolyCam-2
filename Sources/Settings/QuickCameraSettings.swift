@@ -61,13 +61,15 @@ struct QuickControlsSettingsView: View {
                 }
             }
 
-            Section("PREVIEW") {
+            Section {
                 Picker("Clean Preview Gesture", selection: $cleanPreviewGesture) {
                     ForEach(CleanPreviewGesture.allCases) { gesture in
                         Text(gesture.rawValue).tag(gesture.rawValue)
                     }
                 }
                 .pickerStyle(.menu)
+            } header: {
+                Text("PREVIEW")
             } footer: {
                 Text("Clean Preview hides the HUD and controls while keeping one persistent shutter row. Use the configured gesture on the preview to toggle it.")
             }

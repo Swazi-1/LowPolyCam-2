@@ -175,7 +175,7 @@ struct CapturePreferencesView: View {
                 Text("The optional warning appears below 1 GB. Critical low-storage protection remains active even when the warning is off.")
             }
 
-            Section("WHITE BALANCE") {
+            Section {
                 Picker("White Balance", selection: whiteBalanceBinding) {
                     ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
                         Text(preset.rawValue).tag(preset)
@@ -204,15 +204,15 @@ struct CapturePreferencesView: View {
                                 }
                             ),
                             in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
-                            step: 50
-                        )
-                        .onEditingChanged { editing in
-                            if editing {
-                                camera.beginCustomWhiteBalanceInteraction()
-                            } else {
-                                camera.endCustomWhiteBalanceInteraction()
+                            step: 50,
+                            onEditingChanged: { editing in
+                                if editing {
+                                    camera.beginCustomWhiteBalanceInteraction()
+                                } else {
+                                    camera.endCustomWhiteBalanceInteraction()
+                                }
                             }
-                        }
+                        )
 
                         HStack {
                             Text("Tint")
@@ -233,15 +233,15 @@ struct CapturePreferencesView: View {
                                 }
                             ),
                             in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
-                            step: 1
-                        )
-                        .onEditingChanged { editing in
-                            if editing {
-                                camera.beginCustomWhiteBalanceInteraction()
-                            } else {
-                                camera.endCustomWhiteBalanceInteraction()
+                            step: 1,
+                            onEditingChanged: { editing in
+                                if editing {
+                                    camera.beginCustomWhiteBalanceInteraction()
+                                } else {
+                                    camera.endCustomWhiteBalanceInteraction()
+                                }
                             }
-                        }
+                        )
 
                         Button {
                             CameraHaptics.fire()
@@ -254,11 +254,13 @@ struct CapturePreferencesView: View {
                         }
                     }
                 }
+            } header: {
+                Text("WHITE BALANCE")
             } footer: {
                 Text("Custom White Balance uses 2,500–10,000 K and tint from −150 to +150. Reset returns to 5,200 K and 0 tint without switching to Auto.")
             }
 
-            Section("TORCH") {
+            Section {
                 HStack {
                     Label("Torch Brightness", systemImage: "bolt.fill")
                     Spacer()
@@ -272,21 +274,23 @@ struct CapturePreferencesView: View {
                         set: { camera.setTorchBrightness($0, isFinal: false) }
                     ),
                     in: TorchLevelPolicy.minimumNormalizedLevel...TorchLevelPolicy.maximumNormalizedLevel,
-                    step: 0.01
+                    step: 0.01,
+                    onEditingChanged: { editing in
+                        if editing {
+                            camera.beginTorchBrightnessInteraction()
+                        } else {
+                            camera.endTorchBrightnessInteraction()
+                        }
+                    }
                 )
                 .disabled(!camera.torchAvailable || !camera.torchBrightnessSupported)
-                .onEditingChanged { editing in
-                    if editing {
-                        camera.beginTorchBrightnessInteraction()
-                    } else {
-                        camera.endTorchBrightnessInteraction()
-                    }
-                }
                 if !camera.torchAvailable {
                     Text("Torch unavailable for the current camera or configuration.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("TORCH")
             } footer: {
                 Text("Brightness is a normalized 5–100% request. The active camera may apply a lower thermal maximum or fall back to its supported torch level.")
             }

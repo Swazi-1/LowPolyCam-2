@@ -49,7 +49,7 @@ struct CameraHUDSettingsView: View {
             }
             .disabled(!isHUDEnabled)
 
-            Section("RECORDING HUD") {
+            Section {
                 Picker("Audio Level Meter", selection: $audioLevelMeter) {
                     ForEach(AudioLevelMeterMode.allCases) { mode in
                         Text(mode.displayName).tag(mode.rawValue)
@@ -61,6 +61,8 @@ struct CameraHUDSettingsView: View {
                         camera.setAudioLevelMeterMode(mode)
                     }
                 }
+            } header: {
+                Text("RECORDING HUD")
             } footer: {
                 Text("The meter reads the authorized microphone data output and appears only while recording. Decibel readouts are digital dBFS, not SPL or dBA.")
             }
