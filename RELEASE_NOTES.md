@@ -16,6 +16,9 @@ This archive is the v5.0.11 beta source with the v5 release-closure pass applied
 - Native launch-screen background asset and dead declaration cleanup.
 - Xcode 26/Swift 6 CoreMedia format-description cast fix.
 - CI test destination selection now uses an Xcode-compatible iPhone simulator ID.
+- CI initializes CoreSimulator and provisions a temporary iPhone simulator when the runner has no usable device.
+- CI compiles the test bundle for a generic iOS Simulator before executing it.
+- If a hosted runner has no simulator runtime, CI reports the environment limitation and skips only execution after compilation.
 
 ## Version
 
