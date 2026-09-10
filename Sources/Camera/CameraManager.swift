@@ -1803,7 +1803,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             try device.lockForConfiguration()
             if enabled {
-                let maximumTorchLevel = max(device.maxAvailableTorchLevel, 0.05)
+                let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
                 let requestedTorchLevel = min(
                     max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
                     maximumTorchLevel
@@ -1831,7 +1831,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if self.isTorchOn != actualState {
                     self.isTorchOn = actualState
                 }
-                let supportsIntensity = device.hasTorch && device.maxAvailableTorchLevel > 0
+                let supportsIntensity = device.hasTorch && device.isTorchModeSupported(.on)
                 if self.torchBrightnessSupported != supportsIntensity {
                     self.torchBrightnessSupported = supportsIntensity
                 }
@@ -1840,7 +1840,7 @@ final class CameraManager: NSObject, ObservableObject {
             AppEventLog.event("TORCH BRIGHTNESS APPLIED", category: .torch, fields: [
                 "requestedLevel": String(format: "%.3f", torchBrightnessLevel),
                 "actualLevel": String(format: "%.3f", actualTorchLevel),
-                "maxAvailableLevel": String(format: "%.3f", device.maxAvailableTorchLevel),
+                "maxAvailableLevel": String(format: "%.3f", AVCaptureDevice.maxAvailableTorchLevel),
                 "device": device.localizedName
             ])
         } catch {
@@ -4916,7 +4916,7 @@ final class CameraManager: NSObject, ObservableObject {
                     return
                 }
                 do {
-                    let maximumTorchLevel = max(device.maxAvailableTorchLevel, 0.05)
+                    let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
                     let requestedTorchLevel = min(
                         max(Float(self.torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
                         maximumTorchLevel
@@ -5060,7 +5060,7 @@ final class CameraManager: NSObject, ObservableObject {
                 if shouldPreserveTorch, !isSwitchingInput,
                    desiredDevice.hasTorch, desiredDevice.isTorchAvailable {
                     do {
-                        let maximumTorchLevel = max(desiredDevice.maxAvailableTorchLevel, 0.05)
+                        let maximumTorchLevel = max(AVCaptureDevice.maxAvailableTorchLevel, 0.05)
                         let requestedTorchLevel = min(
                             max(Float(torchBrightnessLevel) * maximumTorchLevel, min(0.05, maximumTorchLevel)),
                             maximumTorchLevel
@@ -7049,7 +7049,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
         let torchAvailable = device.hasTorch && device.isTorchAvailable
-        let torchLevelSupported = device.hasTorch && device.maxAvailableTorchLevel > 0
+        let torchLevelSupported = device.hasTorch && device.isTorchModeSupported(.on)
         configurePhotoSceneMonitoring()
         let flashAvailable = device.hasFlash && !photoOutput.supportedFlashModes.isEmpty
         publish {

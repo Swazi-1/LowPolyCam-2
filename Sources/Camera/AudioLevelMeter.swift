@@ -55,7 +55,6 @@ final class AudioLevelMeter: NSObject, ObservableObject, AVCaptureAudioDataOutpu
 
     override init() {
         super.init()
-        output.alwaysDiscardsLateAudioData = true
         output.setSampleBufferDelegate(self, queue: queue)
     }
 

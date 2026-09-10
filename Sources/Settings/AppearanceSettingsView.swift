@@ -162,149 +162,15 @@ struct VideoPresetsView: View {
 
     var body: some View {
         List {
-            Section("PRESETS") {
-                ForEach(VideoQuickPreset.allCases) { preset in
-                    Button {
-                        preview = preset
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: icon(for: preset))
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(iconColor(for: preset))
-                                .frame(width: 24)
-
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(preset.rawValue)
-                                    .foregroundStyle(.primary)
-                                Text(preset.detail)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.78)
-                            }
-
-                            Spacer(minLength: 6)
-                            if preview == preset {
-                                Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold))
-                                    .foregroundStyle(.blue)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            Section("CUSTOM PRESETS") {
-                if customPresets.isEmpty {
-                    Text("Save the current camera setup to create a reusable preset.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(customPresets) { preset in
-                        HStack(spacing: 12) {
-                            Button {
-                                applyCustomPreset(preset)
-                            } label: {
-                                HStack(spacing: 12) {
-                                    SettingsListIcon(symbol: "slider.horizontal.3", color: .purple)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(preset.name)
-                                            .foregroundStyle(.primary)
-                                        Text(presetSummary(preset))
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Menu {
-                                Button("Apply") { applyCustomPreset(preset) }
-                                Button("Rename") {
-                                    renamePresetID = preset.id
-                                    renamePresetName = preset.name
-                                    showingRenamePresetAlert = true
-                                }
-                                Button("Delete", role: .destructive) { deletePreset(preset) }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .font(.title3)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 34, height: 34)
-                            }
-                            .accessibilityLabel("Actions for \(preset.name)")
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) { deletePreset(preset) } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
-
-                Button {
-                    newPresetName = ""
-                    showingSavePresetAlert = true
-                } label: {
-                    Label("Save Current Setup", systemImage: "plus.circle.fill")
-                }
-            } footer: {
-                Text("Presets store capture mode, formats, codec, independent compression, bitrate, zoom, stabilization, white balance and camera position. Applying one uses a single coordinated camera configuration.")
-            }
-
-            Section {
-                HStack(spacing: 8) {
-                    Text(preview.resolution.rawValue)
-                    Text("·")
-                    Text("\(preview.frameRate.rawValue) fps")
-                    Text("·")
-                    Text("HEVC")
-                    Text("·")
-                    Text(preview.compression.rawValue)
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-
-                Button {
-                    camera.applyQuickPreset(preview) { success in
-                        if success { dismiss() }
-                    }
-                } label: {
-                    HStack {
-                        Spacer()
-                        Text("Use \(preview.rawValue)")
-                            .fontWeight(.semibold)
-                        Spacer()
-                    }
-                }
-                .disabled(camera.captureMode != .video || camera.isPreviewTransitioning || camera.isLensTransitioning)
-            } header: {
-                Text("SELECTED PRESET")
-            } footer: {
-                Text(camera.captureMode == .video
-                     ? "Applying a preset changes Video resolution, frame rate, codec and compression together."
-                     : "Switch Camera Setup to Video before applying a Video preset.")
-            }
+            builtInPresetsSection
+            customPresetsSection
+            selectedPresetSection
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Video Presets")
         .navigationBarTitleDisplayMode(.inline)
         .tint(.blue)
-        .onAppear {
-            customPresets = CameraPresetStore.load()
-            preview = VideoQuickPreset.allCases.first {
-                $0.resolution == camera.selectedResolution &&
-                $0.frameRate == camera.selectedFrameRate &&
-                $0.compression == camera.videoCompression &&
-                camera.selectedVideoCodec == "HEVC"
-            } ?? .balanced
-        }
+        .onAppear(perform: loadPresets)
         .alert("Save Current Setup", isPresented: $showingSavePresetAlert) {
             TextField("Preset name", text: $newPresetName)
             Button("Cancel", role: .cancel) {}
@@ -319,6 +185,170 @@ struct VideoPresetsView: View {
         } message: {
             Text("The updated name is saved locally with the preset.")
         }
+    }
+
+    @ViewBuilder
+    private var builtInPresetsSection: some View {
+        Section("PRESETS") {
+            ForEach(VideoQuickPreset.allCases) { preset in
+                builtInPresetRow(preset)
+            }
+        }
+    }
+
+    private func builtInPresetRow(_ preset: VideoQuickPreset) -> some View {
+        Button {
+            preview = preset
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon(for: preset))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(iconColor(for: preset))
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(preset.rawValue)
+                        .foregroundStyle(.primary)
+                    Text(preset.detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+
+                Spacer(minLength: 6)
+                if preview == preset {
+                    Image(systemName: "checkmark")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.blue)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var customPresetsSection: some View {
+        Section("CUSTOM PRESETS") {
+            if customPresets.isEmpty {
+                Text("Save the current camera setup to create a reusable preset.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(customPresets) { preset in
+                    customPresetRow(preset)
+                }
+            }
+
+            Button {
+                newPresetName = ""
+                showingSavePresetAlert = true
+            } label: {
+                Label("Save Current Setup", systemImage: "plus.circle.fill")
+            }
+        } footer: {
+            Text("Presets store capture mode, formats, codec, independent compression, bitrate, zoom, stabilization, white balance and camera position. Applying one uses a single coordinated camera configuration.")
+        }
+    }
+
+    private func customPresetRow(_ preset: CameraPreset) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                applyCustomPreset(preset)
+            } label: {
+                HStack(spacing: 12) {
+                    SettingsListIcon(symbol: "slider.horizontal.3", color: .purple)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(preset.name)
+                            .foregroundStyle(.primary)
+                        Text(presetSummary(preset))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button("Apply") { applyCustomPreset(preset) }
+                Button("Rename") {
+                    renamePresetID = preset.id
+                    renamePresetName = preset.name
+                    showingRenamePresetAlert = true
+                }
+                Button("Delete", role: .destructive) { deletePreset(preset) }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+            }
+            .accessibilityLabel("Actions for \(preset.name)")
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) { deletePreset(preset) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedPresetSection: some View {
+        Section {
+            selectedPresetSummary
+            Button {
+                camera.applyQuickPreset(preview) { success in
+                    if success { dismiss() }
+                }
+            } label: {
+                HStack {
+                    Spacer()
+                    Text("Use \(preview.rawValue)")
+                        .fontWeight(.semibold)
+                    Spacer()
+                }
+            }
+            .disabled(camera.captureMode != .video || camera.isPreviewTransitioning || camera.isLensTransitioning)
+        } header: {
+            Text("SELECTED PRESET")
+        } footer: {
+            Text(selectedPresetFooter)
+        }
+    }
+
+    private var selectedPresetSummary: some View {
+        HStack(spacing: 8) {
+            Text(preview.resolution.rawValue)
+            Text("·")
+            Text("\(preview.frameRate.rawValue) fps")
+            Text("·")
+            Text("HEVC")
+            Text("·")
+            Text(preview.compression.rawValue)
+        }
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+    }
+
+    private var selectedPresetFooter: String {
+        camera.captureMode == .video
+            ? "Applying a preset changes Video resolution, frame rate, codec and compression together."
+            : "Switch Camera Setup to Video before applying a Video preset."
+    }
+
+    private func loadPresets() {
+        customPresets = CameraPresetStore.load()
+        preview = VideoQuickPreset.allCases.first {
+            $0.resolution == camera.selectedResolution &&
+            $0.frameRate == camera.selectedFrameRate &&
+            $0.compression == camera.videoCompression &&
+            camera.selectedVideoCodec == "HEVC"
+        } ?? .balanced
     }
 
     private func icon(for preset: VideoQuickPreset) -> String {
