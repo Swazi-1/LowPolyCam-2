@@ -369,6 +369,8 @@ struct VideoSettingsView: View {
             .init("Timer", "Settings › Preferences", "timer shutter delay off 3 seconds 10 seconds", "timer", .orange, .preferences),
             .init("Zoom Speed", "Settings › Preferences", "zoom speed slow normal fast", "plus.magnifyingglass", .blue, .preferences),
             .init("Tap Zoom to Reset", "Settings › Preferences", "tap zoom reset", "plus.magnifyingglass", .blue, .preferences),
+            .init("AE/AF Lock Mode", "Settings › Preferences", "focus exposure ae af lock mode ae only af only long press", "viewfinder", .yellow, .preferences),
+            .init("Tap Focus Reset", "Settings › Preferences", "tap focus reset auto focus exposure continuous 1 3 5 seconds never", "scope", .orange, .preferences),
             .init("Lock Recording Controls", "Settings › Preferences", "lock recording controls safeguard", "lock.fill", .blue, .preferences),
             .init("Low Storage Warning", "Settings › Preferences", "low storage warning 1 gb", "externaldrive.fill.badge.checkmark", .blue, .preferences),
             .init("Haptic Capture", "Settings › Preferences", "haptic feedback shutter vibration", "waveform.path.ecg", .orange, .preferences),

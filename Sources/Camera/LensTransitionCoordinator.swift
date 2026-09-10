@@ -296,9 +296,15 @@ final class LensTransitionCoordinator {
                 "requestedDisplayedZoom": String(format: "%.3f", Double(request.requestedZoom))
             ])
 
-            // Keep the blur over the short optical/ISP constituent change. No format/input rebuild
-            // happens here, so this stays close to the system camera's fast switch behavior.
-            self.finish(request.id, revealDelay: 0.04)
+            // Do not reveal on a fixed timer. Even a virtual constituent switch can briefly drive
+            // AE/AWB while the ISP converges on the new optical path. Wait for a short minimum hold
+            // plus consecutive settled device-state checks, with a bounded fallback.
+            self.finishWhenDeviceSettled(
+                request.id,
+                device: device,
+                minimumHold: 0.08,
+                maximumHold: 0.28
+            )
         }
     }
 
@@ -391,11 +397,94 @@ final class LensTransitionCoordinator {
             // behind this same cover before it becomes responsible for the reveal.
             guard self.zoomRequests.isLatest(request.id) else { return }
 
-            // Keep the cover through the first part of the new stream settling. PreviewView also
-            // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
-            // can remain true across an input rebuild, so a tiny post-commit hold prevents the cover
-            // from disappearing on a stale pre-switch preview state.
-            self.finish(request.id, revealDelay: 0.04)
+            // The diagnostic trace showed the new physical sensor making a large exposure/luma
+            // correction after commitConfiguration() returned. A fixed 40 ms reveal can therefore
+            // expose that correction. Hold the cover until AE/AWB/zoom report settled for several
+            // consecutive checks, while retaining a bounded timeout so the UI can never get stuck.
+            self.finishWhenDeviceSettled(
+                request.id,
+                device: prepared.device,
+                minimumHold: 0.10,
+                maximumHold: 0.36
+            )
+        }
+    }
+
+    func finishWhenDeviceSettled(
+        _ requestID: UInt64,
+        device: AVCaptureDevice,
+        minimumHold: TimeInterval = 0.10,
+        maximumHold: TimeInterval = 0.36,
+        stableChecksRequired: Int = 3
+    ) {
+        guard activeRequestID == requestID, zoomRequests.isLatest(requestID) else { return }
+        let trace = traceID(requestID)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let minimumDeadline = startedAt + max(0, minimumHold)
+        let maximumDeadline = startedAt + max(minimumHold, maximumHold)
+        let requiredChecks = max(1, stableChecksRequired)
+        AppEventLog.deepEvent("LENS SENSOR SETTLE WAIT", category: .lens, traceID: trace, fields: [
+            "device": device.localizedName,
+            "minimumHoldMs": String(format: "%.0f", max(0, minimumHold) * 1000),
+            "maximumHoldMs": String(format: "%.0f", max(minimumHold, maximumHold) * 1000),
+            "stableChecksRequired": String(requiredChecks)
+        ])
+        pollDeviceSettle(
+            requestID,
+            device: device,
+            startedAt: startedAt,
+            minimumDeadline: minimumDeadline,
+            maximumDeadline: maximumDeadline,
+            stableChecks: 0,
+            stableChecksRequired: requiredChecks
+        )
+    }
+
+    private func pollDeviceSettle(
+        _ requestID: UInt64,
+        device: AVCaptureDevice,
+        startedAt: TimeInterval,
+        minimumDeadline: TimeInterval,
+        maximumDeadline: TimeInterval,
+        stableChecks: Int,
+        stableChecksRequired: Int
+    ) {
+        sessionQueue.asyncAfter(deadline: .now() + 0.016) { [weak self, weak device] in
+            guard let self, let device,
+                  self.activeRequestID == requestID,
+                  self.zoomRequests.isLatest(requestID) else { return }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let exposureSettled = !device.isAdjustingExposure
+            let whiteBalanceSettled = !device.isAdjustingWhiteBalance
+            let zoomSettled = !device.isRampingVideoZoom
+            let eligible = now >= minimumDeadline && exposureSettled && whiteBalanceSettled && zoomSettled
+            let nextStableChecks = eligible ? stableChecks + 1 : 0
+            let timedOut = now >= maximumDeadline
+
+            if nextStableChecks >= stableChecksRequired || timedOut {
+                AppEventLog.deepEvent("LENS SENSOR SETTLE COMPLETE", category: .lens, traceID: self.traceID(requestID), fields: [
+                    "device": device.localizedName,
+                    "elapsedMs": String(format: "%.2f", (now - startedAt) * 1000),
+                    "stableChecks": String(nextStableChecks),
+                    "timedOut": String(timedOut),
+                    "adjustingExposure": String(device.isAdjustingExposure),
+                    "adjustingWhiteBalance": String(device.isAdjustingWhiteBalance),
+                    "rampingZoom": String(device.isRampingVideoZoom)
+                ])
+                self.finish(requestID, revealDelay: 0)
+                return
+            }
+
+            self.pollDeviceSettle(
+                requestID,
+                device: device,
+                startedAt: startedAt,
+                minimumDeadline: minimumDeadline,
+                maximumDeadline: maximumDeadline,
+                stableChecks: nextStableChecks,
+                stableChecksRequired: stableChecksRequired
+            )
         }
     }
 

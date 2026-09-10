@@ -341,7 +341,6 @@ final class PreviewView: UIView {
             self.focusIndicator.transform = .identity
         }
 
-        guard !locked else { return }
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.focusExposureLocked else { return }
             UIView.animate(withDuration: 0.22) {
@@ -349,6 +348,9 @@ final class PreviewView: UIView {
             }
         }
         hideFocusWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15, execute: workItem)
+        // A long press is only "locked" after CameraManager verifies the hardware mode. Give that
+        // verification time to finish, but do not leave a dead focus box on-screen forever if the
+        // selected lens cannot lock the requested control.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (locked ? 1.9 : 1.15), execute: workItem)
     }
 }

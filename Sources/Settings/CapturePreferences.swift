@@ -80,6 +80,8 @@ struct CapturePreferencesView: View {
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
     @AppStorage("tapZoomReset") private var tapZoomReset = true
+    @AppStorage("focusExposureLockMode") private var focusExposureLockMode = "AE/AF"
+    @AppStorage("tapFocusResetSeconds") private var tapFocusResetSeconds = 1
     @AppStorage("recordingLock") private var recordingLock = false
     @AppStorage("lowStorageWarning") private var lowStorageWarning = true
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
@@ -106,6 +108,27 @@ struct CapturePreferencesView: View {
                 }
                 .pickerStyle(.menu)
                 Toggle("Tap Zoom to Reset", isOn: $tapZoomReset)
+            }
+
+            Section {
+                Picker("Lock Mode", selection: $focusExposureLockMode) {
+                    Text("AE/AF").tag("AE/AF")
+                    Text("AE Only").tag("AE Only")
+                    Text("AF Only").tag("AF Only")
+                }
+                .pickerStyle(.menu)
+
+                Picker("Tap Focus Reset", selection: $tapFocusResetSeconds) {
+                    Text("1 second").tag(1)
+                    Text("3 seconds").tag(3)
+                    Text("5 seconds").tag(5)
+                    Text("Never").tag(0)
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("FOCUS & EXPOSURE")
+            } footer: {
+                Text("Long-press the preview to lock the selected controls. Lenses without adjustable focus automatically fall back to AE lock when AE/AF is selected.")
             }
 
             Section {

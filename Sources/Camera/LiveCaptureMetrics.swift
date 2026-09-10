@@ -300,10 +300,11 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         }
         lock.unlock()
 
-        // Extreme mode records every dropped callback so short drop bursts cannot disappear
-        // between the old first-five/every-25 sampling points. Normal mode is unchanged.
+        // Extreme mode records every dropped diagnostics callback so short bursts cannot disappear.
+        // Keep these at TRACE: AVCaptureVideoDataOutput intentionally discards late diagnostic
+        // frames and this does not by itself mean the movie-file output lost encoded frames.
         if AppEventLog.extremeDiagnosticsEnabled && (trace != nil || dropNumber > 0) {
-            AppEventLog.deepEvent("CAPTURE CALLBACK FRAME DROPPED", category: .performance, level: .warning, traceID: trace, fields: [
+            AppEventLog.deepEvent("CAPTURE CALLBACK FRAME DROPPED", category: .performance, traceID: trace, fields: [
                 "dropNumber": String(dropNumber),
                 "pts": timestamp.isFinite ? String(format: "%.6f", timestamp) : "invalid"
             ])

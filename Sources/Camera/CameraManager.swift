@@ -409,6 +409,9 @@ final class CameraManager: NSObject, ObservableObject {
     private var deferredWhiteBalanceRequest: DeferredWhiteBalanceRequest?
     private var pendingFocusLockWorkItem: DispatchWorkItem?
     private var pendingFocusReturnWorkItem: DispatchWorkItem?
+    // sessionQueue-owned hardware state. Do not use @Published lock state for queue decisions.
+    private var focusLockedInHardware = false
+    private var exposureLockedInHardware = false
     private struct ZoomSubmission {
         let factor: CGFloat
         let requestID: UInt64
@@ -430,6 +433,7 @@ final class CameraManager: NSObject, ObservableObject {
     private let videoConfigurationRequests = RequestToken("videoConfigurationRequests")
     private let qualityPreviewTransitions = RequestToken("qualityPreviewTransitions")
     private let exposureRequests = RequestToken("exposureRequests")
+    private let focusExposureRequests = RequestToken("focusExposureRequests")
     private let torchRequests = RequestToken("torchRequests")
     private let recordingStartRequests = RequestToken("recordingStartRequests")
     private let microphonePermissionRequests = RequestToken("microphonePermissionRequests")
@@ -822,43 +826,55 @@ final class CameraManager: NSObject, ObservableObject {
         )
     }
 
+    static func normalizedVideoCodec(
+        _ codec: String,
+        resolution: VideoResolution,
+        frameRate: VideoFrameRate
+    ) -> String {
+        // AVCaptureMovieFileOutput on the supported iPhone 11 paths exposes HEVC, not AVC, for
+        // 4K60. Treat this as a state invariant, not merely a Settings/UI restriction: camera
+        // preferences can be restored while Photo/Slo-Mo is active and then carried into Video.
+        if codec == "H264", resolution == .p4k, frameRate == .fps60 {
+            return "HEVC"
+        }
+        return codec
+    }
+
     private func isKnownUnsupportedH264VideoSelection(
         codec: String,
         resolution: VideoResolution,
         frameRate: VideoFrameRate
     ) -> Bool {
-        // On the supported iPhone 11 camera paths, AVCaptureMovieFileOutput falls back to HEVC
-        // for 4K60 when H.264 is requested. Keep the controls locked before the user taps;
-        // configureMovieOutputSettings remains the final readback guard for other combinations.
-        codec == "H264" &&
-            resolution == .p4k &&
-            frameRate == .fps60
+        Self.normalizedVideoCodec(codec, resolution: resolution, frameRate: frameRate) != codec
     }
 
-    /// Keeps the requested 4K60 quality when the selected encoder cannot produce AVC on either
-    /// supported camera path. This is called from the main-thread state transitions before the
-    /// next session-queue configuration is scheduled, so the UI and hardware request share one codec.
+    /// Keeps the requested 4K60 quality when AVC cannot encode the selection. This deliberately
+    /// does NOT depend on the currently visible capture mode: per-camera Video preferences may be
+    /// loaded while Photo/Slo-Mo is active, and the codec must already be valid before a later
+    /// transition into Video schedules its hardware transaction.
     @discardableResult
     private func autoPromoteH264ForUnsupportedVideoSelection(
         position: CameraPosition,
         resolution: VideoResolution,
         frameRate: VideoFrameRate
     ) -> Bool {
-        guard captureMode == .video,
-              selectedVideoCodec == "H264",
-              isKnownUnsupportedH264VideoSelection(
-                  codec: selectedVideoCodec,
-                  resolution: resolution,
-                  frameRate: frameRate
-              ),
+        let normalizedCodec = Self.normalizedVideoCodec(
+            selectedVideoCodec,
+            resolution: resolution,
+            frameRate: frameRate
+        )
+        guard normalizedCodec != selectedVideoCodec,
               position == cameraPosition else { return false }
 
+        let previousCodec = selectedVideoCodec
         let wasSuppressing = suppressAutomaticReconfiguration
         suppressAutomaticReconfiguration = true
-        selectedVideoCodec = "HEVC"
+        selectedVideoCodec = normalizedCodec
         suppressAutomaticReconfiguration = wasSuppressing
         codecAvailabilityMessage = nil
-        AppEventLog.event("Video codec promoted automatically: H264 -> HEVC for \(position == .back ? "rear" : "front") 4K60")
+        AppEventLog.event(
+            "Video codec promoted automatically: \(previousCodec) -> \(normalizedCodec) for \(position == .back ? "rear" : "front") \(resolution.rawValue)\(frameRate.rawValue)"
+        )
         return true
     }
 
@@ -1981,7 +1997,8 @@ final class CameraManager: NSObject, ObservableObject {
                     "targetDeviceZoom": String(format: "%.3f", Double(deviceFactor))
                 ])
 
-                if self.lensTransitionCoordinator.hasActiveTransition {
+                let usedImmediateSet = self.lensTransitionCoordinator.hasActiveTransition
+                if usedImmediateSet {
                     // A newer drag returned to the currently active lens while a covered switch
                     // was pending/settling. Keep the cover up, commit the newest zoom immediately
                     // (no post-transition ramp), then let this newest request own the reveal.
@@ -1995,23 +2012,108 @@ final class CameraManager: NSObject, ObservableObject {
                 device.unlockForConfiguration()
                 guard self.zoomRequests.isLatest(requestID) else { return }
                 self.requestedZoom = factor
-                AppEventLog.deepEvent("ZOOM HARDWARE APPLIED", category: .zoom, traceID: requestTraceID, fields: [
-                    "displayedTarget": String(format: "%.3f", Double(factor)),
-                    "deviceTarget": String(format: "%.3f", Double(deviceFactor)),
-                    "deviceReadback": String(format: "%.3f", Double(readbackZoom)),
-                    "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-                ])
+
+                if usedImmediateSet {
+                    AppEventLog.deepEvent("ZOOM HARDWARE SET", category: .zoom, traceID: requestTraceID, fields: [
+                        "displayedTarget": String(format: "%.3f", Double(factor)),
+                        "deviceTarget": String(format: "%.3f", Double(deviceFactor)),
+                        "deviceReadback": String(format: "%.3f", Double(readbackZoom)),
+                        "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+                    ])
+                } else {
+                    // ramp(toVideoZoomFactor:) is asynchronous. The previous diagnostic event called
+                    // this state "HARDWARE APPLIED" even though immediate readback was usually still
+                    // at the old zoom. Record scheduling separately and verify the eventual settle.
+                    AppEventLog.deepEvent("ZOOM RAMP SCHEDULED", category: .zoom, traceID: requestTraceID, fields: [
+                        "displayedTarget": String(format: "%.3f", Double(factor)),
+                        "deviceTarget": String(format: "%.3f", Double(deviceFactor)),
+                        "initialReadback": String(format: "%.3f", Double(readbackZoom)),
+                        "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+                    ])
+                    self.monitorZoomRamp(
+                        requestID: requestID,
+                        traceID: requestTraceID,
+                        device: device,
+                        targetDeviceZoom: deviceFactor,
+                        displayedTarget: factor
+                    )
+                }
+
                 self.publish {
                     self.applyPublishedZoomIfNeeded(factor)
                 }
 
-                if self.lensTransitionCoordinator.isActive(requestID) {
-                    self.lensTransitionCoordinator.finish(requestID, revealDelay: 0.08)
+                if usedImmediateSet, self.lensTransitionCoordinator.isActive(requestID) {
+                    self.lensTransitionCoordinator.finishWhenDeviceSettled(
+                        requestID,
+                        device: device,
+                        minimumHold: 0.08,
+                        maximumHold: 0.30
+                    )
                 }
             } catch {
                 AppEventLog.log(error: error, prefix: "ZOOM APPLY FAILED", category: .zoom, traceID: requestTraceID)
                 self.showError("Couldn’t change the zoom.")
             }
+    }
+
+    private func monitorZoomRamp(
+        requestID: UInt64,
+        traceID: String,
+        device: AVCaptureDevice,
+        targetDeviceZoom: CGFloat,
+        displayedTarget: CGFloat,
+        startedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        sessionQueue.asyncAfter(deadline: .now() + 0.025) { [weak self, weak device] in
+            guard let self, let device,
+                  self.zoomRequests.isLatest(requestID),
+                  self.videoInput?.device.uniqueID == device.uniqueID else { return }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let readback = device.videoZoomFactor
+            let delta = abs(readback - targetDeviceZoom)
+            let tolerance = max(CGFloat(0.02), abs(targetDeviceZoom) * 0.005)
+            if delta <= tolerance {
+                AppEventLog.deepEvent("ZOOM RAMP SETTLED", category: .zoom, traceID: traceID, fields: [
+                    "displayedTarget": String(format: "%.3f", Double(displayedTarget)),
+                    "deviceTarget": String(format: "%.3f", Double(targetDeviceZoom)),
+                    "deviceReadback": String(format: "%.3f", Double(readback)),
+                    "elapsedMs": String(format: "%.2f", (now - startedAt) * 1000)
+                ])
+                return
+            }
+
+            if !device.isRampingVideoZoom, now - startedAt > 0.075 {
+                AppEventLog.event("ZOOM RAMP STOPPED BEFORE TARGET", category: .zoom, level: .warning, traceID: traceID, fields: [
+                    "displayedTarget": String(format: "%.3f", Double(displayedTarget)),
+                    "deviceTarget": String(format: "%.3f", Double(targetDeviceZoom)),
+                    "deviceReadback": String(format: "%.3f", Double(readback)),
+                    "delta": String(format: "%.3f", Double(delta)),
+                    "elapsedMs": String(format: "%.2f", (now - startedAt) * 1000)
+                ])
+                return
+            }
+
+            if now - startedAt >= 0.80 {
+                AppEventLog.event("ZOOM RAMP SETTLE TIMEOUT", category: .zoom, level: .warning, traceID: traceID, fields: [
+                    "displayedTarget": String(format: "%.3f", Double(displayedTarget)),
+                    "deviceTarget": String(format: "%.3f", Double(targetDeviceZoom)),
+                    "deviceReadback": String(format: "%.3f", Double(readback)),
+                    "delta": String(format: "%.3f", Double(delta))
+                ])
+                return
+            }
+
+            self.monitorZoomRamp(
+                requestID: requestID,
+                traceID: traceID,
+                device: device,
+                targetDeviceZoom: targetDeviceZoom,
+                displayedTarget: displayedTarget,
+                startedAt: startedAt
+            )
+        }
     }
 
     private func beginExtremeZoomTransitionProbeIfPossible(
@@ -2044,7 +2146,7 @@ final class CameraManager: NSObject, ObservableObject {
             "probeExpectation": probeExpectedDeviceZoom == nil ? "future target" : "current device until handoff commit"
         ])
         guard canObserveFrames else {
-            AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE UNAVAILABLE", category: .zoom, level: .warning, traceID: interactionTrace,
+            AppEventLog.deepEvent("FRAME-LEVEL ZOOM PROBE UNAVAILABLE", category: .zoom, traceID: interactionTrace,
                                   fields: ["reason": "video-data diagnostics output intentionally unavailable/disabled for this capture configuration"])
             return
         }
@@ -2356,6 +2458,13 @@ final class CameraManager: NSObject, ObservableObject {
         _ = exposureRequests.next() // The new mode reapplies the current requested EV itself.
         isPreviewTransitioning = true
         captureMode = mode
+        if mode == .video {
+            _ = autoPromoteH264ForUnsupportedVideoSelection(
+                position: cameraPosition,
+                resolution: selectedResolution,
+                frameRate: selectedFrameRate
+            )
+        }
         sessionQueue.async { [weak self] in
             AppEventLog.queueStarted(modeQueueTicket)
             guard let self else { return }
@@ -2783,14 +2892,18 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func focusAndExpose(at point: CGPoint) {
+        let requestID = focusExposureRequests.next(reason: "tap focus/exposure")
         sessionQueue.async { [weak self] in
-            self?.configureFocusAndExposure(at: point, lockAfterFocusing: false)
+            guard let self, self.focusExposureRequests.isLatest(requestID) else { return }
+            self.configureFocusAndExposure(at: point, lockAfterFocusing: false, requestID: requestID)
         }
     }
 
     func lockFocusAndExposure(at point: CGPoint) {
+        let requestID = focusExposureRequests.next(reason: "lock focus/exposure")
         sessionQueue.async { [weak self] in
-            self?.configureFocusAndExposure(at: point, lockAfterFocusing: true)
+            guard let self, self.focusExposureRequests.isLatest(requestID) else { return }
+            self.configureFocusAndExposure(at: point, lockAfterFocusing: true, requestID: requestID)
         }
     }
 
@@ -3725,11 +3838,91 @@ final class CameraManager: NSObject, ObservableObject {
             "requestedCodec": requestedCodec ?? activeVideoCodec,
             "refreshAuxiliaryOutputs": String(refreshAuxiliaryOutputs)
         ])
-        // Any input/format transaction makes proof from the previous capture graph unusable,
-        // including attempts that fail before AVFoundation accepts the replacement.
-        invalidateVerifiedHighOutputProvenance()
         let effectiveCodec = requestedCodec ?? activeVideoCodec
-        let oldInput = videoInput
+        let currentInput = videoInput
+        let displayedZoomCandidate = snappedZoomFactor(requestedZoom, for: desiredDevice)
+        let targetDeviceZoomCandidate = deviceZoomFactor(for: displayedZoomCandidate, device: desiredDevice)
+        let activeMinDuration = desiredDevice.activeVideoMinFrameDuration.seconds
+        let activeMaxDuration = desiredDevice.activeVideoMaxFrameDuration.seconds
+        let activeMinFrameRate = activeMinDuration > 0 ? 1 / activeMinDuration : 0
+        let activeMaxFrameRate = activeMaxDuration > 0 ? 1 / activeMaxDuration : 0
+        let sameInput = currentInput?.device.uniqueID == desiredDevice.uniqueID
+        let sameFormat = desiredDevice.activeFormat === format
+        // A fixed requested rate requires BOTH AVFoundation duration bounds to match. Checking only
+        // activeVideoMinFrameDuration can mistake a variable-FPS range for a settled fixed rate.
+        let sameFrameRate = abs(activeMinFrameRate - frameRate) < 0.5 &&
+            abs(activeMaxFrameRate - frameRate) < 0.5
+        let samePhotoDimensions = photoDimensions.map { dimensions in
+            photoOutput.maxPhotoDimensions.width == dimensions.width &&
+                photoOutput.maxPhotoDimensions.height == dimensions.height
+        } ?? true
+        let auxiliaryGraphChangeNeeded = refreshAuxiliaryOutputs &&
+            liveMetricsAttachmentWanted() != liveMetricsOutputIsAttached()
+        let baseOutputsPresent = session.outputs.contains(where: { $0 === movieOutput }) &&
+            session.outputs.contains(where: { $0 === photoOutput })
+
+        // Most AVFoundation latency in the diagnostic session came from commitConfiguration().
+        // If the capture graph/format/FPS is already exactly what was requested, do not open a
+        // no-op session transaction just to re-assert zoom/HDR device properties. Those properties
+        // can be updated directly under the AVCaptureDevice configuration lock.
+        if sameInput, sameFormat, sameFrameRate, samePhotoDimensions,
+           !auxiliaryGraphChangeNeeded, baseOutputsPresent {
+            let desiredAutoHDR = effectiveCodec != "H264"
+            let needsDeviceUpdate =
+                abs(desiredDevice.videoZoomFactor - targetDeviceZoomCandidate) >= 0.005 ||
+                desiredDevice.automaticallyAdjustsVideoHDREnabled != desiredAutoHDR ||
+                (effectiveCodec == "H264" && desiredDevice.isVideoHDREnabled) ||
+                (desiredDevice.isGeometricDistortionCorrectionSupported &&
+                    !desiredDevice.isGeometricDistortionCorrectionEnabled)
+
+            if needsDeviceUpdate {
+                do {
+                    try desiredDevice.lockForConfiguration()
+                    desiredDevice.automaticallyAdjustsVideoHDREnabled = desiredAutoHDR
+                    if effectiveCodec == "H264", desiredDevice.isVideoHDREnabled {
+                        desiredDevice.isVideoHDREnabled = false
+                    }
+                    if desiredDevice.isGeometricDistortionCorrectionSupported {
+                        desiredDevice.isGeometricDistortionCorrectionEnabled = true
+                    }
+                    desiredDevice.cancelVideoZoomRamp()
+                    desiredDevice.videoZoomFactor = targetDeviceZoomCandidate
+                    desiredDevice.unlockForConfiguration()
+                } catch {
+                    AppEventLog.log(error: error, prefix: "CAPTURE FAST PATH DEVICE UPDATE FAILED", category: .device, traceID: transactionTrace)
+                    // Fall through to the normal atomic transaction, which retains the existing
+                    // rollback/error behavior for a device that could not be updated directly.
+                }
+            }
+
+            let zoomMatches = abs(desiredDevice.videoZoomFactor - targetDeviceZoomCandidate) < 0.02
+            let hdrMatches = desiredDevice.automaticallyAdjustsVideoHDREnabled == desiredAutoHDR &&
+                (effectiveCodec != "H264" || !desiredDevice.isVideoHDREnabled)
+            let distortionMatches = !desiredDevice.isGeometricDistortionCorrectionSupported ||
+                desiredDevice.isGeometricDistortionCorrectionEnabled
+            if zoomMatches, hdrMatches, distortionMatches {
+                setLiveMetricsConnectionEnabled(
+                    (recordingState.requestsRecording && movieOutput.isRecording) ||
+                    (AppEventLog.extremeDiagnosticsEnabled && liveMetricsOutputIsAttached() && captureMode != .photo)
+                )
+                rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
+                requestedZoom = displayedZoomCandidate
+                AppEventLog.deepEvent("CAPTURE TRANSACTION FAST PATH", category: .session, traceID: transactionTrace, fields: [
+                    "device": desiredDevice.localizedName,
+                    "format": "\(targetDimensionsForTrace.width)x\(targetDimensionsForTrace.height)",
+                    "fps": String(format: "%.2f", activeMinFrameRate),
+                    "displayedZoom": String(format: "%.3f", Double(displayedZoomCandidate)),
+                    "reason": "capture graph already matched request",
+                    "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - transactionStart) * 1000)
+                ])
+                return displayedZoomCandidate
+            }
+        }
+
+        // A real input/format/output transaction makes proof from the previous capture graph
+        // unusable, including attempts that fail before AVFoundation accepts the replacement.
+        invalidateVerifiedHighOutputProvenance()
+        let oldInput = currentInput
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
         let torchRequestID = torchRequests.next(reason: "capture configuration transaction")
@@ -4009,11 +4202,17 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func resetFocusAndExposureState() {
+        _ = focusExposureRequests.next(reason: "focus/exposure reset")
         pendingFocusLockWorkItem?.cancel()
         pendingFocusLockWorkItem = nil
         pendingFocusReturnWorkItem?.cancel()
         pendingFocusReturnWorkItem = nil
-        guard let device = videoInput?.device else { return }
+        focusLockedInHardware = false
+        exposureLockedInHardware = false
+        guard let device = videoInput?.device else {
+            publish { self.isFocusExposureLocked = false }
+            return
+        }
 
         do {
             try device.lockForConfiguration()
@@ -4175,20 +4374,29 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func configureFocusAndExposure(at point: CGPoint, lockAfterFocusing: Bool) {
-        guard let device = videoInput?.device else { return }
+    private func configureFocusAndExposure(at point: CGPoint, lockAfterFocusing: Bool, requestID: UInt64) {
+        guard focusExposureRequests.isLatest(requestID),
+              let device = videoInput?.device else { return }
         pendingFocusLockWorkItem?.cancel()
         pendingFocusReturnWorkItem?.cancel()
         pendingFocusLockWorkItem = nil
         pendingFocusReturnWorkItem = nil
+        focusLockedInHardware = false
+        exposureLockedInHardware = false
 
         let clampedPoint = CGPoint(
             x: min(max(point.x, 0), 1),
             y: min(max(point.y, 0), 1)
         )
+        let defaults = UserDefaults.standard
+        let lockPreference = defaults.string(forKey: LowPolyCamPreferences.Key.focusExposureLockMode) ?? "AE/AF"
+        let wantsFocusLock = lockPreference != "AE Only"
+        let wantsExposureLock = lockPreference != "AF Only"
 
         do {
             try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
             if device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = clampedPoint
             }
@@ -4206,75 +4414,165 @@ final class CameraManager: NSObject, ObservableObject {
             } else if device.isExposureModeSupported(.autoExpose) {
                 device.exposureMode = .autoExpose
             }
-            device.unlockForConfiguration()
-            publish { self.isFocusExposureLocked = false }
-            AppEventLog.event(
-                "Focus/exposure applied: point=(\(String(format: "%.3f", clampedPoint.x)), \(String(format: "%.3f", clampedPoint.y))), lock requested=\(lockAfterFocusing)"
-            )
         } catch {
             showError("Couldn’t set focus and exposure.")
             return
         }
 
+        publish { self.isFocusExposureLocked = false }
+        AppEventLog.event(
+            "Focus/exposure applied: point=(\(String(format: "%.3f", clampedPoint.x)), \(String(format: "%.3f", clampedPoint.y))), lock requested=\(lockAfterFocusing), preference=\(lockPreference)"
+        )
+
         let deviceID = device.uniqueID
-        let deadline = Date().addingTimeInterval(1.25)
 
         if lockAfterFocusing {
+            // Wait only for controls we can and actually intend to lock. On fixed-focus cameras
+            // (for example an ultra-wide without AF), AE can still lock independently.
+            let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+
             func attemptLock() {
-                guard let current = self.videoInput?.device,
+                guard self.focusExposureRequests.isLatest(requestID),
+                      let current = self.videoInput?.device,
                       current.uniqueID == deviceID else { return }
 
-                if (current.isAdjustingFocus || current.isAdjustingExposure), Date() < deadline {
+                let canLockFocus = wantsFocusLock && current.isFocusModeSupported(.locked)
+                let canLockExposure = wantsExposureLock &&
+                    (current.isExposureModeSupported(.locked) || current.isExposureModeSupported(.custom))
+                let focusStillSettling = canLockFocus && current.isAdjustingFocus
+                let exposureStillSettling = canLockExposure && current.isAdjustingExposure
+
+                if (focusStillSettling || exposureStillSettling), ProcessInfo.processInfo.systemUptime < deadline {
                     let retry = DispatchWorkItem { [weak self] in
                         guard let self else { return }
                         self.sessionQueue.async { attemptLock() }
                     }
                     self.pendingFocusLockWorkItem = retry
-                    self.sessionQueue.asyncAfter(deadline: .now() + 0.08, execute: retry)
+                    self.sessionQueue.asyncAfter(deadline: .now() + 0.06, execute: retry)
                     return
                 }
 
+                var focusApplied = false
+                var exposureApplied = false
                 do {
                     try current.lockForConfiguration()
-                    let canLockFocus = current.isFocusModeSupported(.locked)
-                    let canLockExposure = current.isExposureModeSupported(.locked)
-                    if canLockFocus { current.focusMode = .locked }
-                    if canLockExposure { current.exposureMode = .locked }
-                    current.unlockForConfiguration()
-                    let label = canLockFocus && canLockExposure
-                        ? "AE/AF LOCK"
-                        : (canLockFocus ? "AF LOCK" : "AE LOCK")
-                    self.publish {
-                        self.isFocusExposureLocked = canLockFocus || canLockExposure
-                        self.focusExposureLockLabel = label
+                    defer { current.unlockForConfiguration() }
+
+                    if canLockFocus {
+                        // The current-position sentinel works even when arbitrary manual lens
+                        // positions are unavailable; it freezes the position AF just reached.
+                        current.setFocusModeLocked(
+                            lensPosition: AVCaptureDevice.currentLensPosition,
+                            completionHandler: nil
+                        )
+                        focusApplied = true
                     }
-                    AppEventLog.event("Focus/exposure lock applied: focus=\(canLockFocus), exposure=\(canLockExposure)")
+
+                    if canLockExposure {
+                        if current.isExposureModeSupported(.locked) {
+                            current.exposureMode = .locked
+                        } else {
+                            // Some devices expose custom exposure but not the simple locked mode.
+                            // Preserve the current auto-selected values using AVFoundation's
+                            // current-value sentinels instead of copying values that could race a frame.
+                            current.setExposureModeCustom(
+                                duration: AVCaptureDevice.currentExposureDuration,
+                                iso: AVCaptureDevice.currentISO,
+                                completionHandler: nil
+                            )
+                        }
+                        exposureApplied = true
+                    }
                 } catch {
                     self.showError("Couldn’t lock focus and exposure.")
+                    return
                 }
+
+                // Verify the modes after configuration instead of claiming a lock just because the
+                // setters did not throw. This keeps the HUD truthful on lenses with partial support.
+                let verify = DispatchWorkItem { [weak self, weak current] in
+                    guard let self,
+                          self.focusExposureRequests.isLatest(requestID),
+                          let current,
+                          self.videoInput?.device.uniqueID == deviceID else { return }
+
+                    let focusVerified = focusApplied && current.focusMode == .locked
+                    let exposureVerified = exposureApplied &&
+                        (current.exposureMode == .locked || current.exposureMode == .custom)
+                    self.focusLockedInHardware = focusVerified
+                    self.exposureLockedInHardware = exposureVerified
+
+                    let label: String
+                    if focusVerified && exposureVerified {
+                        label = "AE/AF LOCK"
+                    } else if focusVerified {
+                        label = "AF LOCK"
+                    } else if exposureVerified {
+                        label = "AE LOCK"
+                    } else {
+                        label = "AE/AF LOCK"
+                    }
+                    self.publish {
+                        self.isFocusExposureLocked = focusVerified || exposureVerified
+                        self.focusExposureLockLabel = label
+                    }
+
+                    AppEventLog.event(
+                        "Focus/exposure lock verified: requested=\(lockPreference), focus=\(focusVerified), exposure=\(exposureVerified), " +
+                        "focusMode=\(String(describing: current.focusMode)), exposureMode=\(String(describing: current.exposureMode))"
+                    )
+
+                    guard !focusVerified && !exposureVerified else { return }
+                    switch lockPreference {
+                    case "AF Only":
+                        self.showError("AF lock isn’t supported on this lens.")
+                    case "AE Only":
+                        self.showError("AE lock isn’t supported on this lens.")
+                    default:
+                        self.showError("AE/AF lock isn’t supported by this camera configuration.")
+                    }
+                }
+                self.pendingFocusLockWorkItem = verify
+                self.sessionQueue.asyncAfter(deadline: .now() + 0.05, execute: verify)
             }
             attemptLock()
         } else {
+            let resetSeconds = defaults.integer(forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds)
+            guard resetSeconds > 0 else {
+                AppEventLog.event("Tap focus auto-reset disabled")
+                return
+            }
+
             let returnWork = DispatchWorkItem { [weak self] in
                 guard let self,
+                      self.focusExposureRequests.isLatest(requestID),
                       let current = self.videoInput?.device,
                       current.uniqueID == deviceID,
-                      !self.isFocusExposureLocked else { return }
+                      !self.focusLockedInHardware,
+                      !self.exposureLockedInHardware else { return }
                 do {
                     try current.lockForConfiguration()
+                    defer { current.unlockForConfiguration() }
+                    let center = CGPoint(x: 0.5, y: 0.5)
+                    if current.isFocusPointOfInterestSupported {
+                        current.focusPointOfInterest = center
+                    }
+                    if current.isExposurePointOfInterestSupported {
+                        current.exposurePointOfInterest = center
+                    }
                     if current.isFocusModeSupported(.continuousAutoFocus) {
                         current.focusMode = .continuousAutoFocus
                     }
                     if current.isExposureModeSupported(.continuousAutoExposure) {
                         current.exposureMode = .continuousAutoExposure
                     }
-                    current.unlockForConfiguration()
+                    AppEventLog.event("Tap focus returned to continuous auto after \(resetSeconds)s")
                 } catch {
-                    // The next focus interaction or mode change retries this harmless reset.
+                    // A later focus interaction, camera switch, or mode change will safely reset it.
                 }
             }
             pendingFocusReturnWorkItem = returnWork
-            sessionQueue.asyncAfter(deadline: .now() + 1.0, execute: returnWork)
+            sessionQueue.asyncAfter(deadline: .now() + .seconds(resetSeconds), execute: returnWork)
         }
     }
 
@@ -5409,9 +5707,10 @@ final class CameraManager: NSObject, ObservableObject {
         }
         settings.flashMode = appliedFlash
 
-        // Balanced is AVFoundation's default speed/quality tradeoff. It avoids the extra
-        // shot-to-shot latency of .quality while keeping more quality than .speed.
-        settings.photoQualityPrioritization = .balanced
+        // AVFoundation may override a locked device exposure for multi-image processing when
+        // photo quality is .balanced/.quality. When AE is locked, use .speed so the saved photo
+        // honors the device's locked exposure. Normal captures keep the existing balanced path.
+        settings.photoQualityPrioritization = exposureLockedInHardware ? .speed : .balanced
         let dimensions = photoOutput.maxPhotoDimensions
         if dimensions.width > 0, dimensions.height > 0 {
             settings.maxPhotoDimensions = dimensions
@@ -5442,6 +5741,7 @@ final class CameraManager: NSObject, ObservableObject {
             "mirrored": String(mirrored),
             "flashRequested": requestedFlash.rawValue,
             "flashApplied": appliedFlashLabel,
+            "photoQualityPriority": exposureLockedInHardware ? "speed (AE locked)" : "balanced",
             "responsive": String(photoOutput.isResponsiveCaptureEnabled),
             "device": activeDevice?.localizedName ?? "none",
             "activePreviewFormat": activeDimensions.map { "\($0.width)x\($0.height)" } ?? "none",

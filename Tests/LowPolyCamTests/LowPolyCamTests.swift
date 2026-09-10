@@ -20,6 +20,21 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(CameraManager.SlowMotionFrameRate.allCases.map(\.rawValue), [120, 240])
     }
 
+    func testUnsupported4K60H264AlwaysNormalizesToHEVC() {
+        XCTAssertEqual(
+            CameraManager.normalizedVideoCodec("H264", resolution: .p4k, frameRate: .fps60),
+            "HEVC"
+        )
+        XCTAssertEqual(
+            CameraManager.normalizedVideoCodec("H264", resolution: .p1080, frameRate: .fps60),
+            "H264"
+        )
+        XCTAssertEqual(
+            CameraManager.normalizedVideoCodec("HEVC", resolution: .p4k, frameRate: .fps60),
+            "HEVC"
+        )
+    }
+
     func testStorageReserveNeverDropsBelowSafetyFloor() {
         let reserve = StorageGuard.criticalReserveBytes(forVideoBitrate: 2_000_000)
         XCTAssertGreaterThanOrEqual(reserve, StorageGuard.minimumCriticalReserveBytes)
@@ -45,12 +60,16 @@ final class LowPolyCamTests: XCTestCase {
         defaults.set("invalid", forKey: LowPolyCamPreferences.Key.selectedVideoResolution)
         defaults.set(999, forKey: LowPolyCamPreferences.Key.selectedVideoFrameRate)
         defaults.set(4.5, forKey: LowPolyCamPreferences.Key.gridOpacity)
+        defaults.set("Whatever", forKey: LowPolyCamPreferences.Key.focusExposureLockMode)
+        defaults.set(2, forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds)
 
         LowPolyCamPreferences.registerAndMigrate(defaults)
 
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.selectedVideoResolution), "1080p")
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.selectedVideoFrameRate), 60)
         XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.gridOpacity), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.focusExposureLockMode), "AE/AF")
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds), 1)
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.schemaVersion), LowPolyCamPreferences.currentSchemaVersion)
         defaults.removePersistentDomain(forName: suiteName)
     }

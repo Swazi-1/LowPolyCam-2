@@ -6,7 +6,7 @@ import Foundation
 /// settings. This layer makes the schema explicit and repairs values written by older betas before
 /// the first CameraManager is created.
 enum LowPolyCamPreferences {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     enum Key {
         static let schemaVersion = "lowPolyCamSettingsSchemaVersion"
@@ -33,6 +33,8 @@ enum LowPolyCamPreferences {
         static let countdownHaptics = "countdownHaptics"
         static let zoomSpeed = "zoomSpeed"
         static let tapZoomReset = "tapZoomReset"
+        static let focusExposureLockMode = "focusExposureLockMode"
+        static let tapFocusResetSeconds = "tapFocusResetSeconds"
         static let recordingLock = "recordingLock"
         static let lowStorageWarning = "lowStorageWarning"
         static let rememberCaptureMode = "rememberCaptureMode"
@@ -93,6 +95,8 @@ enum LowPolyCamPreferences {
             Key.countdownHaptics: false,
             Key.zoomSpeed: 1.0,
             Key.tapZoomReset: true,
+            Key.focusExposureLockMode: "AE/AF",
+            Key.tapFocusResetSeconds: 1,
             Key.recordingLock: false,
             Key.lowStorageWarning: true,
             Key.rememberCaptureMode: false,
@@ -142,6 +146,8 @@ enum LowPolyCamPreferences {
         normalizeInt(Key.burstCount, allowed: [5, 10, 15], fallback: 10, in: defaults)
         normalizeInt(Key.shutterDelay, allowed: [0, 3, 10], fallback: 0, in: defaults)
         normalizeString(Key.hapticStrength, allowed: ["Low", "Medium", "Strong"], fallback: "Medium", in: defaults)
+        normalizeString(Key.focusExposureLockMode, allowed: ["AE/AF", "AE Only", "AF Only"], fallback: "AE/AF", in: defaults)
+        normalizeInt(Key.tapFocusResetSeconds, allowed: [0, 1, 3, 5], fallback: 1, in: defaults)
         normalizeString(Key.lastCaptureMode, allowed: ["VIDEO", "PHOTO", "SLO-MO"], fallback: "VIDEO", in: defaults)
         normalizeString(Key.lastCameraPosition, allowed: ["back", "front"], fallback: "back", in: defaults)
         normalizeString(Key.liveStatsSize, allowed: ["Compact", "Normal"], fallback: "Normal", in: defaults)

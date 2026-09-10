@@ -6,7 +6,9 @@ import UIKit
 /// Opt-in, ordered bug-forensics diagnostics. Callers never perform file I/O; records are formatted
 /// at the call site, queued on a utility queue, and batch-written so camera/session work is not held
 /// up by diagnostics. Extreme mode adds trace IDs, state/guard breadcrumbs, transition probes, and a
-/// received/committed timing envelope around every event without changing normal diagnostics.
+/// received/committed timing envelopes around normal events without changing normal diagnostics.
+/// High-frequency per-frame evidence keeps its source record but uses a lightweight queue-delay
+/// field instead of two extra envelope records, reducing observer pressure during bug probes.
 enum AppEventLog {
     enum Level: String {
         case trace = "TRACE"
@@ -422,7 +424,7 @@ enum AppEventLog {
         traceID: String? = nil
     ) {
         guard extremeDiagnosticsEnabled else { return }
-        structured(.warning, .request, "STALE REQUEST DROPPED: \(operation)", traceID: traceID, fields: [
+        structured(.trace, .request, "STALE REQUEST DROPPED: \(operation)", traceID: traceID, fields: [
             "token": token,
             "requestID": String(requestID),
             "latestID": String(latestID)
@@ -557,7 +559,8 @@ enum AppEventLog {
     private static func appendRecordWithDiagnosticsEnvelopeLocked(_ record: PendingRecord) {
         let extreme = extremeDiagnosticsEnabled
         let receivedAt = ProcessInfo.processInfo.systemUptime
-        if extreme {
+        let lightweight = extreme && isHighFrequencyExtremeRecord(record)
+        if extreme && !lightweight {
             appendExtremeRecordLocked(
                 "EXTREME EVENT RECEIVED",
                 source: record,
@@ -573,8 +576,27 @@ enum AppEventLog {
                 ]
             )
         }
-        appendStructuredLocked(record)
-        if extreme {
+
+        if lightweight {
+            var fields = record.fields
+            fields["loggerQueueDelayMs"] = String(format: "%.2f", (receivedAt - record.callUptime) * 1000)
+            appendStructuredLocked(PendingRecord(
+                level: record.level,
+                category: record.category,
+                message: record.message,
+                traceID: record.traceID,
+                fields: fields,
+                function: record.function,
+                file: record.file,
+                line: record.line,
+                callerThread: record.callerThread,
+                callUptime: record.callUptime
+            ))
+        } else {
+            appendStructuredLocked(record)
+        }
+
+        if extreme && !lightweight {
             appendExtremeRecordLocked(
                 "EXTREME EVENT COMMITTED",
                 source: record,
@@ -590,9 +612,15 @@ enum AppEventLog {
         }
     }
 
-    /// Extreme mode deliberately writes a received/committed envelope around every event. This
-    /// triples event records without changing normal diagnostics, and exposes logger queue delay,
-    /// write-buffer pressure, thermal state, and settings freshness when a bug is reproduced.
+    private static func isHighFrequencyExtremeRecord(_ record: PendingRecord) -> Bool {
+        record.message == "ZOOM TRANSITION FRAME" ||
+            record.message == "CAPTURE CALLBACK FRAME DROPPED"
+    }
+
+    /// Extreme mode keeps the full received/committed envelope for ordinary events so queue delay,
+    /// write-buffer pressure, thermal state and settings freshness remain visible. Per-frame probe
+    /// records stay fully detailed but omit the duplicate envelope and carry loggerQueueDelayMs
+    /// directly, avoiding a 3x expansion exactly where callback pressure is highest.
     private static func appendExtremeRecordLocked(
         _ message: String,
         source: PendingRecord,
