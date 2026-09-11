@@ -342,6 +342,63 @@ final class LensTransitionCoordinator {
         sessionQueue.asyncAfter(deadline: .now() + physicalHandoffDebounce, execute: workItem)
     }
 
+    func finishWhenDeviceSettled(
+        _ requestID: UInt64,
+        device: AVCaptureDevice,
+        minimumHold: Double,
+        maximumHold: Double,
+        stableChecksRequired: Int = 3
+    ) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let requiredChecks = max(1, stableChecksRequired)
+        var consecutiveStableChecks = 0
+
+        AppEventLog.deepEvent("LENS SENSOR SETTLE WAIT", category: .lens, fields: [
+            "device": device.localizedName,
+            "minimumHoldMs": String(format: "%.0f", minimumHold * 1000),
+            "maximumHoldMs": String(format: "%.0f", maximumHold * 1000),
+            "stableChecksRequired": String(requiredChecks)
+        ])
+
+        func poll() {
+            sessionQueue.asyncAfter(deadline: .now() + 0.025) { [weak self, weak device] in
+                guard let self,
+                      self.activeRequestID == requestID,
+                      self.zoomRequests.isLatest(requestID) else { return }
+
+                guard let device else {
+                    self.finish(requestID, revealDelay: 0)
+                    return
+                }
+
+                let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+                if elapsed < minimumHold {
+                    poll()
+                    return
+                }
+
+                let settled = !device.isAdjustingFocus &&
+                    !device.isAdjustingExposure &&
+                    !device.isAdjustingWhiteBalance
+                consecutiveStableChecks = settled ? consecutiveStableChecks + 1 : 0
+
+                if consecutiveStableChecks >= requiredChecks || elapsed >= maximumHold {
+                    AppEventLog.deepEvent("LENS SENSOR SETTLED", category: .lens, fields: [
+                        "device": device.localizedName,
+                        "elapsedMs": String(format: "%.2f", elapsed * 1000),
+                        "stableChecks": String(consecutiveStableChecks),
+                        "timedOut": String(elapsed >= maximumHold && consecutiveStableChecks < requiredChecks)
+                    ])
+                    self.finish(requestID, revealDelay: 0)
+                } else {
+                    poll()
+                }
+            }
+        }
+
+        poll()
+    }
+
     func finish(_ requestID: UInt64, revealDelay: Double) {
         sessionQueue.asyncAfter(deadline: .now() + revealDelay) { [weak self] in
             guard let self,

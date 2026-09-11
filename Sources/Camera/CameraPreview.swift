@@ -10,10 +10,13 @@ struct CameraPreview: UIViewRepresentable {
     let focusExposureLockLabel: String
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
-    let reservesTopHUDSpace: Bool
+    let reservedTopOverlayHeight: CGFloat
     var fitsPhoto = false
+    let cleanPreviewGesture: CleanPreviewGesture
+    let captureOrientation: CaptureOrientationPreference
     let onTapToFocus: (CGPoint) -> Void
     let onLongPressToLock: (CGPoint) -> Void
+    let onCleanPreviewGesture: () -> Void
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
@@ -30,14 +33,17 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     private func configure(_ view: PreviewView) {
-        view.setReservesTopHUDSpace(reservesTopHUDSpace)
+        view.setReservedTopOverlayHeight(reservedTopOverlayHeight)
         view.setPreviewTransitioning(isPreviewTransitioning)
-        guard !isPreviewTransitioning else { return }
-        let gravity: AVLayerVideoGravity = fitsPhoto ? .resizeAspect : .resizeAspectFill
-        if view.previewLayer.videoGravity != gravity { view.previewLayer.videoGravity = gravity }
         view.tintColor = UIColor(theme)
         view.onTapToFocus = onTapToFocus
         view.onLongPressToLock = onLongPressToLock
+        view.onCleanPreviewGesture = onCleanPreviewGesture
+        view.setCleanPreviewGesture(cleanPreviewGesture)
+        guard !isPreviewTransitioning else { return }
+        let gravity: AVLayerVideoGravity = fitsPhoto ? .resizeAspect : .resizeAspectFill
+        if view.previewLayer.videoGravity != gravity { view.previewLayer.videoGravity = gravity }
+        view.setCaptureOrientation(captureOrientation)
         view.setFocusExposureLocked(isFocusExposureLocked, label: focusExposureLockLabel)
         view.setStabilizationEnabled(stabilizationEnabled)
     }
@@ -50,13 +56,19 @@ final class PreviewView: UIView {
 
     var onTapToFocus: ((CGPoint) -> Void)?
     var onLongPressToLock: ((CGPoint) -> Void)?
+    var onCleanPreviewGesture: (() -> Void)?
 
     private let focusIndicator = UIView()
     private let lockLabel = UILabel()
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
-    private var reservesTopHUDSpace = false
+    private var reservedTopOverlayHeight: CGFloat = 54
     private var stabilizationEnabled = true
+    private var cleanPreviewGesture: CleanPreviewGesture = .doubleTap
+    private var captureOrientation: CaptureOrientationPreference = .auto
+    private var singleTapRecognizer: UITapGestureRecognizer?
+    private var cleanDoubleTapRecognizer: UITapGestureRecognizer?
+    private var cleanTwoFingerTapRecognizer: UITapGestureRecognizer?
     private var transitionSnapshot: UIView?
     private var transitionBlurView: UIVisualEffectView?
     private var transitionDimView: UIView?
@@ -95,7 +107,7 @@ final class PreviewView: UIView {
         lockLabel.sizeToFit()
         // The SwiftUI HUD is above this UIKit preview. Reserve enough room for its largest
         // two-line layout so the fixed AE/AF lock pill never sits underneath it.
-        let lockLabelTop = safeAreaInsets.top + (reservesTopHUDSpace ? 82 : 54)
+        let lockLabelTop = safeAreaInsets.top + max(54, reservedTopOverlayHeight)
         lockLabel.frame = CGRect(
             x: (bounds.width - lockLabel.bounds.width - 24) / 2,
             y: max(lockLabelTop, 70),
@@ -115,9 +127,22 @@ final class PreviewView: UIView {
             lastAppliedRotationAngle = nil
         }
 
-        guard let connection = previewLayer.connection,
-              let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview,
-              connection.isVideoRotationAngleSupported(angle) else { return }
+        guard let connection = previewLayer.connection else { return }
+        let automaticAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview
+        let requestedAngle: CGFloat?
+        switch captureOrientation {
+        case .auto:
+            requestedAngle = automaticAngle
+        case .portrait:
+            requestedAngle = 90
+        case .landscapeLeft:
+            requestedAngle = 180
+        case .landscapeRight:
+            requestedAngle = 0
+        }
+        let angle = requestedAngle.flatMap { connection.isVideoRotationAngleSupported($0) ? $0 : nil }
+            ?? automaticAngle.flatMap { connection.isVideoRotationAngleSupported($0) ? $0 : nil }
+        guard let angle else { return }
         if rotationConnection !== connection {
             rotationConnection = connection
             lastAppliedRotationAngle = nil
@@ -140,10 +165,25 @@ final class PreviewView: UIView {
         enableStabilizationIfAvailable()
     }
 
-    func setReservesTopHUDSpace(_ reservesSpace: Bool) {
-        guard reservesTopHUDSpace != reservesSpace else { return }
-        reservesTopHUDSpace = reservesSpace
+    func setReservedTopOverlayHeight(_ height: CGFloat) {
+        let normalized = max(0, height)
+        guard abs(reservedTopOverlayHeight - normalized) > 0.5 else { return }
+        reservedTopOverlayHeight = normalized
         setNeedsLayout()
+    }
+
+    func setCaptureOrientation(_ preference: CaptureOrientationPreference) {
+        guard captureOrientation != preference else { return }
+        captureOrientation = preference
+        lastAppliedRotationAngle = nil
+        if !previewTransitioning { updateRotation() }
+    }
+
+    func setCleanPreviewGesture(_ gesture: CleanPreviewGesture) {
+        guard cleanPreviewGesture != gesture || cleanDoubleTapRecognizer == nil else { return }
+        cleanPreviewGesture = gesture
+        cleanDoubleTapRecognizer?.isEnabled = gesture == .doubleTap
+        cleanTwoFingerTapRecognizer?.isEnabled = gesture == .twoFingerTap
     }
 
     func setPreviewTransitioning(_ transitioning: Bool) {
@@ -297,7 +337,22 @@ final class PreviewView: UIView {
 
     private func configureGestures() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.numberOfTouchesRequired = 1
         addGestureRecognizer(tap)
+        singleTapRecognizer = tap
+
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleCleanPreviewGesture(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.numberOfTouchesRequired = 1
+        addGestureRecognizer(doubleTap)
+        cleanDoubleTapRecognizer = doubleTap
+
+        let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleCleanPreviewGesture(_:)))
+        twoFingerTap.numberOfTapsRequired = 1
+        twoFingerTap.numberOfTouchesRequired = 2
+        addGestureRecognizer(twoFingerTap)
+        cleanTwoFingerTapRecognizer = twoFingerTap
 
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.55
@@ -305,6 +360,21 @@ final class PreviewView: UIView {
         addGestureRecognizer(longPress)
 
         tap.require(toFail: longPress)
+        tap.require(toFail: doubleTap)
+        setCleanPreviewGesture(cleanPreviewGesture)
+    }
+
+    @objc private func handleCleanPreviewGesture(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        switch cleanPreviewGesture {
+        case .doubleTap:
+            guard recognizer === cleanDoubleTapRecognizer else { return }
+        case .twoFingerTap:
+            guard recognizer === cleanTwoFingerTapRecognizer else { return }
+        case .off:
+            return
+        }
+        onCleanPreviewGesture?()
     }
 
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
