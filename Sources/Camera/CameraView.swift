@@ -1,32 +1,38 @@
 import SwiftUI
 import UIKit
 
-struct CameraView: View {
-    private enum StoragePollingState: Hashable {
-        case inactive
-        case covered
-        case idle
-        case recording
+private struct CameraTopControlsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
 
-        var intervalNanoseconds: UInt64? {
-            switch self {
-            case .idle: return 30_000_000_000
-            case .recording: return 5_000_000_000
-            case .inactive, .covered: return nil
-            }
-        }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
+}
 
+private struct CameraLowerControlsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+struct CameraView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraManager()
-    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = true
+    @AppStorage("levelMeterEnabled") private var isLevelMeterEnabled = false
     @AppStorage("cameraGridEnabled") private var isGridEnabled = false
+    @AppStorage("gridStyle") private var gridStyle = GridStyle.ruleOfThirds.rawValue
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
-    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = false
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
-    @AppStorage("hapticCaptureEnabled") private var isHapticCaptureEnabled = true
+    @AppStorage("frameGuidesEnabled") private var frameGuidesEnabled = false
+    @AppStorage("photoCaptureFlash") private var photoCaptureFlash = true
+    @AppStorage("frontScreenFlash") private var frontScreenFlash = false
+    @AppStorage("appColorScheme") private var appColorScheme = "dark"
+    @AppStorage("hapticCaptureEnabled") private var isHapticsEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @State private var isShowingSettings = false
     @State private var isShowingProTools = false
@@ -34,112 +40,58 @@ struct CameraView: View {
     @State private var countdown = 0
     @State private var shutterTask: Task<Void, Never>?
     @State private var zoomWidth: CGFloat = 320
+    @State private var topControlsHeight: CGFloat = 48
+    @State private var topControlsWidth: CGFloat = 320
+    @State private var lowerControlsHeight: CGFloat = 204
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
     @AppStorage("tapZoomReset") private var tapZoomReset = true
     @AppStorage("recordingLock") private var recordingLock = false
-    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
+    @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.doubleTap.rawValue
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
-    @State private var warnedAboutStorage = false
+    @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
     @AppStorage("liveRecordingStats") private var liveStats = false
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("longevityMode") private var longevity = false
     @State private var editingStats = false
+    @State private var isCleanPreview = false
+    @State private var countdownIsForRecording = false
     @State private var restoreBrightness: CGFloat?
+    @State private var isPhotoFeedbackVisible = false
+    @State private var photoFeedbackTask: Task<Void, Never>?
     private var accent = CameraAccent()
 
     var body: some View {
         ZStack {
-            CameraPreview(
-                session: camera.session,
-                isFocusExposureLocked: camera.isFocusExposureLocked,
-                focusExposureLockLabel: camera.focusExposureLockLabel,
-                stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
-                isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
-                reservesTopHUDSpace: isHUDEnabled,
-                fitsPhoto: camera.captureMode == .photo,
-                onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
-                onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } }
-            )
-            .ignoresSafeArea()
-
-            if camera.captureMode == .photo && photoAspect == "1:1" {
-                GeometryReader { proxy in
-                    let side = min(proxy.size.width, proxy.size.height)
-                    VStack(spacing: 0) {
-                        Color.black.opacity(0.7)
-                        Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
-                        Color.black.opacity(0.7)
-                    }
-                }.ignoresSafeArea().allowsHitTesting(false)
-            }
-
-            LinearGradient(colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-            if isGridEnabled {
-                CameraGridOverlay()
-                    .opacity(gridOpacity)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
-
-            if crosshair {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .ultraLight))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .allowsHitTesting(false)
-            }
-
-            if countdown > 0 {
-                Button { cancelCountdown() } label: {
-                    VStack {
-                        Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
-                        Text("Tap to cancel").font(.caption)
-                    }
-                    .padding(24)
-                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
-                }.foregroundStyle(.white).zIndex(10)
-            }
-
-            CameraLevelMeterHost(enabled: isLevelMeterEnabled && !isShowingSettings)
-
-            VStack {
-                topControls
-                Spacer()
-                statusToast
-                bottomControls
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 14)
-            .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning)
-
-            if isShowingProTools {
-                Color.black.opacity(0.001)
-                    .ignoresSafeArea()
-                    .onTapGesture { isShowingProTools = false }
-
-                VStack {
-                    Spacer()
-                    HStack {
-                        ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
-                        Spacer()
-                    }
-                }
-                .padding(.leading, 14)
-                .padding(.bottom, 132)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
-            }
-
+            cameraPreviewLayer
+            photoAspectOverlay
+            previewGradient
+            gridOverlay
+            frameGuidesOverlay
+            crosshairOverlay
+            countdownOverlay
+            levelMeterOverlay
+            controlsLayer
+            proToolsOverlay
+            photoFeedbackOverlay
         }
         .overlay {
             if editingStats || (liveStats && camera.isRecording) {
                 LiveStatsOverlay(stats: camera.liveStats, editing: editingStats) { editingStats = false }
             }
+        }
+        .onPreferenceChange(CameraTopControlsHeightKey.self) { height in
+            guard height > 0, abs(topControlsHeight - height) > 0.5 else { return }
+            topControlsHeight = height
+        }
+        .onPreferenceChange(CameraLowerControlsHeightKey.self) { height in
+            guard abs(lowerControlsHeight - height) > 0.5 else { return }
+            lowerControlsHeight = height
         }
         .onChange(of: camera.isRecording) { _, recording in
             AppEventLog.event("Camera UI: recording visible state changed to \(recording)")
@@ -151,29 +103,27 @@ struct CameraView: View {
                 restoreBrightness = nil
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .tint(accent.color)
         .task {
             camera.start()
             updateIdleTimer(for: scenePhase)
-        }
-        .task(id: storagePollingState) {
-            guard let interval = storagePollingState.intervalNanoseconds else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: interval)
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled, storagePollingState.intervalNanoseconds == interval else { return }
-                camera.refreshAvailableStorage()
-            }
         }
         .onChange(of: keepScreenAwakeEnabled) { _, _ in
             updateIdleTimer(for: scenePhase)
         }
         .onChange(of: mirrorSelfies) { _, _ in
             camera.refreshMovieOutputSettings()
+        }
+        .onChange(of: audioLevelMeter) { _, newValue in
+            if let mode = AudioLevelMeterMode(rawValue: newValue) {
+                camera.setAudioLevelMeterMode(mode)
+            }
+        }
+        .onChange(of: cleanPreviewGesture) { _, newValue in
+            if newValue == CleanPreviewGesture.off.rawValue {
+                isCleanPreview = false
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             updateIdleTimer(for: phase)
@@ -182,6 +132,7 @@ struct CameraView: View {
                 camera.refreshAvailableStorage()
             } else {
                 cancelCountdown()
+                cancelPhotoFeedback()
                 if let brightness = restoreBrightness {
                     UIScreen.main.brightness = brightness
                     restoreBrightness = nil
@@ -191,6 +142,7 @@ struct CameraView: View {
         }
         .onDisappear {
             cancelCountdown()
+            cancelPhotoFeedback()
             camera.stop()
             if let brightness = restoreBrightness { UIScreen.main.brightness = brightness; restoreBrightness = nil }
             UIApplication.shared.isIdleTimerDisabled = false
@@ -202,17 +154,11 @@ struct CameraView: View {
                 cancelCountdown()
                 editingStats = true
             }
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+                .preferredColorScheme(resolvedColorScheme(appColorScheme))
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
         }
         .onChange(of: camera.captureMode) { _, _ in cancelCountdown() }
-        .onChange(of: camera.availableStorageBytes) { _, bytes in
-            if bytes > 1_000_000_000 { warnedAboutStorage = false }
-            if lowStorageWarning, bytes > 0, bytes < 1_000_000_000, !warnedAboutStorage {
-                warnedAboutStorage = true
-                camera.postStatus("Storage is below 1 GB. Long recordings may stop early.")
-            }
-        }
         .onChange(of: isShowingSettings) { _, showing in
             if showing { cancelCountdown() }
             AppEventLog.event("Camera UI: Settings sheet \(showing ? "opened" : "closed")")
@@ -222,28 +168,219 @@ struct CameraView: View {
         }
     }
 
-    private var topControls: some View {
+    private var cameraPreviewLayer: some View {
+        CameraPreview(
+            session: camera.session,
+            isFocusExposureLocked: camera.isFocusExposureLocked,
+            focusExposureLockLabel: camera.focusExposureLockLabel,
+            stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
+            isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
+            reservedTopOverlayHeight: (isCleanPreview || !isHUDEnabled)
+                ? 54
+                : max(54, 14 + topControlsHeight + 8),
+            fitsPhoto: camera.captureMode == .photo,
+            cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .doubleTap,
+            captureOrientation: camera.captureOrientation,
+            onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
+            onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } },
+            onCleanPreviewGesture: {
+                guard !editingStats, !isShowingSettings, countdown == 0 else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isCleanPreview.toggle()
+                }
+                CameraHaptics.fire()
+                AppEventLog.event("Clean Preview \(isCleanPreview ? "enabled" : "disabled")")
+            }
+        )
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var photoAspectOverlay: some View {
+        if camera.captureMode == .photo && photoAspect == "1:1" {
+            GeometryReader { proxy in
+                let side = min(proxy.size.width, proxy.size.height)
+                VStack(spacing: 0) {
+                    Color.black.opacity(0.7)
+                    Color.clear.frame(height: side).overlay(Rectangle().stroke(.white.opacity(0.5)))
+                    Color.black.opacity(0.7)
+                }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var previewGradient: some View {
+        LinearGradient(
+            colors: [.black.opacity(0.48), .clear, .black.opacity(0.60)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var gridOverlay: some View {
+        if isGridEnabled {
+            CameraGridOverlay(style: GridStyle(rawValue: gridStyle) ?? .ruleOfThirds)
+                .opacity(gridOpacity)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var frameGuidesOverlay: some View {
+        if frameGuidesEnabled && !isCleanPreview {
+            CameraFrameGuideOverlay()
+        }
+    }
+
+    @ViewBuilder
+    private var crosshairOverlay: some View {
+        if crosshair {
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .ultraLight))
+                .foregroundStyle(.white.opacity(0.7))
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var countdownOverlay: some View {
+        if countdown > 0 {
+            Button { cancelCountdown() } label: {
+                VStack {
+                    Text("\(countdown)").font(.system(size: 64, weight: .bold, design: .rounded))
+                    Text(countdownIsForRecording ? "Starting recording · tap to cancel" : "Tap to cancel")
+                        .font(.caption)
+                }
+                .padding(24)
+                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 24))
+            }
+            .foregroundStyle(.white)
+            .zIndex(10)
+        }
+    }
+
+    @ViewBuilder
+    private var photoFeedbackOverlay: some View {
+        if isPhotoFeedbackVisible {
+            Color.white
+                .opacity(camera.cameraPosition == .front && frontScreenFlash ? 0.92 : 0.28)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .transition(.opacity)
+                .zIndex(50)
+        }
+    }
+
+    @ViewBuilder
+    private var levelMeterOverlay: some View {
+        if isCleanPreview {
+            EmptyView()
+        } else {
         GeometryReader { proxy in
-            let hudMaxWidth = max(120, proxy.size.width - 112)
+            let levelHalfExtent: CGFloat = 54
+            let topControlsBottom: CGFloat = 14 + topControlsHeight
+            let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
+            let preferredY = proxy.size.height / 2 + 72
+            let minimumY = topControlsBottom + levelHalfExtent
+            let maximumY = lowerControlsTop - levelHalfExtent
+            let hasSafeSpace = maximumY >= minimumY
+            let levelY = hasSafeSpace
+                ? min(max(preferredY, minimumY), maximumY)
+                : max(levelHalfExtent, maximumY)
+
+            CameraLevelMeterHost(
+                enabled: isLevelMeterEnabled && !isShowingSettings && hasSafeSpace
+            )
+            .position(x: proxy.size.width / 2, y: levelY)
+        }
+        .allowsHitTesting(false)
+        }
+    }
+
+    private var controlsLayer: some View {
+        VStack {
+            topControls
+            Spacer()
+            VStack(spacing: 8) {
+                if !isCleanPreview { statusToast }
+                bottomControls
+            }
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: CameraLowerControlsHeightKey.self,
+                        value: proxy.size.height
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .allowsHitTesting(!editingStats && !camera.isPreviewTransitioning)
+    }
+
+    @ViewBuilder
+    private var proToolsOverlay: some View {
+        if isShowingProTools && !isCleanPreview {
+            VStack {
+                Spacer()
+                HStack {
+                    ProToolsPopup(camera: camera, isLevelMeterEnabled: $isLevelMeterEnabled)
+                        .allowsHitTesting(true)
+                    Spacer()
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.bottom, 132)
+            // The old full-screen transparent dismiss layer intercepted preview focus and zoom.
+            // Dismissal is intentionally owned by the Pro Tools button, leaving the rest of the
+            // preview interactive while the popup is open.
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+        }
+    }
+
+    @ViewBuilder
+    private var topControls: some View {
+        if !isCleanPreview {
+            let hudMaxWidth = max(120, topControlsWidth - 112)
             let hudSnapshot = CameraHUDSnapshot(
                 isRecording: camera.isRecording,
                 captureModeLabel: camera.captureMode.rawValue,
                 isPhotoMode: camera.captureMode == .photo,
+                lensLabel: camera.activeLensLabel,
                 resolutionLabel: camera.hudResolutionLabel,
                 frameRateLabel: camera.hudFrameRateLabel,
                 remainingLabel: camera.hudRemainingLabel,
                 whiteBalanceLabel: hudWhiteBalanceLabel,
+                audioStatusLabel: camera.audioStatusLabel,
                 availableStorageBytes: camera.availableStorageBytes,
                 lastFrameGaps: camera.lastFrameGaps
             )
 
-            ZStack {
+            ZStack(alignment: .top) {
                 HStack {
-                    CameraIconButton(symbol: "bolt.fill", isEnabled: camera.torchAvailable && !camera.isLensTransitioning && !(camera.isRecording && recordingLock), color: camera.isTorchOn ? accent.color : accent.color.opacity(0.65)) {
-                        camera.toggleTorch()
+                    if camera.captureMode == .photo {
+                        PhotoFlashButton(
+                            mode: camera.photoFlashMode,
+                            isEnabled: camera.photoFlashAvailable && !camera.isLensTransitioning,
+                            color: camera.photoFlashMode == .off ? accent.color.opacity(0.65) : accent.color,
+                            action: { camera.cyclePhotoFlashMode() }
+                        )
+                    } else {
+                        TorchButton(camera: camera, isEnabled: !(camera.isRecording && recordingLock))
                     }
                     Spacer()
-                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning, color: accent.color) {
+                    CameraIconButton(
+                        symbol: "gearshape.fill",
+                        isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning,
+                        color: accent.color
+                    ) {
                         isShowingSettings = true
                     }
                 }
@@ -256,16 +393,42 @@ struct CameraView: View {
                         showFPS: hudFPS,
                         showRemaining: hudRemaining,
                         showWhiteBalance: hudWhiteBalance,
-                        maxWidth: hudMaxWidth
+                        maxWidth: hudMaxWidth,
+                        audioMeterMode: camera.audioLevelMeterMode,
+                        audioMeterSnapshot: camera.audioMeterSnapshot
                     )
+                    // The same 56-point side exclusion used by the old width calculation keeps
+                    // the card inside the safe gap between Flash and Settings without a fixed
+                    // top-control height.
+                    .padding(.horizontal, 56)
                     .allowsHitTesting(false)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .top)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: CameraTopControlsHeightKey.self, value: proxy.size.height)
+                        .onAppear { topControlsWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { _, width in
+                            guard abs(topControlsWidth - width) > 0.5 else { return }
+                            topControlsWidth = width
+                        }
+                }
+            }
         }
-        .frame(height: 116)
     }
 
+    @ViewBuilder
     private var bottomControls: some View {
+        if isCleanPreview {
+            shutterRow
+        } else {
+            normalBottomControls
+        }
+    }
+
+    private var normalBottomControls: some View {
         VStack(spacing: 14) {
                 ZStack {
                     Color.clear
@@ -282,6 +445,28 @@ struct CameraView: View {
                 .gesture(zoomGesture)
                 .allowsHitTesting(!(camera.isRecording && recordingLock))
 
+            if zoomButtonsEnabled {
+                HStack(spacing: 8) {
+                    ForEach(Array(camera.zoomShortcutValues.enumerated()), id: \.offset) { item in
+                        let value = item.element
+                        Button {
+                            CameraHaptics.fire()
+                            camera.setZoomFactor(CGFloat(value))
+                        } label: {
+                            Text(cameraZoomLabel(value))
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(abs(camera.zoomFactor - CGFloat(value)) < 0.05 ? accent.color : .white.opacity(0.78))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.34), in: Capsule())
+                        }
+                        .disabled(camera.isRecording && recordingLock)
+                        .accessibilityLabel("Set zoom \(cameraZoomLabel(value))")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+
             CaptureModeSelector(
                 selectedMode: camera.captureMode,
                 isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0,
@@ -290,49 +475,102 @@ struct CameraView: View {
             )
                 .padding(.bottom, 8)
 
-            HStack {
-                CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
-                    withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
-                }
-                Spacer()
-                if camera.captureMode == .photo {
-                    PhotoButton(
-                        isCapturing: camera.isCapturingPhoto,
-                        onTap: {
-                            guard !editingStats else { return }
-                            shutterPressed()
-                        },
-                        onBurstStart: {
-                            guard !editingStats else { return }
-                            cancelCountdown()
-                            captureHaptic()
-                            camera.captureBurst()
-                        },
-                        onBurstEnd: {
-                            camera.stopBurst()
-                        }
-                    )
-                } else if camera.isRecording && recordingLock {
-                    Image(systemName: "lock.fill")
-                        .font(.title2).foregroundStyle(accent.color)
-                        .frame(width: 76, height: 76)
-                        .background(.black.opacity(0.6), in: Circle())
-                        .overlay(Circle().stroke(.red, lineWidth: 3))
-                        .onLongPressGesture(minimumDuration: 1) { CameraHaptics.fire(captureOnly: true); camera.startOrStopRecording() }
-                        .accessibilityLabel("Recording locked. Hold to stop")
-                        .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
-                } else {
-                    RecordButton(isRecording: camera.isRecording, isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning) {
-                        shutterPressed()
-                    }
-                }
-            Spacer()
-            CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
-                camera.switchCamera()
-            }
-            }
+            shutterRow
         }
         .padding(.bottom, 8)
+    }
+
+    /// One stable shutter row is used in both normal and Clean Preview modes. The side controls
+    /// occupy fixed 48-point slots and the pause control uses the left slot beside the centered
+    /// shutter while recording, so no offset or overlay can move the shutter when controls change.
+    private var shutterRow: some View {
+        HStack(spacing: 0) {
+            ZStack {
+                if camera.isRecording {
+                    recordingPauseControl
+                } else if !isCleanPreview {
+                    CameraIconButton(symbol: "ellipsis", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
+                        withAnimation(.easeOut(duration: 0.16)) { isShowingProTools.toggle() }
+                    }
+                }
+            }
+            .frame(width: ShutterRowLayoutPolicy.sideSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+
+            Spacer(minLength: 0)
+
+            ZStack {
+                shutterContent
+            }
+            .frame(width: ShutterRowLayoutPolicy.shutterSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+
+            Spacer(minLength: 0)
+
+            ZStack {
+                if !camera.isRecording && !isCleanPreview {
+                    CameraIconButton(symbol: "camera.rotate", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning && countdown == 0, color: accent.color) {
+                        camera.switchCamera()
+                    }
+                }
+            }
+            .frame(width: ShutterRowLayoutPolicy.sideSlotWidth, height: ShutterRowLayoutPolicy.rowHeight)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var shutterContent: some View {
+        if camera.captureMode == .photo {
+            PhotoButton(
+                isCapturing: camera.isCapturingPhoto,
+                onTap: {
+                    guard !editingStats else { return }
+                    shutterPressed()
+                },
+                onBurstStart: {
+                    guard !editingStats else { return }
+                    cancelCountdown()
+                    if camera.captureBurst() {
+                        captureHaptic()
+                        triggerPhotoFeedback()
+                    }
+                },
+                onBurstEnd: {
+                    camera.stopBurst()
+                }
+            )
+        } else if camera.isRecording && recordingLock {
+            Image(systemName: "lock.fill")
+                .font(.title2)
+                .foregroundStyle(accent.color)
+                .frame(width: 76, height: 76)
+                .background(.black.opacity(0.6), in: Circle())
+                .overlay(Circle().stroke(.red, lineWidth: 3))
+                .onLongPressGesture(minimumDuration: 1) {
+                    CameraHaptics.fire()
+                    camera.startOrStopRecording()
+                }
+                .accessibilityLabel("Recording locked. Hold to stop")
+                .accessibilityAction(named: "Stop recording") { camera.startOrStopRecording() }
+        } else {
+            RecordButton(
+                isRecording: camera.isRecording,
+                isEnabled: !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isLensTransitioning
+            ) {
+                shutterPressed()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var recordingPauseControl: some View {
+        if camera.isRecording && camera.captureMode != .photo {
+            RecordingPauseButton(
+                isPaused: camera.recordingPauseState == .paused,
+                isEnabled: camera.recordingPauseState == .recording || camera.recordingPauseState == .paused
+            ) {
+                camera.toggleRecordingPause()
+            }
+        }
     }
 
     @ViewBuilder
@@ -386,10 +624,43 @@ struct CameraView: View {
             }
     }
 
+    private func cameraZoomLabel(_ value: Double) -> String {
+        abs(value.rounded() - value) < 0.01
+            ? "\(Int(value.rounded()))×"
+            : String(format: "%.1f×", value)
+    }
+
     private func captureHaptic() {
-        guard isHapticCaptureEnabled else { return }
-        AppEventLog.event("Capture haptic requested")
-        CameraHaptics.fire(captureOnly: true)
+        guard isHapticsEnabled else { return }
+        AppEventLog.event("App haptic requested: capture")
+        CameraHaptics.fire()
+    }
+
+    private func triggerPhotoFeedback() {
+        let isFront = camera.cameraPosition == .front
+        let shouldShow = photoCaptureFlash || (isFront && frontScreenFlash)
+        guard shouldShow else { return }
+
+        photoFeedbackTask?.cancel()
+        isPhotoFeedbackVisible = true
+        AppEventLog.event(
+            "Photo capture feedback shown: \(isFront && frontScreenFlash ? "front screen flash" : "shutter flash")"
+        )
+        let duration: UInt64 = isFront && frontScreenFlash ? 180_000_000 : 100_000_000
+        photoFeedbackTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: duration) } catch { return }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.16)) {
+                isPhotoFeedbackVisible = false
+            }
+            photoFeedbackTask = nil
+        }
+    }
+
+    private func cancelPhotoFeedback() {
+        photoFeedbackTask?.cancel()
+        photoFeedbackTask = nil
+        isPhotoFeedbackVisible = false
     }
 
     private var hudWhiteBalanceLabel: String {
@@ -399,6 +670,7 @@ struct CameraView: View {
         case .cloudy: return "Cloud"
         case .tungsten: return "Tung"
         case .fluorescent: return "Fluor"
+        case .custom: return "Custom"
         }
     }
 
@@ -409,10 +681,13 @@ struct CameraView: View {
         shutterTask?.cancel()
         shutterTask = nil
         countdown = 0
+        countdownIsForRecording = false
     }
 
     private func shutterPressed() {
-        AppEventLog.event("Shutter pressed: mode=\(camera.captureMode.rawValue), recording=\(camera.isRecording), delay=\(shutterDelay)s")
+        let mode = camera.captureMode
+        let configuredDelay = mode == .photo ? shutterDelay : recordingStartCountdown
+        AppEventLog.event("Shutter pressed: mode=\(mode.rawValue), recording=\(camera.isRecording), delay=\(configuredDelay)s")
         if countdown > 0 { cancelCountdown(); return }
         if camera.isRecording { captureHaptic(); camera.startOrStopRecording(); return }
         guard !camera.isRecordingStarting, !camera.isFinalizingRecording,
@@ -420,10 +695,14 @@ struct CameraView: View {
             AppEventLog.event("Shutter ignored: starting=\(camera.isRecordingStarting), finalizing=\(camera.isFinalizingRecording), pendingCountdown=\(shutterTask != nil), sessionRunning=\(camera.isSessionRunning)")
             return
         }
-        let mode = camera.captureMode
         shutterTask = Task { @MainActor in
-            countdown = shutterDelay
-            if countdown > 0 { AppEventLog.event("Shutter countdown started: \(countdown)s") }
+            countdownIsForRecording = mode != .photo
+            countdown = configuredDelay
+            if countdown > 0 {
+                AppEventLog.event(
+                    "\(mode == .photo ? "Photo shutter timer" : "Recording start countdown") started: \(countdown)s"
+                )
+            }
             while countdown > 0 {
                 if countdownHaptics { CameraHaptics.fire() }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
@@ -432,9 +711,17 @@ struct CameraView: View {
             }
             guard !Task.isCancelled, scenePhase == .active, camera.captureMode == mode else { return }
             AppEventLog.event("Shutter executing: mode=\(mode.rawValue)")
-            captureHaptic()
-            if mode == .photo { camera.capturePhoto() } else { camera.startOrStopRecording() }
+            if mode == .photo {
+                if camera.capturePhoto() {
+                    captureHaptic()
+                    triggerPhotoFeedback()
+                }
+            } else {
+                captureHaptic()
+                camera.startOrStopRecording()
+            }
             shutterTask = nil
+            countdownIsForRecording = false
         }
     }
 
@@ -442,9 +729,4 @@ struct CameraView: View {
         UIApplication.shared.isIdleTimerDisabled = keepScreenAwakeEnabled && phase == .active
     }
 
-    private var storagePollingState: StoragePollingState {
-        guard scenePhase == .active else { return .inactive }
-        guard !isShowingSettings else { return .covered }
-        return camera.isRecording ? .recording : .idle
-    }
 }

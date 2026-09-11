@@ -4,9 +4,11 @@ import SwiftUI
 struct LowPolyCamApp: App {
     @StateObject private var permissionManager = PermissionManager()
     private var accent = CameraAccent()
-    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    @AppStorage("appColorScheme") private var appColorScheme = "dark"
 
     init() {
+        LowPolyCamPreferences.registerAndMigrate()
+        AppEventLog.normalizeExtremeDiagnosticsPreference()
         AppEventLog.beginNewSession()
         AppEventLog.event("App initialized")
     }

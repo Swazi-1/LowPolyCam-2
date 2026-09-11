@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>A lightweight iOS camera app built for long recordings, low storage use, flexible shooting, and fast camera control.</b><br>
-  Designed for iOS 26+ and tested primarily on iPhone 11 with iOS 27.
+  Designed for iOS 26+ with iPhone 11 as the primary compatibility target.
 </p>
 
 ---
@@ -31,6 +31,7 @@ LowPolyCam is designed to stay responsive while avoiding unnecessary camera work
 **HEIC or JPEG** — Choose the photo file format.<br>
 **Aspect Ratios** — Capture using supported photo aspect ratios such as 4:3 and 1:1.<br>
 **Burst Mode** — Capture multiple full-resolution photos quickly.<br>
+**Photo Flash** — Use real still-photo Off, Auto or On flash where the active camera supports it.<br>
 **Timer** — Delay photo capture when needed.<br>
 **Tap to Focus** — Tap the viewfinder to focus and expose.<br>
 **AF / AE Lock** — Lock focus and exposure when needed.<br>
@@ -48,7 +49,9 @@ LowPolyCam is designed to stay responsive while avoiding unnecessary camera work
 **File Splitting:** Optional split recording for long sessions<br>
 **Save to Photos:** Recordings are saved directly to the Photos library<br>
 **Live Recording Stats:** Optional real-time recording information<br>
-**Automatic Compatibility:** Unsupported combinations are automatically rejected or hidden
+**Automatic Compatibility:** Unsupported combinations are automatically rejected or hidden<br>
+**Lazy Microphone Permission:** Video audio permission is requested only when recording starts.
+**Audio Status:** The camera HUD reports whether recording has audio, is silent, or is still waiting for microphone access.
 
 ### 🐌 Slow-Mo
 
@@ -65,7 +68,7 @@ LowPolyCam is designed to stay responsive while avoiding unnecessary camera work
 **Focus / Exposure Lock** — Lock AF and AE directly from the viewfinder.<br>
 **Horizon Level** — Gyroscope-based level indicator.<br>
 **Tap Focus** — Quickly focus and expose anywhere in the preview.<br>
-**Haptic Feedback** — Adjustable capture haptics.
+**Haptic Feedback** — App-wide haptics with adjustable strength and optional countdown feedback.
 
 ---
 
@@ -107,7 +110,7 @@ HUD elements can be enabled or disabled individually.
 **Keep Screen Awake** — Prevent the display from sleeping while actively using the camera.<br>
 **Efficient Live Metrics** — Avoids unnecessary output configuration when nothing changed.<br>
 **Reduced Background Work** — Repeated settings, UI updates, and camera requests are ignored where possible.<br>
-**Low-Space Protection** — Prevents recording from continuing when available storage becomes critically low.
+**Low-Space Protection** — Monitors storage during recording and stops safely before critical space is exhausted.
 
 ---
 
@@ -116,7 +119,9 @@ HUD elements can be enabled or disabled individually.
 LowPolyCam includes multiple protections for long recordings and camera interruptions.
 
 **Recording Recovery** — Failed or interrupted recording files can be retained for recovery.<br>
+**Photo Recovery** — Failed photo processing or Photos imports can retain the image in Recovery.<br>
 **Photos Save Protection** — Pending Photos saves are tracked before temporary files are removed.<br>
+**Split Session Manifests** — Split recordings keep a sidecar manifest that groups their segments by recording session.<br>
 **Camera Recovery** — Camera sessions can recover from interruptions and media-services resets.<br>
 **Rollback Protection** — Failed camera/input changes attempt to restore the previous working configuration.<br>
 **Lifecycle Protection** — Background, inactive and active states are handled separately.<br>
@@ -137,13 +142,15 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 * Stabilization
 * Live Recording Stats
 * Split recording
+* Opt-in persistent diagnostic logs
 
 ### Photo
 
-* Megapixels
+* Megapixels: 12 / 8 / 4 / 2 / 1 where supported
 * HEIC / JPEG
 * Aspect ratio
-* Burst count
+* Burst count: 15 / 10 / 5
+* Photo flash: Off / Auto / On where supported
 * Timer
 
 ### Slow-Mo
@@ -153,7 +160,21 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 * Compression settings
 * Camera-specific compatibility
 
-### Viewfinder & HUD
+### Camera Setup
+
+* Remember Camera Setup
+* Capture mode selection when setup memory is enabled
+* Keep Screen Awake
+
+### Preferences
+
+* Shutter timer
+* Zoom speed and tap-to-reset
+* Recording safeguards
+* App-wide haptic feedback with adjustable strength and optional countdown feedback
+* Selfie mirroring and exposure/white-balance reset
+
+### Camera HUD
 
 * Camera HUD
 * Resolution
@@ -168,23 +189,19 @@ LowPolyCam uses mode-aware settings so options only appear when they are relevan
 
 ---
 
-## ⚡ Performance
+## ⚡ Performance notes
 
-LowPolyCam v4.2 contains a large camera-performance and reliability pass.
+LowPolyCam v5.0.12 contains a camera-performance and reliability pass focused on safe work scheduling and release closure.
 
-### 🚀 Up to ~60% Faster Photo Capture
+### 🚀 Photo capture path
 
-Photo capture is **up to approximately 60% faster than v4.1.1** in observed testing.
-
-The shutter becomes available again after the camera finishes the actual capture instead of waiting for slower image processing and Photos saving.
+The shutter becomes available after the camera finishes the actual capture instead of waiting for image processing and Photos saving.
 
 Cropping, resizing and saving continue away from the shutter-critical path.
 
-### ⚙️ Up to ~30% Faster Settings
+### ⚙️ Settings work
 
-Settings applying was improved by **up to approximately 30%** during the v4.1 → v4.2 development cycle.
-
-Camera state changes now perform less unnecessary work and are less likely to block the UI.
+Camera state changes avoid unnecessary work and capability scans are prepared asynchronously for the Settings UI.
 
 ### 🎥 Faster Video Configuration
 
@@ -197,19 +214,13 @@ A new **70 ms Video configuration coalescer** combines rapid changes to:
 
 Instead of configuring every temporary combination, LowPolyCam moves toward the newest valid setting.
 
-In one device stress test:
+Rapid changes are coalesced so intermediate states do not all reach AVFoundation. Exact results depend on the device and workload.
 
-**40 Video configuration requests → 23 actual applies + 17 coalesced requests**
+### 🔭 Guarded Rear 4K60 Camera Switching
 
-That is roughly **42% fewer real configuration applies** during that test.
+Rear 4K60 camera/lens handoffs retain the guarded physical-lens transition path. Runtime speed still needs characterization on the target device.
 
-### 🔭 Much Faster Rear 4K60 Camera Switching
-
-Rear 4K60 camera/lens behaviour was observed on the test device to feel roughly **2× as fast as the previous build**.
-
-This is a user-observed improvement rather than a controlled benchmark.
-
-### ⏺ Faster Repeated Record Starts
+### ⏺ Repeated Record Starts
 
 High-quality recording now remembers a verified working movie-output configuration.
 
@@ -219,9 +230,9 @@ The safe full configuration path is still used whenever the app cannot prove tha
 
 ---
 
-## 🧠 v4.2 Camera Architecture
+## 🧠 v5.0.12 Camera Architecture
 
-v4.2 significantly improves how camera work is scheduled.
+v5.0.12 improves how camera work is scheduled and how completed media is checked.
 
 ### Video Configuration Coalescing
 
@@ -254,9 +265,17 @@ Derived camera state is only published when values actually change.
 
 Alternate codec support is memoized for the current camera and recording configuration.
 
+### Capability snapshots
+
+Settings reads a request-guarded capability snapshot prepared on the camera queue. This keeps format discovery out of SwiftUI body evaluation while preserving final synchronous guards before hardware changes.
+
+### Media validation and recovery
+
+Completed video and processed photos are checked before Photos import. Unreadable media is retained in Recovery, where it can be shared, retried, or deleted.
+
 ---
 
-## 🔧 v4.2 Fixes
+## 🔧 v5.0.12 Fixes
 
 ### Video / Recording
 
@@ -296,7 +315,7 @@ Alternate codec support is memoized for the current camera and recording configu
 
 ### Photo / Burst
 
-* Photo capture up to ~60% faster
+ * Photo capture keeps processing and Photos I/O off the shutter-critical path
 * Fixed Burst Mode occasionally getting stuck after releasing
 * Improved maximum-resolution still capture
 * Fixed aspect-ratio state not matching the saved image
@@ -307,7 +326,7 @@ Alternate codec support is memoized for the current camera and recording configu
 
 ### Settings / UI
 
-* Settings applying up to ~30% faster in observed testing
+ * Settings capability discovery is prepared asynchronously
 * Improved rapid settings changes
 * Reduced unnecessary state publishing
 * Improved unsupported-option handling
@@ -330,7 +349,7 @@ Alternate codec support is memoized for the current camera and recording configu
 
 ## 🧹 Removed / Replaced Since v4.1
 
-v4.2 also removes several older systems that were no longer needed.
+v5.0.12 keeps the beta's current architecture and removes several older systems that were no longer needed.
 
 Removed or replaced:
 
@@ -359,7 +378,7 @@ These were replaced with the current:
 * AppEventLog
 * PhotoAspectProcessor
 
-The final v4.2 source contains substantially less duplicated camera code while adding stronger camera-state protection.
+The v5.0.12 beta source contains substantially less duplicated camera code while adding stronger camera-state and media-save protection.
 
 ---
 
@@ -383,7 +402,7 @@ Actual file size is determined from the bitrate used by the selected camera conf
 ## 📱 iOS Notes
 
 **iOS 26+ Required** — LowPolyCam currently targets iOS 26 and newer.<br>
-**iOS 27 Tested** — Primary testing is performed on iOS 27.<br>
+**iOS 27 Release Target** — iOS 27 acceptance still belongs to the macOS/iPhone release gate.<br>
 **Screen Must Stay Active** — Standard iOS apps cannot continue normal camera recording after being fully suspended in the background.<br>
 **Hardware Varies** — Available lenses, resolutions and frame rates depend on the device.<br>
 **Automatic Compatibility** — Unsupported options are automatically hidden, rejected or adjusted safely.
