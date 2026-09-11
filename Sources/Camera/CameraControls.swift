@@ -358,6 +358,7 @@ struct CameraHUDSnapshot: Equatable {
     let isRecording: Bool
     let captureModeLabel: String
     let isPhotoMode: Bool
+    let lensLabel: String
     let resolutionLabel: String
     let frameRateLabel: String?
     let remainingLabel: String
@@ -373,6 +374,7 @@ struct CameraHUD: View {
     @AppStorage("cameraHUDBattery") private var showBattery = true
     @AppStorage("cameraHUDStorage") private var showStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var showDroppedFrames = false
+    @AppStorage("cameraHUDLens") private var showLens = false
     @State private var batteryLevel: Float = -1
     @AppStorage("thermalHUD") private var showThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
@@ -417,6 +419,7 @@ struct CameraHUD: View {
             showFPS: showFPS,
             showRemaining: showRemaining,
             showWhiteBalance: showWhiteBalance,
+            showLens: showLens,
             showBattery: showBattery,
             batteryLevel: batteryLevel,
             showStorage: showStorage,
@@ -453,6 +456,7 @@ private struct CameraHUDContent: View, Equatable {
     let showFPS: Bool
     let showRemaining: Bool
     let showWhiteBalance: Bool
+    let showLens: Bool
     let showBattery: Bool
     let batteryLevel: Float
     let showStorage: Bool
@@ -470,6 +474,7 @@ private struct CameraHUDContent: View, Equatable {
         lhs.showFPS == rhs.showFPS &&
         lhs.showRemaining == rhs.showRemaining &&
         lhs.showWhiteBalance == rhs.showWhiteBalance &&
+        lhs.showLens == rhs.showLens &&
         lhs.showBattery == rhs.showBattery &&
         lhs.batteryLevel == rhs.batteryLevel &&
         lhs.showStorage == rhs.showStorage &&
@@ -536,6 +541,7 @@ private struct CameraHUDContent: View, Equatable {
     private var items: [String] {
         var result: [String] = []
         if showResolution { result.append(snapshot.resolutionLabel) }
+        if showLens { result.append(snapshot.lensLabel) }
         if showFPS, let fps = snapshot.frameRateLabel { result.append("\(fps)fps") }
         if showRemaining { result.append(snapshot.remainingLabel) }
         if showWhiteBalance { result.append(snapshot.whiteBalanceLabel) }
@@ -566,6 +572,7 @@ private struct CameraHUDContent: View, Equatable {
         if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
         if item.hasPrefix("~") { return snapshot.isPhotoMode ? "photo.on.rectangle" : "clock" }
         if item == snapshot.whiteBalanceLabel { return "sun.max" }
+        if item == snapshot.lensLabel { return "camera.aperture" }
         return "viewfinder"
     }
 }

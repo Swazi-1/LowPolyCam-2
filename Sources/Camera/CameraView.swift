@@ -20,6 +20,9 @@ struct CameraView: View {
     @AppStorage("cameraHUDFPS") private var hudFPS = true
     @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
+    @AppStorage("frameGuidesEnabled") private var frameGuidesEnabled = false
+    @AppStorage("photoCaptureFlash") private var photoCaptureFlash = true
+    @AppStorage("frontScreenFlash") private var frontScreenFlash = false
     @AppStorage("appColorScheme") private var appColorScheme = "dark"
     @AppStorage("hapticCaptureEnabled") private var isHapticsEnabled = true
     @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
@@ -39,7 +42,6 @@ struct CameraView: View {
     @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
     @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
-    @AppStorage("zebraExposureWarning") private var zebraExposureWarning = false
     @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
@@ -50,6 +52,8 @@ struct CameraView: View {
     @State private var isCleanPreview = false
     @State private var countdownIsForRecording = false
     @State private var restoreBrightness: CGFloat?
+    @State private var isPhotoFeedbackVisible = false
+    @State private var photoFeedbackTask: Task<Void, Never>?
     private var accent = CameraAccent()
 
     var body: some View {
@@ -58,12 +62,13 @@ struct CameraView: View {
             photoAspectOverlay
             previewGradient
             gridOverlay
-            zebraExposureOverlay
+            frameGuidesOverlay
             crosshairOverlay
             countdownOverlay
             levelMeterOverlay
             controlsLayer
             proToolsOverlay
+            photoFeedbackOverlay
         }
         .overlay {
             if editingStats || (liveStats && camera.isRecording) {
@@ -101,9 +106,6 @@ struct CameraView: View {
                 camera.setAudioLevelMeterMode(mode)
             }
         }
-        .onChange(of: zebraExposureWarning) { _, newValue in
-            camera.setZebraExposureWarningEnabled(newValue)
-        }
         .onChange(of: cleanPreviewGesture) { _, newValue in
             if newValue == CleanPreviewGesture.off.rawValue {
                 isCleanPreview = false
@@ -116,6 +118,7 @@ struct CameraView: View {
                 camera.refreshAvailableStorage()
             } else {
                 cancelCountdown()
+                cancelPhotoFeedback()
                 if let brightness = restoreBrightness {
                     UIScreen.main.brightness = brightness
                     restoreBrightness = nil
@@ -125,6 +128,7 @@ struct CameraView: View {
         }
         .onDisappear {
             cancelCountdown()
+            cancelPhotoFeedback()
             camera.stop()
             if let brightness = restoreBrightness { UIScreen.main.brightness = brightness; restoreBrightness = nil }
             UIApplication.shared.isIdleTimerDisabled = false
@@ -212,10 +216,9 @@ struct CameraView: View {
     }
 
     @ViewBuilder
-    private var zebraExposureOverlay: some View {
-        if zebraExposureWarning && camera.isZebraAvailableForCurrentConfiguration && camera.captureMode != .photo {
-            ZebraExposureOverlay(mask: camera.zebraExposureMask)
-                .ignoresSafeArea()
+    private var frameGuidesOverlay: some View {
+        if frameGuidesEnabled && !isCleanPreview {
+            CameraFrameGuideOverlay()
         }
     }
 
@@ -243,6 +246,18 @@ struct CameraView: View {
             }
             .foregroundStyle(.white)
             .zIndex(10)
+        }
+    }
+
+    @ViewBuilder
+    private var photoFeedbackOverlay: some View {
+        if isPhotoFeedbackVisible {
+            Color.white
+                .opacity(camera.cameraPosition == .front && frontScreenFlash ? 0.92 : 0.28)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .transition(.opacity)
+                .zIndex(50)
         }
     }
 
@@ -323,6 +338,7 @@ struct CameraView: View {
                 isRecording: camera.isRecording,
                 captureModeLabel: camera.captureMode.rawValue,
                 isPhotoMode: camera.captureMode == .photo,
+                lensLabel: camera.activeLensLabel,
                 resolutionLabel: camera.hudResolutionLabel,
                 frameRateLabel: camera.hudFrameRateLabel,
                 remainingLabel: camera.hudRemainingLabel,
@@ -484,6 +500,7 @@ struct CameraView: View {
                     cancelCountdown()
                     if camera.captureBurst() {
                         captureHaptic()
+                        triggerPhotoFeedback()
                     }
                 },
                 onBurstEnd: {
@@ -588,6 +605,33 @@ struct CameraView: View {
         CameraHaptics.fire()
     }
 
+    private func triggerPhotoFeedback() {
+        let isFront = camera.cameraPosition == .front
+        let shouldShow = photoCaptureFlash || (isFront && frontScreenFlash)
+        guard shouldShow else { return }
+
+        photoFeedbackTask?.cancel()
+        isPhotoFeedbackVisible = true
+        AppEventLog.event(
+            "Photo capture feedback shown: \(isFront && frontScreenFlash ? "front screen flash" : "shutter flash")"
+        )
+        let duration: UInt64 = isFront && frontScreenFlash ? 180_000_000 : 100_000_000
+        photoFeedbackTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: duration) } catch { return }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.16)) {
+                isPhotoFeedbackVisible = false
+            }
+            photoFeedbackTask = nil
+        }
+    }
+
+    private func cancelPhotoFeedback() {
+        photoFeedbackTask?.cancel()
+        photoFeedbackTask = nil
+        isPhotoFeedbackVisible = false
+    }
+
     private var hudWhiteBalanceLabel: String {
         switch camera.whiteBalancePreset {
         case .auto: return "AWB"
@@ -639,6 +683,7 @@ struct CameraView: View {
             if mode == .photo {
                 if camera.capturePhoto() {
                     captureHaptic()
+                    triggerPhotoFeedback()
                 }
             } else {
                 captureHaptic()

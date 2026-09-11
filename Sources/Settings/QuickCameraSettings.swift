@@ -5,6 +5,7 @@ struct QuickControlsSettingsView: View {
     @AppStorage("cameraGridEnabled") private var grid = false
     @AppStorage("gridOpacity") private var gridOpacity = 1.0
     @AppStorage("gridStyle") private var gridStyle = GridStyle.ruleOfThirds.rawValue
+    @AppStorage("frameGuidesEnabled") private var frameGuidesEnabled = false
     @AppStorage("levelMeterEnabled") private var level = false
     @AppStorage("centerCrosshair") private var crosshair = false
     @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
@@ -40,6 +41,15 @@ struct QuickControlsSettingsView: View {
                         Slider(value: $gridOpacity, in: 0.2...1)
                     }
                     .padding(.vertical, 4)
+                }
+
+                HapticFreeSettingsToggle(isOn: $frameGuidesEnabled) {
+                    SettingsToggleLabel(
+                        symbol: "rectangle.inset.inset",
+                        color: .purple,
+                        title: "Safe Frame Guides",
+                        subtitle: "Show a dashed inner frame for cleaner composition."
+                    )
                 }
 
                 HapticFreeSettingsToggle(isOn: $level) {

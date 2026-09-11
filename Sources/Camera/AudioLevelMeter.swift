@@ -207,9 +207,14 @@ final class AudioLevelMeter: NSObject, ObservableObject, AVCaptureAudioDataOutpu
 }
 
 struct AudioLevelMeterView: View {
-    @Environment(\.cameraTint) private var theme
+    @AppStorage("iconAppearance") private var accentPreset = "Ice"
+    @AppStorage("iconCustomRed") private var customRed = 0.55
+    @AppStorage("iconCustomGreen") private var customGreen = 0.85
+    @AppStorage("iconCustomBlue") private var customBlue = 1.0
+    @AppStorage("audioPeakHold") private var audioPeakHold = true
     let snapshot: AudioLevelMeterSnapshot
     let mode: AudioLevelMeterMode
+    @State private var peakHoldDBFS = AudioLevelMeterPolicy.minimumDBFS
 
     var body: some View {
         Group {
@@ -220,29 +225,109 @@ struct AudioLevelMeterView: View {
                 case .off:
                     EmptyView()
                 case .bars:
-                    HStack(spacing: 2) {
+                    HStack(alignment: .bottom, spacing: 2) {
                         ForEach(0..<AudioLevelMeterPolicy.defaultBarCount, id: \.self) { index in
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(color(for: index))
-                                .frame(width: 3, height: CGFloat(4 + index * 2))
+                            let height = CGFloat(4 + index * 2)
+                            ZStack(alignment: .top) {
+                                RoundedRectangle(cornerRadius: 1.5)
+                                    .fill(color(for: index))
+                                if audioPeakHold && peakHoldBarCount == index + 1 {
+                                    Capsule()
+                                        .fill(levelColor)
+                                        .frame(width: 5, height: 2)
+                                        .offset(y: -3)
+                                }
+                            }
+                            .frame(width: 3, height: height, alignment: .bottom)
                         }
                     }
+                    .padding(.horizontal, usesBlackMeterColor ? 3 : 0)
+                    .background(meterBackground, in: Capsule())
                     .frame(height: 20, alignment: .bottom)
                     .accessibilityLabel("Audio level")
-                    .accessibilityValue(snapshot.isClipping ? "Clipping" : "\(snapshot.bars) of \(AudioLevelMeterPolicy.defaultBarCount) bars")
+                    .accessibilityValue(accessibilityBarsValue)
                 case .decibels:
-                    Text(String(format: "%.0f dBFS", snapshot.averagePowerDBFS))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(snapshot.isClipping ? .red : .white)
-                        .accessibilityLabel("Audio level in dBFS")
-                        .accessibilityValue(String(format: "%.0f dBFS", snapshot.averagePowerDBFS))
+                    HStack(spacing: 4) {
+                        Text(String(format: "%.0f dBFS", snapshot.averagePowerDBFS))
+                        if audioPeakHold {
+                            Text("pk \(String(format: "%.0f", peakHoldDBFS))")
+                                .foregroundStyle(levelColor.opacity(0.68))
+                        }
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(snapshot.isClipping ? .red : levelColor)
+                    .padding(.horizontal, usesBlackMeterColor ? 3 : 0)
+                    .background(meterBackground, in: Capsule())
+                    .accessibilityLabel("Audio level in dBFS")
+                    .accessibilityValue(accessibilityDecibelsValue)
                 }
+            }
+        }
+        .onAppear { updatePeakHold(for: snapshot) }
+        .onChange(of: snapshot) { _, next in updatePeakHold(for: next) }
+        .onChange(of: audioPeakHold) { _, enabled in
+            if enabled {
+                updatePeakHold(for: snapshot)
+            } else {
+                peakHoldDBFS = AudioLevelMeterPolicy.minimumDBFS
+            }
+        }
+        .task(id: peakHoldDBFS) {
+            guard audioPeakHold, snapshot.isAvailable, peakHoldDBFS > AudioLevelMeterPolicy.minimumDBFS else { return }
+            do { try await Task.sleep(nanoseconds: 1_500_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.12)) {
+                peakHoldDBFS = max(AudioLevelMeterPolicy.minimumDBFS, peakHoldDBFS - 3)
             }
         }
     }
 
+    private var levelColor: Color {
+        // The meter is a level indicator, not another camera-control accent. Keep it white for
+        // contrast, except when a user explicitly chooses pure white as the custom accent.
+        usesBlackMeterColor ? .black : .white
+    }
+
+    private var usesBlackMeterColor: Bool {
+        accentPreset == "Custom" &&
+            customRed >= 0.98 && customGreen >= 0.98 && customBlue >= 0.98
+    }
+
+    private var meterBackground: Color {
+        usesBlackMeterColor ? .white.opacity(0.88) : .clear
+    }
+
     private func color(for index: Int) -> Color {
-        guard index < snapshot.bars else { return .white.opacity(0.22) }
-        return snapshot.isClipping ? .red : theme
+        guard index < snapshot.bars else { return levelColor.opacity(0.22) }
+        return snapshot.isClipping ? .red : levelColor
+    }
+
+    private var peakHoldBarCount: Int {
+        AudioLevelMeterPolicy.barCount(forAveragePowerDBFS: peakHoldDBFS)
+    }
+
+    private var accessibilityBarsValue: String {
+        let current = snapshot.isClipping
+            ? "Clipping"
+            : "\(snapshot.bars) of \(AudioLevelMeterPolicy.defaultBarCount) bars"
+        guard audioPeakHold, peakHoldDBFS > AudioLevelMeterPolicy.minimumDBFS else { return current }
+        return "\(current), peak hold \(String(format: "%.0f dBFS", peakHoldDBFS))"
+    }
+
+    private var accessibilityDecibelsValue: String {
+        let current = String(format: "%.0f dBFS", snapshot.averagePowerDBFS)
+        guard audioPeakHold, peakHoldDBFS > AudioLevelMeterPolicy.minimumDBFS else { return current }
+        return "\(current), peak hold \(String(format: "%.0f dBFS", peakHoldDBFS))"
+    }
+
+    private func updatePeakHold(for nextSnapshot: AudioLevelMeterSnapshot) {
+        guard audioPeakHold, nextSnapshot.isAvailable else {
+            if !nextSnapshot.isAvailable { peakHoldDBFS = AudioLevelMeterPolicy.minimumDBFS }
+            return
+        }
+        let nextPeak = min(0, max(AudioLevelMeterPolicy.minimumDBFS, nextSnapshot.peakPowerDBFS))
+        if nextPeak > peakHoldDBFS + 0.1 {
+            peakHoldDBFS = nextPeak
+        }
     }
 }

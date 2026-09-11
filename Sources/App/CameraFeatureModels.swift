@@ -325,16 +325,6 @@ enum RecordingSplitTimingPolicy {
     }
 }
 
-enum ZebraAvailabilityPolicy {
-    static func isAvailable(isPhotoMode: Bool, isProtectedRear4K60: Bool) -> Bool {
-        !isPhotoMode && !isProtectedRear4K60
-    }
-
-    static func isActive(requested: Bool, available: Bool) -> Bool {
-        requested && available
-    }
-}
-
 enum RecordingCountdownState: Equatable {
     case idle
     case countingDown(remaining: Int)

@@ -107,6 +107,11 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.customWhiteBalanceTint), WhiteBalancePreferencePolicy.maximumTint, accuracy: 0.0001)
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.focusExposureLockMode), "AE/AF")
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.tapFocusResetSeconds), 1)
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.photoCaptureFlash))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.frontScreenFlash))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.frameGuidesEnabled))
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.audioPeakHold))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDLens))
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.schemaVersion), LowPolyCamPreferences.currentSchemaVersion)
         defaults.removePersistentDomain(forName: suiteName)
     }
@@ -393,15 +398,6 @@ final class LowPolyCamTests: XCTestCase {
                 pauseState: .recording
             )
         )
-    }
-
-    func testZebraAvailabilitySeparatesPreferenceFromActiveCapability() {
-        XCTAssertFalse(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: false, isProtectedRear4K60: true))
-        XCTAssertTrue(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: false, isProtectedRear4K60: false))
-        XCTAssertFalse(ZebraAvailabilityPolicy.isAvailable(isPhotoMode: true, isProtectedRear4K60: false))
-        XCTAssertFalse(ZebraAvailabilityPolicy.isActive(requested: true, available: false))
-        XCTAssertTrue(ZebraAvailabilityPolicy.isActive(requested: true, available: true))
-        XCTAssertFalse(ZebraAvailabilityPolicy.isActive(requested: false, available: true))
     }
 
     func testRecordingCountdownMachineTicksAndCancels() {

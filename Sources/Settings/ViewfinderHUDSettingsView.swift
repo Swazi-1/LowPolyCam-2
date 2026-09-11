@@ -13,6 +13,8 @@ struct CameraHUDSettingsView: View {
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
     @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
+    @AppStorage("audioPeakHold") private var audioPeakHold = true
+    @AppStorage("cameraHUDLens") private var hudLens = false
 
     var body: some View {
         List {
@@ -36,6 +38,7 @@ struct CameraHUDSettingsView: View {
                     Text(camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining")
                 }
                 HapticFreeSettingsToggle(isOn: $hudWhiteBalance) { Text("White Balance") }
+                HapticFreeSettingsToggle(isOn: $hudLens) { Text("Active Lens") }
             }
             .disabled(!isHUDEnabled)
 
@@ -61,10 +64,19 @@ struct CameraHUDSettingsView: View {
                         camera.setAudioLevelMeterMode(mode)
                     }
                 }
+                HapticFreeSettingsToggle(isOn: $audioPeakHold) {
+                    SettingsToggleLabel(
+                        symbol: "arrow.up.forward",
+                        color: .orange,
+                        title: "Peak Hold",
+                        subtitle: "Hold the loudest recent meter level briefly."
+                    )
+                }
+                .disabled(audioLevelMeter == AudioLevelMeterMode.off.rawValue)
             } header: {
                 Text("RECORDING HUD")
             } footer: {
-                Text("The meter reads the authorized microphone data output and appears only while recording. Decibel readouts are digital dBFS, not SPL or dBA.")
+                Text("The meter reads the authorized microphone data output and appears only while recording. Peak Hold marks the loudest recent level. Decibel readouts are digital dBFS, not SPL or dBA.")
             }
             .disabled(!isHUDEnabled)
 

@@ -303,7 +303,7 @@ final class PreviewView: UIView {
         addSubview(focusIndicator)
 
         lockLabel.isUserInteractionEnabled = false
-        lockLabel.text = "AE/AF LOCK"
+        lockLabel.text = "AE/AF • FOCUS + EXPOSURE"
         lockLabel.textAlignment = .center
         lockLabel.font = .systemFont(ofSize: 13, weight: .bold)
         lockLabel.textColor = tintColor

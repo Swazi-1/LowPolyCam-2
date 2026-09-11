@@ -218,7 +218,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isCapturingPhoto = false
     @Published private(set) var captureMode: CaptureMode = .video
     @Published private(set) var isFocusExposureLocked = false
-    @Published private(set) var focusExposureLockLabel = "AE/AF LOCK"
+    @Published private(set) var focusExposureLockLabel = "AE/AF • FOCUS + EXPOSURE"
     @Published private(set) var exposureBias: Float = 0
     @Published private(set) var whiteBalancePreset: WhiteBalancePreset = .auto
     @Published private(set) var isPreviewTransitioning = false
@@ -237,6 +237,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isSlowMotionAvailabilityKnown = false
     @Published private(set) var isSlowMotionAvailable = true
     @Published private(set) var cameraPosition: CameraPosition = .back
+    @Published private(set) var activeLensLabel = "Lens —"
     @Published private(set) var torchAvailable = false
     @Published private(set) var isTorchOn = false
     @Published private(set) var photoFlashAvailable = false
@@ -255,9 +256,6 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var audioStatusLabel = "Checking microphone"
     @Published private(set) var audioMeterSnapshot = AudioLevelMeterSnapshot.unavailable
     @Published private(set) var audioLevelMeterMode: AudioLevelMeterMode = .bars
-    @Published private(set) var isZebraExposureWarningEnabled = false
-    @Published private(set) var isZebraAvailableForCurrentConfiguration = false
-    @Published private(set) var zebraExposureMask = ZebraMask.empty
     @Published private(set) var captureOrientation: CaptureOrientationPreference = .auto
     @Published private(set) var customWhiteBalanceTemperature = WhiteBalancePreferencePolicy.defaultTemperature
     @Published private(set) var customWhiteBalanceTint = 0.0
@@ -378,10 +376,6 @@ final class CameraManager: NSObject, ObservableObject {
     private let photoOutput = AVCapturePhotoOutput()
     private let liveMetrics = LiveCaptureMetrics()
     let audioMeter = AudioLevelMeter()
-    let zebraExposureState = ZebraExposureState()
-    private var zebraAnalysisActive = false
-    private var zebraAvailabilityKnown = false
-    private var zebraAvailableForCurrentConfiguration = false
     let liveStats = LiveRecordingStatsState()
     let recordingClock = RecordingClockState()
     @Published private(set) var liveMetricsAvailable = false
@@ -481,7 +475,6 @@ final class CameraManager: NSObject, ObservableObject {
     private var codecSupportCacheGeneration: UInt64 = 0
     private var codecSupportSnapshot: CodecSupportSnapshot?
     private var audioMeterCancellable: AnyCancellable?
-    private var zebraMaskCancellable: AnyCancellable?
 
     private var activeVideoCodec: String {
         captureMode == .sloMo ? "HEVC" : selectedVideoCodec
@@ -685,14 +678,10 @@ final class CameraManager: NSObject, ObservableObject {
         audioLevelMeterMode = AudioLevelMeterMode(
             rawValue: defaults.string(forKey: LowPolyCamPreferences.Key.audioLevelMeter) ?? ""
         ) ?? .bars
-        isZebraExposureWarningEnabled = defaults.bool(forKey: LowPolyCamPreferences.Key.zebraExposureWarning)
         zoomShortcutValues = Self.loadZoomShortcutValues(from: defaults)
         audioMeterCancellable = audioMeter.$snapshot
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snapshot in self?.audioMeterSnapshot = snapshot }
-        zebraMaskCancellable = zebraExposureState.$mask
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] mask in self?.zebraExposureMask = mask }
 
         let savedPhotoMegapixels = defaults.integer(forKey: Self.photoMegapixelsKey)
         preferredPhotoMegapixels = Self.normalizedPhotoMegapixels(savedPhotoMegapixels)
@@ -2030,7 +2019,11 @@ final class CameraManager: NSObject, ObservableObject {
                 "lensTransitionActive": String(lensTransitionCoordinator.hasActiveTransition)
             ])
 
-            var requested = min(max(submission.factor, minimumZoomFactor), maximumZoomFactor)
+            // minimumZoomFactor describes the currently attached input. It can be 1× while a
+            // supported physical Ultra Wide lens can provide 0.5×, so using it here would clamp
+            // the shortcut before desiredPhysicalDevice(...) gets a chance to route the handoff.
+            // Keep the app-wide 0.5× floor until the selected lens has had a chance to clamp it.
+            var requested = min(max(submission.factor, 0.5), maximumZoomFactor)
             if !lensTransitionCoordinator.hasActiveTransition,
                abs(requested - requestedZoom) < 0.0005 {
                 AppEventLog.deepEvent("ZOOM APPLY NO-OP", category: .zoom, traceID: requestTraceID,
@@ -2518,8 +2511,12 @@ final class CameraManager: NSObject, ObservableObject {
         // hardware commit only extends the visible transition.
         let torchAvailable = prepared.device.hasTorch && prepared.device.isTorchAvailable
         let torchOn = prepared.device.hasTorch && prepared.device.torchMode == .on
+        let lensLabel = lensDisplayLabel(for: prepared.device)
         publish {
             self.applyPublishedZoomIfNeeded(displayed)
+            if self.activeLensLabel != lensLabel {
+                self.activeLensLabel = lensLabel
+            }
             if self.torchAvailable != torchAvailable {
                 self.torchAvailable = torchAvailable
             }
@@ -2840,7 +2837,6 @@ final class CameraManager: NSObject, ObservableObject {
             // If the actual output state is already correct, synchronize only the published
             // snapshot. Do not open a no-op AVCaptureSession configuration transaction.
             if wanted == attached && !connectionNeedsDisable {
-                self.configureZebraAnalysis()
                 self.publish {
                     if self.liveMetricsAvailable != attached {
                         self.liveMetricsAvailable = attached
@@ -2859,7 +2855,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func configureLiveMetrics() {
         let wanted = liveMetricsAttachmentWanted()
         let attached = liveMetricsOutputIsAttached()
-        let previewFramesWanted = (isZebraExposureWarningEnabled || AppEventLog.extremeDiagnosticsEnabled) &&
+        let previewFramesWanted = AppEventLog.extremeDiagnosticsEnabled &&
             captureMode != .photo
         let connectionNeedsDisable = liveMetrics.output.connection(with: .video)?.isEnabled == true &&
             !recordingState.requestsRecording &&
@@ -2867,7 +2863,6 @@ final class CameraManager: NSObject, ObservableObject {
             !previewFramesWanted
 
         if wanted == attached && !connectionNeedsDisable {
-            configureZebraAnalysis()
             setLiveMetricsConnectionEnabled(previewFramesWanted)
             publish {
                 if self.liveMetricsAvailable != attached {
@@ -2890,7 +2885,6 @@ final class CameraManager: NSObject, ObservableObject {
                 previewFramesWanted
             )
         }
-        configureZebraAnalysis()
         publish {
             if self.liveMetricsAvailable != available {
                 self.liveMetricsAvailable = available
@@ -2908,7 +2902,7 @@ final class CameraManager: NSObject, ObservableObject {
         // without this optional output; only measured FPS/drop counters are omitted in rear 4K60.
         let requestedByUser = UserDefaults.standard.bool(forKey: "liveRecordingStats")
         let requestedByExtremeDiagnostics = AppEventLog.extremeDiagnosticsEnabled
-        return (requestedByUser || requestedByExtremeDiagnostics || isZebraExposureWarningEnabled) &&
+        return (requestedByUser || requestedByExtremeDiagnostics) &&
             captureMode != .photo &&
             !isRear4K60
     }
@@ -2918,56 +2912,6 @@ final class CameraManager: NSObject, ObservableObject {
             cameraPosition == .back &&
             selectedResolution == .p4k &&
             selectedFrameRate == .fps60
-    }
-
-    private func zebraCapabilityForCurrentConfiguration() -> Bool {
-        guard ZebraAvailabilityPolicy.isAvailable(
-            isPhotoMode: captureMode == .photo,
-            isProtectedRear4K60: isProtectedRear4K60Configuration
-        ) else { return false }
-        return liveMetricsOutputIsAttached() || session.canAddOutput(liveMetrics.output)
-    }
-
-    private func updateZebraAvailability(_ available: Bool) {
-        let previous = zebraAvailabilityKnown ? zebraAvailableForCurrentConfiguration : nil
-        zebraAvailableForCurrentConfiguration = available
-        zebraAvailabilityKnown = true
-        publish {
-            if self.isZebraAvailableForCurrentConfiguration != available {
-                self.isZebraAvailableForCurrentConfiguration = available
-            }
-        }
-        guard let previous, previous != available else { return }
-        AppEventLog.event(
-            available ? "ZEBRA RESTORED" : "ZEBRA TEMPORARILY UNAVAILABLE",
-            category: .exposure,
-            fields: [
-                "mode": captureMode.rawValue,
-                "resolution": hudResolutionLabel,
-                "fps": hudFrameRateLabel ?? "none",
-                "protectedRear4K60": String(isProtectedRear4K60Configuration)
-            ]
-        )
-    }
-
-    private func configureZebraAnalysis() {
-        let available = zebraCapabilityForCurrentConfiguration()
-        updateZebraAvailability(available)
-        let enabled = ZebraAvailabilityPolicy.isActive(
-            requested: isZebraExposureWarningEnabled,
-            available: available
-        ) && liveMetricsOutputIsAttached()
-        if enabled != zebraAnalysisActive {
-            zebraAnalysisActive = enabled
-            AppEventLog.event(enabled ? "ZEBRA ANALYSIS START" : "ZEBRA ANALYSIS STOP", category: .exposure)
-        }
-        liveMetrics.setZebraAnalysis(enabled: enabled) { [weak self] mask in
-            self?.sessionQueue.async { [weak self] in
-                guard let self, self.zebraAnalysisActive else { return }
-                self.zebraExposureState.update(mask)
-            }
-        }
-        if !enabled { zebraExposureState.reset() }
     }
 
     private func liveMetricsOutputIsAttached() -> Bool {
@@ -2996,9 +2940,8 @@ final class CameraManager: NSObject, ObservableObject {
         metricsTimer?.cancel()
         metricsTimer = nil
         liveMetrics.setRunning(false)
-        configureZebraAnalysis()
         setLiveMetricsConnectionEnabled(
-            ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+            (AppEventLog.extremeDiagnosticsEnabled &&
                 liveMetricsOutputIsAttached() && captureMode != .photo)
         )
         if wasRunning {
@@ -4193,17 +4136,6 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func setZebraExposureWarningEnabled(_ enabled: Bool) {
-        guard isZebraExposureWarningEnabled != enabled else { return }
-        isZebraExposureWarningEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: LowPolyCamPreferences.Key.zebraExposureWarning)
-        AppEventLog.event(enabled ? "ZEBRA ENABLED" : "ZEBRA DISABLED", category: .exposure)
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            self.refreshLiveMetrics()
-        }
-    }
-
     func setCaptureOrientation(_ preference: CaptureOrientationPreference) {
         guard captureOrientation != preference else { return }
         captureOrientation = preference
@@ -4991,7 +4923,6 @@ final class CameraManager: NSObject, ObservableObject {
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
             publishAudioStatus()
             configureAudioMeterOutput()
-            configureZebraAnalysis()
             return
         }
 
@@ -5193,7 +5124,7 @@ final class CameraManager: NSObject, ObservableObject {
             if zoomMatches, hdrMatches, distortionMatches {
                 setLiveMetricsConnectionEnabled(
                     (recordingState.requestsRecording && movieOutput.isRecording) ||
-                    ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+                    (AppEventLog.extremeDiagnosticsEnabled &&
                         liveMetricsOutputIsAttached() && captureMode != .photo)
                 )
                 rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
@@ -5401,7 +5332,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             setLiveMetricsConnectionEnabled(
                 (recordingState.requestsRecording && movieOutput.isRecording) ||
-                ((AppEventLog.extremeDiagnosticsEnabled || isZebraExposureWarningEnabled) &&
+                (AppEventLog.extremeDiagnosticsEnabled &&
                     liveMetricsOutputIsAttached() && captureMode != .photo)
             )
             rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
@@ -5815,13 +5746,13 @@ final class CameraManager: NSObject, ObservableObject {
 
                     let label: String
                     if focusVerified && exposureVerified {
-                        label = "AE/AF LOCK"
+                        label = "AE/AF • FOCUS + EXPOSURE"
                     } else if focusVerified {
-                        label = "AF LOCK"
+                        label = "AF • FOCUS"
                     } else if exposureVerified {
-                        label = "AE LOCK"
+                        label = "AE • EXPOSURE"
                     } else {
-                        label = "AE/AF LOCK"
+                        label = "AE/AF • FOCUS + EXPOSURE"
                     }
                     self.publish {
                         self.isFocusExposureLocked = focusVerified || exposureVerified
@@ -7337,6 +7268,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func synchronizeTorchState() {
         guard let device = videoInput?.device else {
             publish {
+                if self.activeLensLabel != "Lens —" { self.activeLensLabel = "Lens —" }
                 if self.torchAvailable { self.torchAvailable = false }
                 if self.isTorchOn { self.isTorchOn = false }
                 if self.photoFlashAvailable { self.photoFlashAvailable = false }
@@ -7360,7 +7292,11 @@ final class CameraManager: NSObject, ObservableObject {
         let torchLevelSupported = device.hasTorch && device.isTorchModeSupported(.on)
         configurePhotoSceneMonitoring()
         let flashAvailable = device.hasFlash && !photoOutput.supportedFlashModes.isEmpty
+        let lensLabel = lensDisplayLabel(for: device)
         publish {
+            if self.activeLensLabel != lensLabel {
+                self.activeLensLabel = lensLabel
+            }
             if self.torchAvailable != torchAvailable {
                 self.torchAvailable = torchAvailable
             }
@@ -7373,6 +7309,22 @@ final class CameraManager: NSObject, ObservableObject {
             if self.torchBrightnessSupported != torchLevelSupported {
                 self.torchBrightnessSupported = torchLevelSupported
             }
+        }
+    }
+
+    private func lensDisplayLabel(for device: AVCaptureDevice) -> String {
+        guard cameraPosition == .back else { return "Front" }
+        switch device.deviceType {
+        case .builtInUltraWideCamera:
+            return "Ultra Wide"
+        case .builtInTelephotoCamera:
+            return "Tele"
+        case .builtInWideAngleCamera:
+            return "Wide"
+        case .builtInDualCamera, .builtInDualWideCamera, .builtInTripleCamera:
+            return "Multi-Camera"
+        default:
+            return "Camera"
         }
     }
 

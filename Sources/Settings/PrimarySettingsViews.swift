@@ -430,6 +430,8 @@ struct PhotoCaptureSettingsView: View {
     @ObservedObject var camera: CameraManager
     @AppStorage("photoAspect") private var photoAspect = "4:3"
     @AppStorage("burstCount") private var burstCount = CameraManager.defaultPhotoBurstCount
+    @AppStorage("photoCaptureFlash") private var photoCaptureFlash = true
+    @AppStorage("frontScreenFlash") private var frontScreenFlash = false
 
     var body: some View {
         List {
@@ -489,6 +491,30 @@ struct PhotoCaptureSettingsView: View {
                 Text("FLASH")
             } footer: {
                 Text("Flash is applied when the selected camera supports still-photo flash.")
+            }
+
+            Section {
+                HapticFreeSettingsToggle(isOn: $photoCaptureFlash) {
+                    SettingsToggleLabel(
+                        symbol: "camera.aperture",
+                        color: .blue,
+                        title: "Capture Flash",
+                        subtitle: "Briefly flash the screen when a photo shutter is accepted."
+                    )
+                }
+
+                HapticFreeSettingsToggle(isOn: $frontScreenFlash) {
+                    SettingsToggleLabel(
+                        symbol: "sun.max.fill",
+                        color: .orange,
+                        title: "Front Screen Flash",
+                        subtitle: "Brighten the display for front-camera photos; it does not alter the saved image."
+                    )
+                }
+            } header: {
+                Text("CAPTURE FEEDBACK")
+            } footer: {
+                Text("Capture Flash is a visual shutter cue. Front Screen Flash is an optional selfie light and is used only with the front camera.")
             }
         }
         .listStyle(.insetGrouped)

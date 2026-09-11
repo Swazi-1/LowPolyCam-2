@@ -143,9 +143,9 @@ struct CapturePreferencesView: View {
 
             Section {
                 Picker("Lock Mode", selection: $focusExposureLockMode) {
-                    Text("AE/AF").tag("AE/AF")
-                    Text("AE Only").tag("AE Only")
-                    Text("AF Only").tag("AF Only")
+                    Text("AE/AF · Focus + exposure").tag("AE/AF")
+                    Text("AE only · Exposure").tag("AE Only")
+                    Text("AF only · Focus").tag("AF Only")
                 }
                 .pickerStyle(.menu)
 
@@ -159,7 +159,7 @@ struct CapturePreferencesView: View {
             } header: {
                 Text("FOCUS & EXPOSURE")
             } footer: {
-                Text("Long-press the preview to lock the selected controls. Lenses without adjustable focus automatically fall back to AE lock when AE/AF is selected.")
+                Text("Long-press the preview: AE locks exposure, AF locks focus, and AE/AF locks both.")
             }
 
             Section {
@@ -252,6 +252,7 @@ struct CapturePreferencesView: View {
                         } label: {
                             Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
                         }
+                        .padding(.top, 10)
                     }
                 }
             } header: {

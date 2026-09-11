@@ -6,7 +6,7 @@ import Foundation
 /// settings. This layer makes the schema explicit and repairs values written by older betas before
 /// the first CameraManager is created.
 enum LowPolyCamPreferences {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     enum Key {
         static let schemaVersion = "lowPolyCamSettingsSchemaVersion"
@@ -31,6 +31,8 @@ enum LowPolyCamPreferences {
         static let photoFileFormat = "photoFileFormat"
         static let photoFlashMode = "photoFlashMode"
         static let photoAspect = "photoAspect"
+        static let photoCaptureFlash = "photoCaptureFlash"
+        static let frontScreenFlash = "frontScreenFlash"
         static let burstCount = "burstCount"
         static let shutterDelay = "shutterDelay"
         static let hapticCaptureEnabled = "hapticCaptureEnabled"
@@ -49,9 +51,10 @@ enum LowPolyCamPreferences {
         static let cameraGridEnabled = "cameraGridEnabled"
         static let gridOpacity = "gridOpacity"
         static let gridStyle = "gridStyle"
+        static let frameGuidesEnabled = "frameGuidesEnabled"
         static let levelMeterEnabled = "levelMeterEnabled"
         static let audioLevelMeter = "audioLevelMeter"
-        static let zebraExposureWarning = "zebraExposureWarning"
+        static let audioPeakHold = "audioPeakHold"
         static let cleanPreviewGesture = "cleanPreviewGesture"
         static let captureOrientation = "captureOrientation"
         static let recordingStartCountdown = "recordingStartCountdown"
@@ -73,6 +76,7 @@ enum LowPolyCamPreferences {
         static let cameraHUDFPS = "cameraHUDFPS"
         static let cameraHUDRemaining = "cameraHUDRemaining"
         static let cameraHUDWhiteBalance = "cameraHUDWhiteBalance"
+        static let cameraHUDLens = "cameraHUDLens"
         static let cameraHUDBattery = "cameraHUDBattery"
         static let cameraHUDStorage = "cameraHUDStorage"
         static let cameraHUDDroppedFrames = "cameraHUDDroppedFrames"
@@ -115,6 +119,8 @@ enum LowPolyCamPreferences {
             Key.photoFileFormat: "HEIC",
             Key.photoFlashMode: "Auto",
             Key.photoAspect: "4:3",
+            Key.photoCaptureFlash: true,
+            Key.frontScreenFlash: false,
             Key.burstCount: 10,
             Key.shutterDelay: 0,
             Key.hapticCaptureEnabled: true,
@@ -133,9 +139,10 @@ enum LowPolyCamPreferences {
             Key.cameraGridEnabled: false,
             Key.gridOpacity: 1.0,
             Key.gridStyle: GridStyle.ruleOfThirds.rawValue,
+            Key.frameGuidesEnabled: false,
             Key.levelMeterEnabled: false,
             Key.audioLevelMeter: AudioLevelMeterMode.bars.rawValue,
-            Key.zebraExposureWarning: false,
+            Key.audioPeakHold: true,
             Key.cleanPreviewGesture: CleanPreviewGesture.twoFingerTap.rawValue,
             Key.captureOrientation: CaptureOrientationPreference.auto.rawValue,
             Key.recordingStartCountdown: RecordingStartCountdown.off.rawValue,
@@ -159,6 +166,7 @@ enum LowPolyCamPreferences {
             Key.cameraHUDFPS: true,
             Key.cameraHUDRemaining: true,
             Key.cameraHUDWhiteBalance: false,
+            Key.cameraHUDLens: false,
             Key.cameraHUDBattery: true,
             Key.cameraHUDStorage: false,
             Key.cameraHUDDroppedFrames: false,

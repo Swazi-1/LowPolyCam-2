@@ -10,7 +10,6 @@ struct AdvancedRecordingSettingsView: View {
     @AppStorage("longevityMode") private var longevity = false
     @AppStorage("liveRecordingStats") private var liveStats = false
     @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
-    @AppStorage("zebraExposureWarning") private var zebraExposureWarning = false
     @State private var showingRecoveryDeleteConfirmation = false
     @State private var recoveryFileToDelete: URL?
 
@@ -52,21 +51,6 @@ struct AdvancedRecordingSettingsView: View {
                         }
                     }
                     .pickerStyle(.menu)
-
-                    HapticFreeSettingsToggle(isOn: $zebraExposureWarning) {
-                        SettingsToggleLabel(
-                            symbol: "stripe.3.horizontal",
-                            color: .yellow,
-                            title: "Zebra Exposure Warning",
-                            subtitle: camera.isZebraAvailableForCurrentConfiguration
-                                ? "Show diagonal stripes over clipped highlights in the live preview only."
-                                : "Unavailable at \(camera.hudResolutionLabel) \(camera.hudFrameRateLabel ?? "current") fps."
-                        )
-                    }
-                    .disabled(!camera.isZebraAvailableForCurrentConfiguration)
-                    .onChange(of: zebraExposureWarning) { _, enabled in
-                        camera.setZebraExposureWarningEnabled(enabled)
-                    }
                 } header: {
                     Text("RECORDING CONTROLS")
                 } footer: {

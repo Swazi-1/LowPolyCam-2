@@ -371,11 +371,14 @@ struct VideoSettingsView: View {
             .init("Aspect Ratio", "Settings › Photo Capture", "4 3 1 1 square aspect ratio", "camera.fill", .green, .photoCapture),
             .init("Photos per Burst", "Settings › Photo Capture", "burst photos count 15 10 5", "camera.fill", .green, .photoCapture),
             .init("Photo Flash", "Settings › Photo Capture", "flash auto on off still photo", "camera.fill", .green, .photoCapture),
+            .init("Capture Flash", "Settings › Photo Capture", "shutter feedback screen flash photo confirmation", "camera.aperture", .blue, .photoCapture),
+            .init("Front Screen Flash", "Settings › Photo Capture", "selfie front camera screen light display", "sun.max.fill", .orange, .photoCapture),
 
             .init("Quick Controls", "Settings › Quick Controls", "camera composition controls", "slider.horizontal.3", .gray, .quickControls),
             .init("Grid", "Settings › Quick Controls", "composition grid guides", "grid", .blue, .quickControls),
             .init("Grid Opacity", "Settings › Quick Controls", "grid opacity transparency percent", "grid", .blue, .quickControls),
             .init("Grid Style", "Settings › Quick Controls", "rule of thirds square diagonal golden ratio composition", "grid", .blue, .quickControls),
+            .init("Safe Frame Guides", "Settings › Quick Controls", "safe frame inner frame composition margins guide", "rectangle.inset.inset", .purple, .quickControls),
             .init("Level", "Settings › Quick Controls", "horizon level meter gyroscope", "gyroscope", .orange, .quickControls),
             .init("Center Crosshair", "Settings › Quick Controls", "center marker crosshair", "plus", .gray, .quickControls),
 
@@ -403,12 +406,14 @@ struct VideoSettingsView: View {
             .init("HUD FPS", "Settings › Camera HUD › Main Info", "fps frame rate hud", "rectangle.inset.filled", .blue, .cameraHUD),
             .init("Photos / Time Remaining", "Settings › Camera HUD › Main Info", "photos remaining time remaining hud", "rectangle.inset.filled", .blue, .cameraHUD),
             .init("HUD White Balance", "Settings › Camera HUD › Main Info", "white balance wb hud", "rectangle.inset.filled", .blue, .cameraHUD),
+            .init("Active Lens", "Settings › Camera HUD › Main Info", "lens ultra wide wide tele front camera indicator", "camera.aperture", .blue, .cameraHUD),
             .init("Battery HUD", "Settings › Camera HUD › Device Info", "battery device info hud", "battery.100percent", .green, .cameraHUD),
             .init("Free Storage HUD", "Settings › Camera HUD › Device Info", "free storage device info hud", "externaldrive.fill.badge.checkmark", .blue, .cameraHUD),
             .init("Thermal Status HUD", "Settings › Camera HUD › Device Info", "thermal temperature status hud", "waveform.path.ecg", .orange, .cameraHUD),
             .init("Frame Gaps HUD", "Settings › Camera HUD › Device Info", "frame gaps dropped frames hud", "waveform.path.ecg", .purple, .cameraHUD),
             .init("HUD Text Size", "Settings › Camera HUD › Appearance", "text size compact large hud", "text.line.first.and.arrowtriangle.forward", .purple, .cameraHUD),
             .init("Audio Level Meter", "Settings › Camera HUD › Recording HUD", "audio recording microphone level meter bars db dbfs decibels clipping recording only", "mic.fill", .green, .cameraHUD),
+            .init("Audio Peak Hold", "Settings › Camera HUD › Recording HUD", "audio meter peak hold loudest dBFS bars", "arrow.up.forward", .orange, .cameraHUD),
             .init("Clean Preview Gesture", "Settings › Quick Controls", "clean preview hide ui two finger tap double tap temporary", "rectangle.inset.filled", .blue, .quickControls),
 
             .init("Advanced Recording", "Settings › Advanced Recording", "recording advanced live stats split longevity safety", "waveform.path.ecg", .purple, .advancedRecording),
@@ -425,7 +430,6 @@ struct VideoSettingsView: View {
             .init("Low-Storage Protection", "Settings › Advanced Recording", "critical low storage protection safely finalize clip", "externaldrive.fill.badge.checkmark", .blue, .advancedRecording),
             .init("Background Save Protection", "Settings › Advanced Recording", "background save protection pending photo video saves", "square.and.arrow.down.fill", .green, .advancedRecording),
             .init("Recording Start Countdown", "Settings › Advanced Recording", "recording countdown off 1 3 5 seconds video slo mo start cancel", "timer", .orange, .advancedRecording),
-            .init("Zebra Exposure Warning", "Settings › Advanced Recording", "zebra exposure highlights clipping diagonal stripes preview only", "stripe.3.horizontal", .yellow, .advancedRecording),
             .init("Audio Recording", "Settings › Advanced Recording", "microphone audio recording mic permission status", "mic.fill", .green, .advancedRecording),
 
             .init("Video Presets", "Settings › Video Presets", "video presets balanced high quality all rounder all day social", "star.fill", .yellow, .videoPresets),

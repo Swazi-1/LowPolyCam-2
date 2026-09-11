@@ -16,13 +16,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private var dropped = 0
     private var previousFrameTimestamp: Double?
 
-    private var zebraEnabled = false
-    private var zebraGeneration = 0
-    private var zebraPixelFormatLoggedGeneration = -1
-    private var zebraLastAnalysisUptime: TimeInterval = 0
-    private var zebraHandler: ((ZebraMask) -> Void)?
-    private var configuredZebraPixelFormat: OSType?
-
     private weak var probeDevice: AVCaptureDevice?
     private var probeTraceID: String?
     private var probeExpectedDeviceZoom: CGFloat = 1
@@ -46,7 +39,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         ]
         if let pixelFormat = preferredPixelFormats.first(where: { output.availableVideoPixelFormatTypes.contains($0) }) {
             output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
-            configuredZebraPixelFormat = pixelFormat
         }
         output.setSampleBufferDelegate(self, queue: queue)
     }
@@ -61,24 +53,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         previousFrameTimestamp = nil
         lock.unlock()
         AppEventLog.deepEvent("LIVE CAPTURE METRICS STATE", category: .performance, fields: ["running": String(value)])
-    }
-
-    func setZebraAnalysis(enabled: Bool, handler: ((ZebraMask) -> Void)? = nil) {
-        lock.lock()
-        zebraEnabled = enabled
-        zebraGeneration += 1
-        zebraPixelFormatLoggedGeneration = -1
-        zebraLastAnalysisUptime = 0
-        zebraHandler = enabled ? handler : nil
-        lock.unlock()
-        if !enabled { handler?(.empty) }
-        AppEventLog.deepEvent("ZEBRA ANALYSIS CONFIG", category: .exposure, fields: [
-            "enabled": String(enabled),
-            "configuredPixelFormat": configuredZebraPixelFormat.map { ZebraExposureAnalyzer.pixelFormatName($0) } ?? "automatic",
-            "thresholdNormalized": "0.98",
-            "grid": "24x16",
-            "analysisIntervalMs": "75"
-        ])
     }
 
     func beginZoomTransitionProbe(
@@ -197,8 +171,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         guard timestamp.isFinite else { return }
 
-        var zebraConfiguration: (generation: Int, handler: (ZebraMask) -> Void)?
-        var zebraPixelFormatToLog: (generation: Int, pixelFormat: OSType, width: Int, height: Int, mirrored: Bool, rotation: CGFloat)?
         var probeRecord: (trace: String, frame: Int, device: String, actual: CGFloat, expected: CGFloat, expectedDisplayed: CGFloat, hud: String, delta: CGFloat, frameGapMs: Double?, luma: Double?, lumaDelta: Double?, zoomAnomaly: Bool, brightnessFlicker: Bool, anomaly: Bool)?
         var expiredProbe: (trace: String, frames: Int, anomalies: Int)?
 
@@ -208,23 +180,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         if running {
             if first == nil { first = timestamp } else { intervals += 1 }
             latest = timestamp
-        }
-
-        if zebraEnabled, now - zebraLastAnalysisUptime >= 0.075, let handler = zebraHandler {
-            zebraLastAnalysisUptime = now
-            zebraConfiguration = (zebraGeneration, handler)
-            if zebraPixelFormatLoggedGeneration != zebraGeneration,
-               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                zebraPixelFormatLoggedGeneration = zebraGeneration
-                zebraPixelFormatToLog = (
-                    zebraGeneration,
-                    CVPixelBufferGetPixelFormatType(imageBuffer),
-                    CVPixelBufferGetWidth(imageBuffer),
-                    CVPixelBufferGetHeight(imageBuffer),
-                    connection.isVideoMirrored,
-                    connection.videoRotationAngle
-                )
-            }
         }
 
         if probeActive, let trace = probeTraceID, let device = probeDevice {
@@ -260,26 +215,6 @@ final class LiveCaptureMetrics: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         }
         previousFrameTimestamp = timestamp
         lock.unlock()
-
-        if let zebraPixelFormatToLog {
-            AppEventLog.event("ZEBRA PIXEL FORMAT", category: .exposure, fields: [
-                "generation": String(zebraPixelFormatToLog.generation),
-                "pixelFormat": ZebraExposureAnalyzer.pixelFormatName(zebraPixelFormatToLog.pixelFormat),
-                "width": String(zebraPixelFormatToLog.width),
-                "height": String(zebraPixelFormatToLog.height),
-                "mirrored": String(zebraPixelFormatToLog.mirrored),
-                "rotationAngle": String(format: "%.1f", Double(zebraPixelFormatToLog.rotation)),
-                "configuredPixelFormat": configuredZebraPixelFormat.map(ZebraExposureAnalyzer.pixelFormatName) ?? "automatic"
-            ])
-        }
-
-        if let zebraConfiguration {
-            let mask = ZebraExposureAnalyzer.analyze(sampleBuffer: sampleBuffer, connection: connection)
-            lock.lock()
-            let stillCurrent = zebraEnabled && zebraGeneration == zebraConfiguration.generation
-            lock.unlock()
-            if stillCurrent { zebraConfiguration.handler(mask) }
-        }
 
         if let record = probeRecord {
             let fields: [String: String] = [
