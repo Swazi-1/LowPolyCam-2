@@ -26,7 +26,7 @@ struct CameraView: View {
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
-    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = false
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
     @AppStorage("frameGuidesEnabled") private var frameGuidesEnabled = false
     @AppStorage("photoCaptureFlash") private var photoCaptureFlash = true
@@ -52,7 +52,7 @@ struct CameraView: View {
     @AppStorage("countdownHaptics") private var countdownHaptics = false
     @AppStorage("recordingStartCountdown") private var recordingStartCountdown = RecordingStartCountdown.off.rawValue
     @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
-    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.doubleTap.rawValue
     @AppStorage("mirrorSelfies") private var mirrorSelfies = false
     @AppStorage("zoomButtonsEnabled") private var zoomButtonsEnabled = false
     @AppStorage("liveRecordingStats") private var liveStats = false
@@ -179,7 +179,7 @@ struct CameraView: View {
                 ? 54
                 : max(54, 14 + topControlsHeight + 8),
             fitsPhoto: camera.captureMode == .photo,
-            cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .twoFingerTap,
+            cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .doubleTap,
             captureOrientation: camera.captureOrientation,
             onTapToFocus: { if !editingStats { camera.focusAndExpose(at: $0) } },
             onLongPressToLock: { if !editingStats { camera.lockFocusAndExposure(at: $0) } },

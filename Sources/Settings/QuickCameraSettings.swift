@@ -8,14 +8,14 @@ struct QuickControlsSettingsView: View {
     @AppStorage("frameGuidesEnabled") private var frameGuidesEnabled = false
     @AppStorage("levelMeterEnabled") private var level = false
     @AppStorage("centerCrosshair") private var crosshair = false
-    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.twoFingerTap.rawValue
+    @AppStorage("cleanPreviewGesture") private var cleanPreviewGesture = CleanPreviewGesture.doubleTap.rawValue
 
     var body: some View {
         List {
             Section("COMPOSITION") {
                 HapticFreeSettingsToggle(isOn: $grid) {
                     SettingsToggleLabel(
-                        symbol: "grid",
+                        symbol: "square.grid.3x3",
                         color: .blue,
                         title: "Grid",
                         subtitle: "Show composition guides over the camera preview."
@@ -45,7 +45,7 @@ struct QuickControlsSettingsView: View {
 
                 HapticFreeSettingsToggle(isOn: $frameGuidesEnabled) {
                     SettingsToggleLabel(
-                        symbol: "rectangle.inset.inset",
+                        symbol: "viewfinder",
                         color: .purple,
                         title: "Safe Frame Guides",
                         subtitle: "Show a dashed inner frame for cleaner composition."

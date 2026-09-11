@@ -143,7 +143,7 @@ enum LowPolyCamPreferences {
             Key.levelMeterEnabled: false,
             Key.audioLevelMeter: AudioLevelMeterMode.bars.rawValue,
             Key.audioPeakHold: true,
-            Key.cleanPreviewGesture: CleanPreviewGesture.twoFingerTap.rawValue,
+            Key.cleanPreviewGesture: CleanPreviewGesture.doubleTap.rawValue,
             Key.captureOrientation: CaptureOrientationPreference.auto.rawValue,
             Key.recordingStartCountdown: RecordingStartCountdown.off.rawValue,
             Key.whiteBalancePreset: "Auto",
@@ -164,7 +164,7 @@ enum LowPolyCamPreferences {
             Key.cameraHUDEnabled: true,
             Key.cameraHUDResolution: true,
             Key.cameraHUDFPS: true,
-            Key.cameraHUDRemaining: true,
+            Key.cameraHUDRemaining: false,
             Key.cameraHUDWhiteBalance: false,
             Key.cameraHUDLens: false,
             Key.cameraHUDBattery: true,
@@ -212,7 +212,7 @@ enum LowPolyCamPreferences {
         normalizeInt(Key.zoomButtonCount, allowed: [3, 4, 5], fallback: 4, in: defaults)
         normalizeString(Key.gridStyle, allowed: GridStyle.allCases.map(\.rawValue), fallback: GridStyle.ruleOfThirds.rawValue, in: defaults)
         normalizeString(Key.audioLevelMeter, allowed: AudioLevelMeterMode.allCases.map(\.rawValue), fallback: AudioLevelMeterMode.bars.rawValue, in: defaults)
-        normalizeString(Key.cleanPreviewGesture, allowed: CleanPreviewGesture.allCases.map(\.rawValue), fallback: CleanPreviewGesture.twoFingerTap.rawValue, in: defaults)
+        normalizeString(Key.cleanPreviewGesture, allowed: CleanPreviewGesture.allCases.map(\.rawValue), fallback: CleanPreviewGesture.doubleTap.rawValue, in: defaults)
         normalizeString(Key.captureOrientation, allowed: CaptureOrientationPreference.allCases.map(\.rawValue), fallback: CaptureOrientationPreference.auto.rawValue, in: defaults)
         normalizeInt(Key.recordingStartCountdown, allowed: RecordingStartCountdown.allCases.map(\.rawValue), fallback: RecordingStartCountdown.off.rawValue, in: defaults)
         normalizeString(Key.whiteBalancePreset, allowed: ["Auto", "Daylight", "Cloudy", "Tungsten", "Fluorescent", "Custom"], fallback: "Auto", in: defaults)

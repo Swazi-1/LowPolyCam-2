@@ -5,7 +5,7 @@ struct CameraHUDSettingsView: View {
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
-    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = false
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
     @AppStorage("cameraHUDBattery") private var hudBattery = true
     @AppStorage("cameraHUDStorage") private var hudStorage = false

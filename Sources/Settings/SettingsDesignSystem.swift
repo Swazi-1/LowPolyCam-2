@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - App appearance
 
@@ -19,12 +20,23 @@ struct SettingsListIcon: View {
     let color: Color
 
     var body: some View {
-        Image(systemName: symbol)
+        Image(systemName: resolvedSymbol)
             .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(.white)
             .frame(width: 30, height: 30)
             .background(color, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .accessibilityHidden(true)
+    }
+
+    /// Never leave a Settings icon as a blank colored tile if an SF Symbol name changes or is
+    /// unavailable on the running iOS version.
+    private var resolvedSymbol: String {
+        if UIImage(systemName: symbol) != nil { return symbol }
+        switch symbol {
+        case "grid": return "square.grid.3x3"
+        case "rectangle.inset.inset": return "viewfinder"
+        default: return "questionmark"
+        }
     }
 }
 
@@ -85,12 +97,9 @@ struct SettingsToggleLabel: View {
     }
 }
 
-/// Settings-only switch that does not use the native UIKit Toggle control. UIKit can emit a
-/// system selection tick even when the app's haptic preference is disabled; this reusable control
-/// keeps the setting accessible while leaving all feedback under LowPolyCam's explicit haptic
-/// helper.
+/// Native iOS Settings switch. Keeping this wrapper centralizes logging while allowing iOS 26/27
+/// to provide the system switch appearance, animation, accessibility and interaction behavior.
 struct HapticFreeSettingsToggle<Label: View>: View {
-    @Environment(\.isEnabled) private var isEnabled
     @Binding var isOn: Bool
     private let label: Label
 
@@ -100,43 +109,15 @@ struct HapticFreeSettingsToggle<Label: View>: View {
     }
 
     var body: some View {
-        Button {
-            guard isEnabled else { return }
-            isOn.toggle()
+        Toggle(isOn: $isOn) {
+            label
+        }
+        .toggleStyle(.switch)
+        .onChange(of: isOn) { _, newValue in
             AppEventLog.event("SETTINGS TOGGLE CHANGED", category: .ui, fields: [
-                "value": isOn ? "on" : "off"
+                "value": newValue ? "on" : "off"
             ])
-        } label: {
-            HStack(spacing: 12) {
-                label
-                Spacer(minLength: 8)
-                switchView
-            }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(isOn ? "On" : "Off")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction {
-            guard isEnabled else { return }
-            isOn.toggle()
-        }
-        .opacity(isEnabled ? 1 : 0.55)
-    }
-
-    private var switchView: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(isOn ? Color.accentColor : Color.secondary.opacity(0.28))
-            .frame(width: 52, height: 32)
-            .overlay(alignment: isOn ? .trailing : .leading) {
-                Circle()
-                    .fill(.white)
-                    .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
-                    .frame(width: 28, height: 28)
-                    .padding(2)
-            }
-            .accessibilityHidden(true)
     }
 }
 

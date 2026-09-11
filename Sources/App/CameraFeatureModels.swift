@@ -172,7 +172,7 @@ enum WhiteBalancePreferencePolicy {
 enum TorchLevelPolicy {
     static let minimumNormalizedLevel = 0.05
     static let maximumNormalizedLevel = 1.0
-    static let defaultNormalizedLevel = 0.35
+    static let defaultNormalizedLevel = 0.40
 
     static func validatedNormalized(_ value: Double, fallback: Double = defaultNormalizedLevel) -> Double {
         let safeFallback = fallback.isFinite ? fallback : defaultNormalizedLevel

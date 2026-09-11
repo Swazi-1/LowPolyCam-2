@@ -235,7 +235,7 @@ struct AudioLevelMeterView: View {
                                     Capsule()
                                         .fill(levelColor)
                                         .frame(width: 5, height: 2)
-                                        .offset(y: -3)
+                                        .offset(y: -4)
                                 }
                             }
                             .frame(width: 3, height: height, alignment: .bottom)
@@ -244,6 +244,7 @@ struct AudioLevelMeterView: View {
                     .padding(.horizontal, usesBlackMeterColor ? 3 : 0)
                     .background(meterBackground, in: Capsule())
                     .frame(height: 20, alignment: .bottom)
+                    .offset(y: -2)
                     .accessibilityLabel("Audio level")
                     .accessibilityValue(accessibilityBarsValue)
                 case .decibels:

@@ -99,7 +99,7 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.gridOpacity), 1.0, accuracy: 0.0001)
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.gridStyle), GridStyle.ruleOfThirds.rawValue)
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.audioLevelMeter), AudioLevelMeterMode.bars.rawValue)
-        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.cleanPreviewGesture), CleanPreviewGesture.twoFingerTap.rawValue)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.cleanPreviewGesture), CleanPreviewGesture.doubleTap.rawValue)
         XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.captureOrientation), CaptureOrientationPreference.auto.rawValue)
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.recordingStartCountdown), 0)
         XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.videoManualBitrateMbps), ManualBitratePolicy.maximumMbps, accuracy: 0.0001)
@@ -113,6 +113,44 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.audioPeakHold))
         XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDLens))
         XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.schemaVersion), LowPolyCamPreferences.currentSchemaVersion)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testFreshInstallDefaultsMatchShippingCameraSetup() {
+        let suiteName = "LowPolyCamFreshDefaults-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        LowPolyCamPreferences.registerAndMigrate(defaults)
+
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.appColorScheme), "dark")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.iconAppearance), "Ice")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.selectedVideoResolution), "1080p")
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.selectedVideoFrameRate), 60)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.selectedVideoCodec), "HEVC")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.videoCompressionMode), "Auto")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.videoCompression), "High")
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.videoStabilizationEnabled))
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.selectedSlowMotionResolution), "1080p")
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.selectedSlowMotionFrameRate), 240)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.slowMotionCompressionMode), "Auto")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.slowMotionCompressionLevel), "High")
+        XCTAssertEqual(defaults.integer(forKey: LowPolyCamPreferences.Key.selectedPhotoMegapixels), 12)
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.photoFileFormat), "HEIC")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.photoAspect), "4:3")
+        XCTAssertEqual(defaults.string(forKey: LowPolyCamPreferences.Key.cleanPreviewGesture), CleanPreviewGesture.doubleTap.rawValue)
+        XCTAssertEqual(defaults.double(forKey: LowPolyCamPreferences.Key.torchBrightness), 0.40, accuracy: 0.0001)
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDEnabled))
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDResolution))
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDFPS))
+        XCTAssertTrue(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDBattery))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDRemaining))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDWhiteBalance))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDLens))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDStorage))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.cameraHUDDroppedFrames))
+        XCTAssertFalse(defaults.bool(forKey: LowPolyCamPreferences.Key.thermalHUD))
+
         defaults.removePersistentDomain(forName: suiteName)
     }
 
@@ -256,7 +294,7 @@ final class LowPolyCamTests: XCTestCase {
     func testTorchLevelPolicyStaysInNormalizedDomain() {
         XCTAssertEqual(TorchLevelPolicy.validatedNormalized(0.35), 0.35, accuracy: 0.0001)
         XCTAssertEqual(TorchLevelPolicy.validatedNormalized(-1), 0.05, accuracy: 0.0001)
-        XCTAssertEqual(TorchLevelPolicy.validatedNormalized(.infinity), 0.35, accuracy: 0.0001)
+        XCTAssertEqual(TorchLevelPolicy.validatedNormalized(.infinity), 0.40, accuracy: 0.0001)
         XCTAssertEqual(
             TorchLevelPolicy.validatedNormalized(3.402823466e38),
             1.0,

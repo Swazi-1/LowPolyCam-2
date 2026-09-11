@@ -375,10 +375,10 @@ struct VideoSettingsView: View {
             .init("Front Screen Flash", "Settings › Photo Capture", "selfie front camera screen light display", "sun.max.fill", .orange, .photoCapture),
 
             .init("Quick Controls", "Settings › Quick Controls", "camera composition controls", "slider.horizontal.3", .gray, .quickControls),
-            .init("Grid", "Settings › Quick Controls", "composition grid guides", "grid", .blue, .quickControls),
-            .init("Grid Opacity", "Settings › Quick Controls", "grid opacity transparency percent", "grid", .blue, .quickControls),
-            .init("Grid Style", "Settings › Quick Controls", "rule of thirds square diagonal golden ratio composition", "grid", .blue, .quickControls),
-            .init("Safe Frame Guides", "Settings › Quick Controls", "safe frame inner frame composition margins guide", "rectangle.inset.inset", .purple, .quickControls),
+            .init("Grid", "Settings › Quick Controls", "composition grid guides", "square.grid.3x3", .blue, .quickControls),
+            .init("Grid Opacity", "Settings › Quick Controls", "grid opacity transparency percent", "square.grid.3x3", .blue, .quickControls),
+            .init("Grid Style", "Settings › Quick Controls", "rule of thirds square diagonal golden ratio composition", "square.grid.3x3", .blue, .quickControls),
+            .init("Safe Frame Guides", "Settings › Quick Controls", "safe frame inner frame composition margins guide", "viewfinder", .purple, .quickControls),
             .init("Level", "Settings › Quick Controls", "horizon level meter gyroscope", "gyroscope", .orange, .quickControls),
             .init("Center Crosshair", "Settings › Quick Controls", "center marker crosshair", "plus", .gray, .quickControls),
 
