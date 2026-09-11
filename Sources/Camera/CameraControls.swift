@@ -366,8 +366,26 @@ struct CameraHUDSnapshot: Equatable {
     let audioStatusLabel: String
     let availableStorageBytes: Int64
     let lastFrameGaps: Int?
-    let audioMeterMode: AudioLevelMeterMode
-    let audioMeterSnapshot: AudioLevelMeterSnapshot
+}
+
+private enum CameraHUDItemKind: Hashable {
+    case resolution
+    case frameRate
+    case lens
+    case remaining
+    case whiteBalance
+    case microphone
+    case battery
+    case thermal
+    case storage
+    case frameGaps
+}
+
+private struct CameraHUDItem: Identifiable, Equatable {
+    let kind: CameraHUDItemKind
+    let text: String
+
+    var id: CameraHUDItemKind { kind }
 }
 
 struct CameraHUD: View {
@@ -489,91 +507,239 @@ private struct CameraHUDContent: View, Equatable {
 
     var body: some View {
         let hudItems = items
-        VStack(spacing: 6) {
-            HStack(spacing: 5) {
-                Circle().fill(snapshot.isRecording ? Color.red : theme).frame(width: 5, height: 5)
-                Text(snapshot.isRecording ? "REC" : snapshot.captureModeLabel)
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme)
-                if snapshot.isRecording {
-                    RecordingClockText(clock: recordingClock)
-                    if audioMeterMode != .off {
-                        AudioLevelMeterView(snapshot: audioMeterSnapshot, mode: audioMeterMode)
-                    }
-                }
-            }
-            if !hudItems.isEmpty {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(hudItems.enumerated()), id: \.offset) { _, item in
-                            Label(item, systemImage: symbol(for: item))
-                        }
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
+        let idealCellWidth: CGFloat = textSize >= 12 ? 62 : 54
+        let minimumCellWidth: CGFloat = textSize >= 12 ? 52 : 44
+        let usableGridWidth = max(0, maxWidth - 16)
+        let widthBasedColumnLimit = max(
+            1,
+            Int((usableGridWidth + 4) / (minimumCellWidth + 4))
+        )
+        // Portrait stays at the requested four-column card. Only genuinely wide layouts can use
+        // up to six columns so nine/ten enabled items do not become a tall three-row block in
+        // landscape, where that extra height could crowd the zoom and capture controls.
+        let designColumnLimit = maxWidth >= 360 ? 6 : 4
+        let columnLimit = min(designColumnLimit, widthBasedColumnLimit)
+        let rows = itemRows(for: hudItems, maximumColumns: columnLimit)
+        let maximumColumns = rows.map(\.count).max() ?? 0
+        let cardWidth = preferredCardWidth(maximumColumns: maximumColumns)
+        let contentWidth = max(0, cardWidth - 16)
+        let availableCellWidth: CGFloat = maximumColumns > 0
+            ? max(0, (contentWidth - CGFloat(maximumColumns - 1) * 4) / CGFloat(maximumColumns))
+            : 0
+        // Do not stretch one or two enabled HUD items across a recording-width header. Cells
+        // stay compact and centered, while four-column rows can still shrink slightly when the
+        // safe gap between Flash and Settings is narrower than their ideal width.
+        let cellWidth = min(idealCellWidth, availableCellWidth)
 
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
-                        ForEach(Array(hudItems.enumerated()), id: \.offset) { _, item in
-                            Label(item, systemImage: symbol(for: item))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                        }
+        VStack(spacing: hudItems.isEmpty ? 0 : 5) {
+            header
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 4) {
+                    ForEach(row) { item in
+                        hudCell(item, width: cellWidth)
                     }
-                    .frame(maxWidth: maxWidth - 20)
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
-        .font(.system(size: textSize, weight: .semibold, design: .rounded))
-        .monospacedDigit()
-        .foregroundStyle(theme)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
-        .background(theme.opacity(0.22), in: RoundedRectangle(cornerRadius: 20))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(width: cardWidth)
+        .foregroundStyle(.white)
+        .background(.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(theme.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20).stroke(theme.opacity(0.35), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 0.75)
         }
-        // Keep the black pill only as wide as its content. The outer frame centers it in the
-        // safe gap between Flash and Settings without creating empty "Dynamic Island" space.
-        .frame(maxWidth: maxWidth)
-        .accessibilityLabel(([snapshot.captureModeLabel] + hudItems).joined(separator: ", "))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(([snapshot.captureModeLabel] + hudItems.map(\.text)).joined(separator: ", "))
     }
 
-    private var items: [String] {
-        var result: [String] = []
-        if showResolution { result.append(snapshot.resolutionLabel) }
-        if showLens { result.append(snapshot.lensLabel) }
-        if showFPS, let fps = snapshot.frameRateLabel { result.append("\(fps)fps") }
-        if showRemaining { result.append(snapshot.remainingLabel) }
-        if showWhiteBalance { result.append(snapshot.whiteBalanceLabel) }
-        if !snapshot.isPhotoMode { result.append(snapshot.audioStatusLabel) }
-        if showBattery { result.append(batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%") }
-        if showStorage { result.append(String(format: "%.1f GB", Double(snapshot.availableStorageBytes) / 1_000_000_000)) }
-        if showThermal {
-            switch thermalState {
-            case .nominal: result.append("Cool")
-            case .fair: result.append("Warm")
-            case .serious: result.append("Hot")
-            case .critical: result.append("Critical")
-            @unknown default: result.append("Temp —")
+    private var header: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(snapshot.isRecording ? Color.red : theme)
+                .frame(width: 7, height: 7)
+
+            Text(compactHeaderModeLabel)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .lineLimit(1)
+
+            if snapshot.isRecording {
+                divider
+                RecordingClockText(clock: recordingClock)
+
+                if showsAudioMeterInHeader {
+                    divider
+                    AudioLevelMeterView(snapshot: audioMeterSnapshot, mode: audioMeterMode)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
             }
         }
+        .frame(maxWidth: .infinity, minHeight: 18, alignment: .center)
+        .monospacedDigit()
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(.white.opacity(0.22))
+            .frame(width: 1, height: 16)
+    }
+
+    private func hudCell(_ item: CameraHUDItem, width: CGFloat) -> some View {
+        Text(item.text)
+            .font(.system(size: max(8, textSize - 1), weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.68)
+            .allowsTightening(true)
+            .frame(width: width, height: 22)
+            .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(.white.opacity(0.075), lineWidth: 0.6)
+            }
+    }
+
+    private var items: [CameraHUDItem] {
+        var result: [CameraHUDItem] = []
+
+        // Capture information always comes first so the most useful row stays stable as optional
+        // device/diagnostic items are enabled and disabled.
+        if showResolution {
+            result.append(.init(kind: .resolution, text: snapshot.resolutionLabel))
+        }
+        if showFPS, let fps = snapshot.frameRateLabel {
+            result.append(.init(kind: .frameRate, text: "\(fps)fps"))
+        }
+        if showLens {
+            result.append(.init(kind: .lens, text: snapshot.lensLabel))
+        }
+        if showRemaining {
+            result.append(.init(kind: .remaining, text: snapshot.remainingLabel))
+        }
+        if showWhiteBalance {
+            result.append(.init(kind: .whiteBalance, text: snapshot.whiteBalanceLabel))
+        }
+        if !snapshot.isPhotoMode {
+            result.append(.init(kind: .microphone, text: compactAudioStatusLabel))
+        }
+        if showBattery {
+            let text = batteryLevel < 0 ? "BAT —" : "BAT \(Int(batteryLevel * 100))%"
+            result.append(.init(kind: .battery, text: text))
+        }
+        if showThermal {
+            result.append(.init(kind: .thermal, text: thermalLabel))
+        }
+        if showStorage {
+            let text = snapshot.availableStorageBytes > 0
+                ? String(format: "%.1f GB", Double(snapshot.availableStorageBytes) / 1_000_000_000)
+                : "Storage —"
+            result.append(.init(kind: .storage, text: text))
+        }
         if showDroppedFrames, !snapshot.isPhotoMode {
-            result.append(snapshot.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*")
+            let text = snapshot.lastFrameGaps.map { "Gaps \($0)*" } ?? "Gaps —*"
+            result.append(.init(kind: .frameGaps, text: text))
         }
         return result
     }
 
-    private func symbol(for item: String) -> String {
-        if item.contains("fps") { return "speedometer" }
-        if item.hasPrefix("BAT") { return "battery.100percent" }
-        if item.contains("GB") { return "internaldrive" }
-        if item.hasPrefix("Gaps") { return "waveform.path" }
-        if item.hasPrefix("Audio") || item.hasPrefix("Microphone") || item == "Silent" { return "mic" }
-        if ["Cool", "Warm", "Hot", "Critical", "Temp —"].contains(item) { return "thermometer.medium" }
-        if item.hasPrefix("~") { return snapshot.isPhotoMode ? "photo.on.rectangle" : "clock" }
-        if item == snapshot.whiteBalanceLabel { return "sun.max" }
-        if item == snapshot.lensLabel { return "camera.aperture" }
-        return "viewfinder"
+
+    private var compactAudioStatusLabel: String {
+        switch snapshot.audioStatusLabel {
+        case "Microphone": return "Mic On"
+        case "Checking microphone": return "Mic…"
+        case "Microphone off": return "Mic Off"
+        case "Microphone unavailable": return "Mic —"
+        default: return snapshot.audioStatusLabel
+        }
+    }
+
+    private var showsAudioMeterInHeader: Bool {
+        snapshot.isRecording && audioMeterMode != .off && audioMeterSnapshot.isAvailable
+    }
+
+    private var compactHeaderModeLabel: String {
+        // On the narrowest supported phone widths, a live dBFS readout plus peak hold can make
+        // the recording header wider than the safe gap between the side buttons. Fall back to
+        // REC only in that constrained case; normal widths keep VIDEO/SLO-MO exactly as designed.
+        if snapshot.isRecording, audioMeterMode == .decibels, maxWidth < 232 {
+            return "REC"
+        }
+        return snapshot.captureModeLabel.uppercased()
+    }
+
+    private var thermalLabel: String {
+        switch thermalState {
+        case .nominal: return "Cool"
+        case .fair: return "Warm"
+        case .serious: return "Hot"
+        case .critical: return "Critical"
+        @unknown default: return "Temp —"
+        }
+    }
+
+    /// Deliberately balances rows instead of relying on LazyVGrid's natural wrapping. The normal
+    /// portrait limit is four columns (5 -> 3+2, 7 -> 4+3, 10 -> 4+3+3); wider layouts can raise
+    /// that limit while keeping the same balanced-row rule.
+    private func itemRows(
+        for items: [CameraHUDItem],
+        maximumColumns: Int
+    ) -> [[CameraHUDItem]] {
+        guard !items.isEmpty else { return [] }
+
+        let safeMaximumColumns = max(1, maximumColumns)
+        let rowCount = max(1, (items.count + safeMaximumColumns - 1) / safeMaximumColumns)
+        let baseCount = items.count / rowCount
+        let remainder = items.count % rowCount
+        let lengths = (0..<rowCount).map { row in
+            baseCount + (row < remainder ? 1 : 0)
+        }
+
+        var result: [[CameraHUDItem]] = []
+        var startIndex = 0
+        for length in lengths {
+            let endIndex = min(startIndex + length, items.count)
+            result.append(Array(items[startIndex..<endIndex]))
+            startIndex = endIndex
+        }
+        return result
+    }
+
+    private func preferredCardWidth(maximumColumns: Int) -> CGFloat {
+        let idealCellWidth: CGFloat = textSize >= 12 ? 62 : 54
+        let gridWidth: CGFloat
+        if maximumColumns > 0 {
+            gridWidth = CGFloat(maximumColumns) * idealCellWidth
+                + CGFloat(maximumColumns - 1) * 4
+                + 16
+        } else {
+            gridWidth = 0
+        }
+
+        let headerMinimum: CGFloat
+        if snapshot.isRecording {
+            guard showsAudioMeterInHeader else {
+                return min(maxWidth, max(174, gridWidth))
+            }
+            switch audioMeterMode {
+            case .off:
+                headerMinimum = 174
+            case .bars:
+                headerMinimum = 190
+            case .decibels:
+                // The dBFS meter is wider than the bar meter. Keep a little extra room for
+                // SLO-MO + timer + peak-hold text on the supported portrait phone widths.
+                headerMinimum = 244
+            }
+        } else {
+            headerMinimum = 112
+        }
+
+        return min(maxWidth, max(headerMinimum, gridWidth))
     }
 }
 

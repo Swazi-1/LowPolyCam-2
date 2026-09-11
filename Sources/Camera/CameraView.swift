@@ -1,6 +1,14 @@
 import SwiftUI
 import UIKit
 
+private struct CameraTopControlsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct CameraLowerControlsHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -32,6 +40,8 @@ struct CameraView: View {
     @State private var countdown = 0
     @State private var shutterTask: Task<Void, Never>?
     @State private var zoomWidth: CGFloat = 320
+    @State private var topControlsHeight: CGFloat = 48
+    @State private var topControlsWidth: CGFloat = 320
     @State private var lowerControlsHeight: CGFloat = 204
     @AppStorage("shutterDelay") private var shutterDelay = 0
     @AppStorage("centerCrosshair") private var crosshair = false
@@ -74,6 +84,10 @@ struct CameraView: View {
             if editingStats || (liveStats && camera.isRecording) {
                 LiveStatsOverlay(stats: camera.liveStats, editing: editingStats) { editingStats = false }
             }
+        }
+        .onPreferenceChange(CameraTopControlsHeightKey.self) { height in
+            guard height > 0, abs(topControlsHeight - height) > 0.5 else { return }
+            topControlsHeight = height
         }
         .onPreferenceChange(CameraLowerControlsHeightKey.self) { height in
             guard abs(lowerControlsHeight - height) > 0.5 else { return }
@@ -161,7 +175,9 @@ struct CameraView: View {
             focusExposureLockLabel: camera.focusExposureLockLabel,
             stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
             isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
-            reservesTopHUDSpace: isHUDEnabled,
+            reservedTopOverlayHeight: (isCleanPreview || !isHUDEnabled)
+                ? 54
+                : max(54, 14 + topControlsHeight + 8),
             fitsPhoto: camera.captureMode == .photo,
             cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .twoFingerTap,
             captureOrientation: camera.captureOrientation,
@@ -268,7 +284,7 @@ struct CameraView: View {
         } else {
         GeometryReader { proxy in
             let levelHalfExtent: CGFloat = 54
-            let topControlsBottom: CGFloat = 14 + 116
+            let topControlsBottom: CGFloat = 14 + topControlsHeight
             let lowerControlsTop = proxy.size.height - 14 - lowerControlsHeight
             let preferredY = proxy.size.height / 2 + 72
             let minimumY = topControlsBottom + levelHalfExtent
@@ -332,8 +348,7 @@ struct CameraView: View {
     @ViewBuilder
     private var topControls: some View {
         if !isCleanPreview {
-        GeometryReader { proxy in
-            let hudMaxWidth = max(120, proxy.size.width - 112)
+            let hudMaxWidth = max(120, topControlsWidth - 112)
             let hudSnapshot = CameraHUDSnapshot(
                 isRecording: camera.isRecording,
                 captureModeLabel: camera.captureMode.rawValue,
@@ -345,12 +360,10 @@ struct CameraView: View {
                 whiteBalanceLabel: hudWhiteBalanceLabel,
                 audioStatusLabel: camera.audioStatusLabel,
                 availableStorageBytes: camera.availableStorageBytes,
-                lastFrameGaps: camera.lastFrameGaps,
-                audioMeterMode: camera.audioLevelMeterMode,
-                audioMeterSnapshot: camera.audioMeterSnapshot
+                lastFrameGaps: camera.lastFrameGaps
             )
 
-            ZStack {
+            ZStack(alignment: .top) {
                 HStack {
                     if camera.captureMode == .photo {
                         PhotoFlashButton(
@@ -363,7 +376,11 @@ struct CameraView: View {
                         TorchButton(camera: camera, isEnabled: !(camera.isRecording && recordingLock))
                     }
                     Spacer()
-                    CameraIconButton(symbol: "gearshape.fill", isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning, color: accent.color) {
+                    CameraIconButton(
+                        symbol: "gearshape.fill",
+                        isEnabled: !camera.isRecording && !camera.isRecordingStarting && !camera.isFinalizingRecording && !camera.isCapturingPhoto && !camera.isLensTransitioning,
+                        color: accent.color
+                    ) {
                         isShowingSettings = true
                     }
                 }
@@ -380,11 +397,25 @@ struct CameraView: View {
                         audioMeterMode: camera.audioLevelMeterMode,
                         audioMeterSnapshot: camera.audioMeterSnapshot
                     )
+                    // The same 56-point side exclusion used by the old width calculation keeps
+                    // the card inside the safe gap between Flash and Settings without a fixed
+                    // top-control height.
+                    .padding(.horizontal, 56)
                     .allowsHitTesting(false)
                 }
             }
-        }
-        .frame(height: 116)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: CameraTopControlsHeightKey.self, value: proxy.size.height)
+                        .onAppear { topControlsWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { _, width in
+                            guard abs(topControlsWidth - width) > 0.5 else { return }
+                            topControlsWidth = width
+                        }
+                }
+            }
         }
     }
 

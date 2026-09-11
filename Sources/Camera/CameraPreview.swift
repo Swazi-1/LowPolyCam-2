@@ -10,7 +10,7 @@ struct CameraPreview: UIViewRepresentable {
     let focusExposureLockLabel: String
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
-    let reservesTopHUDSpace: Bool
+    let reservedTopOverlayHeight: CGFloat
     var fitsPhoto = false
     var cleanPreviewGesture = CleanPreviewGesture.off
     var captureOrientation = CaptureOrientationPreference.auto
@@ -33,7 +33,7 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     private func configure(_ view: PreviewView) {
-        view.setReservesTopHUDSpace(reservesTopHUDSpace)
+        view.setReservedTopOverlayHeight(reservedTopOverlayHeight)
         view.setPreviewTransitioning(isPreviewTransitioning)
         guard !isPreviewTransitioning else { return }
         let gravity: AVLayerVideoGravity = fitsPhoto ? .resizeAspect : .resizeAspectFill
@@ -62,7 +62,7 @@ final class PreviewView: UIView {
     private let lockLabel = UILabel()
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
-    private var reservesTopHUDSpace = false
+    private var reservedTopOverlayHeight: CGFloat = 54
     private var stabilizationEnabled = true
     private var transitionSnapshot: UIView?
     private var transitionBlurView: UIVisualEffectView?
@@ -102,9 +102,10 @@ final class PreviewView: UIView {
         transitionDimView?.frame = bounds
 
         lockLabel.sizeToFit()
-        // The SwiftUI HUD is above this UIKit preview. Reserve enough room for its largest
-        // two-line layout so the fixed AE/AF lock pill never sits underneath it.
-        let lockLabelTop = safeAreaInsets.top + (reservesTopHUDSpace ? 82 : 54)
+        // SwiftUI reports the actual top-control height. Using the measured value keeps the
+        // AE/AF lock pill below compact, expanded, and future HUD layouts without a stale magic
+        // number tied to one specific HUD design.
+        let lockLabelTop = safeAreaInsets.top + max(54, reservedTopOverlayHeight)
         lockLabel.frame = CGRect(
             x: (bounds.width - lockLabel.bounds.width - 24) / 2,
             y: max(lockLabelTop, 70),
@@ -161,9 +162,10 @@ final class PreviewView: UIView {
         enableStabilizationIfAvailable()
     }
 
-    func setReservesTopHUDSpace(_ reservesSpace: Bool) {
-        guard reservesTopHUDSpace != reservesSpace else { return }
-        reservesTopHUDSpace = reservesSpace
+    func setReservedTopOverlayHeight(_ height: CGFloat) {
+        let normalizedHeight = max(0, height)
+        guard abs(reservedTopOverlayHeight - normalizedHeight) > 0.5 else { return }
+        reservedTopOverlayHeight = normalizedHeight
         setNeedsLayout()
     }
 
