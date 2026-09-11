@@ -1,97 +1,108 @@
 import SwiftUI
 
-struct CameraHUDSettingsView: View {
+struct ViewfinderHUDSettingsView: View {
+    @Environment(\.cameraTint) private var theme
     @ObservedObject var camera: CameraManager
+    @AppStorage("keepScreenAwakeEnabled") private var keepScreenAwakeEnabled = false
     @AppStorage("cameraHUDEnabled") private var isHUDEnabled = true
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Viewfinder", symbol: "viewfinder") {
+                SettingsToggleRow(
+                    title: "Keep Screen Awake",
+                    subtitle: "Prevent Auto-Lock while LowPolyCam is open",
+                    symbol: "sun.max.fill",
+                    isOn: $keepScreenAwakeEnabled
+                )
+            }
+
+            SettingsCard(title: "Camera HUD", symbol: "capsule.fill") {
+                SettingsToggleRow(
+                    title: "Show Camera HUD",
+                    subtitle: "Show the in-camera info capsule",
+                    symbol: "capsule.fill",
+                    isOn: $isHUDEnabled
+                )
+                SettingsDivider()
+                NavigationLink {
+                    CameraHUDSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "HUD Content & Style",
+                        subtitle: "Choose the info and text size",
+                        symbol: "text.line.first.and.arrowtriangle.forward"
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .tint(theme)
+        .accentColor(theme)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .navigationTitle("Viewfinder & HUD")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct CameraHUDSettingsView: View {
+    @ObservedObject var camera: CameraManager
     @AppStorage("cameraHUDResolution") private var hudResolution = true
     @AppStorage("cameraHUDFPS") private var hudFPS = true
-    @AppStorage("cameraHUDRemaining") private var hudRemaining = false
+    @AppStorage("cameraHUDRemaining") private var hudRemaining = true
     @AppStorage("cameraHUDWhiteBalance") private var hudWhiteBalance = false
-    @AppStorage("cameraHUDBattery") private var hudBattery = true
+    @AppStorage("cameraHUDBattery") private var hudBattery = false
     @AppStorage("cameraHUDStorage") private var hudStorage = false
     @AppStorage("cameraHUDDroppedFrames") private var hudDroppedFrames = false
     @AppStorage("thermalHUD") private var hudThermal = false
     @AppStorage("hudTextSize") private var hudTextSize = 10.0
-    @AppStorage("audioLevelMeter") private var audioLevelMeter = AudioLevelMeterMode.bars.rawValue
-    @AppStorage("audioPeakHold") private var audioPeakHold = true
-    @AppStorage("cameraHUDLens") private var hudLens = false
 
     var body: some View {
-        List {
-            Section("HUD") {
-                HapticFreeSettingsToggle(isOn: $isHUDEnabled) {
-                    SettingsToggleLabel(
-                        symbol: "capsule.fill",
-                        color: .blue,
-                        title: "Show Camera HUD",
-                        subtitle: "Show the in-camera information capsule."
+        SettingsPage {
+            SettingsCard(title: "Main Info", symbol: "viewfinder") {
+                SettingsToggleRow(
+                    title: "Resolution",
+                    subtitle: camera.captureMode == .photo ? "Selected photo resolution" : "Selected video resolution",
+                    isOn: $hudResolution
+                )
+
+                if camera.captureMode != .photo {
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title: "FPS",
+                        subtitle: camera.captureMode == .sloMo ? "Selected Slo-Mo frame rate" : "Selected video frame rate",
+                        isOn: $hudFPS
                     )
                 }
+
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining",
+                    subtitle: camera.captureMode == .photo ? "Estimated photos left" : "Estimated recording time left",
+                    isOn: $hudRemaining
+                )
+                SettingsDivider()
+                SettingsToggleRow(title: "White Balance", subtitle: "Active white-balance preset", isOn: $hudWhiteBalance)
             }
 
-            Section("MAIN INFO") {
-                HapticFreeSettingsToggle(isOn: $hudResolution) { Text("Resolution") }
+            SettingsCard(title: "Device Info", symbol: "iphone") {
+                SettingsToggleRow(title: "Battery", subtitle: "Current battery percentage", isOn: $hudBattery)
+                SettingsDivider()
+                SettingsToggleRow(title: "Free Storage", subtitle: "Available space on this iPhone", isOn: $hudStorage)
+                SettingsDivider()
+                SettingsToggleRow(title: "Thermal Status", subtitle: "Current device temperature state", isOn: $hudThermal)
                 if camera.captureMode != .photo {
-                    HapticFreeSettingsToggle(isOn: $hudFPS) { Text("FPS") }
+                    SettingsDivider()
+                    SettingsToggleRow(title: "Frame Gaps", subtitle: "Missing intervals in the last saved clip", isOn: $hudDroppedFrames)
                 }
-                HapticFreeSettingsToggle(isOn: $hudRemaining) {
-                    Text(camera.captureMode == .photo ? "Photos Remaining" : "Time Remaining")
-                }
-                HapticFreeSettingsToggle(isOn: $hudWhiteBalance) { Text("White Balance") }
-                HapticFreeSettingsToggle(isOn: $hudLens) { Text("Active Lens") }
             }
-            .disabled(!isHUDEnabled)
 
-            Section("DEVICE INFO") {
-                HapticFreeSettingsToggle(isOn: $hudBattery) { Text("Battery") }
-                HapticFreeSettingsToggle(isOn: $hudStorage) { Text("Free Storage") }
-                HapticFreeSettingsToggle(isOn: $hudThermal) { Text("Thermal Status") }
-                if camera.captureMode != .photo {
-                    HapticFreeSettingsToggle(isOn: $hudDroppedFrames) { Text("Frame Gaps") }
-                }
+            SettingsCard(title: "HUD Appearance", symbol: "textformat.size") {
+                ThemeMenu(title: "Text Size", selection: $hudTextSize, options: [(10.0, "Compact"), (12.0, "Large")])
             }
-            .disabled(!isHUDEnabled)
-
-            Section {
-                Picker("Audio Level Meter", selection: $audioLevelMeter) {
-                    ForEach(AudioLevelMeterMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: audioLevelMeter) { _, rawValue in
-                    if let mode = AudioLevelMeterMode(rawValue: rawValue) {
-                        camera.setAudioLevelMeterMode(mode)
-                    }
-                }
-                HapticFreeSettingsToggle(isOn: $audioPeakHold) {
-                    SettingsToggleLabel(
-                        symbol: "arrow.up.forward",
-                        color: .orange,
-                        title: "Peak Hold",
-                        subtitle: "Hold the loudest recent meter level briefly."
-                    )
-                }
-                .disabled(audioLevelMeter == AudioLevelMeterMode.off.rawValue)
-            } header: {
-                Text("RECORDING HUD")
-            } footer: {
-                Text("The meter reads the authorized microphone data output and appears only while recording. Peak Hold marks the loudest recent level. Decibel readouts are digital dBFS, not SPL or dBA.")
-            }
-            .disabled(!isHUDEnabled)
-
-            Section("APPEARANCE") {
-                Picker("Text Size", selection: $hudTextSize) {
-                    Text("Compact").tag(10.0)
-                    Text("Large").tag(12.0)
-                }
-                .pickerStyle(.menu)
-            }
-            .disabled(!isHUDEnabled)
         }
-        .listStyle(.insetGrouped)
         .navigationTitle("Camera HUD")
-        .navigationBarTitleDisplayMode(.large)
-        .tint(.blue)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

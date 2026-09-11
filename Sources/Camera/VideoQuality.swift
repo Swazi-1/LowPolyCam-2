@@ -17,7 +17,6 @@ enum VideoResolution: String, CaseIterable, Identifiable {
 }
 
 enum VideoFrameRate: Int, CaseIterable, Identifiable {
-    case fps24 = 24
     case fps30 = 30
     case fps60 = 60
 

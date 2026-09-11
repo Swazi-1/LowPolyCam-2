@@ -1,5 +1,4 @@
 import AVFoundation
-import Combine
 import Photos
 
 @MainActor
@@ -20,8 +19,7 @@ final class PermissionManager: ObservableObject {
         let cameraReady = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
         let photosReady = PHPhotoLibrary.authorizationStatus(for: .addOnly) == .authorized
         state = cameraReady && photosReady ? .ready : .checking
-        let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
-        AppEventLog.event("Permissions initialized: camera=\(cameraReady), photos=\(photosReady), microphone=\(microphone.rawValue)")
+        AppEventLog.event("Permissions initialized: camera=\(cameraReady), photos=\(photosReady)")
     }
 
     func requestRequiredPermissionsIfNeeded() async {
@@ -38,6 +36,10 @@ final class PermissionManager: ObservableObject {
 
         if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
             _ = await AVCaptureDevice.requestAccess(for: .video)
+        }
+
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
         }
 
         if PHPhotoLibrary.authorizationStatus(for: .addOnly) == .notDetermined {

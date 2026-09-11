@@ -29,13 +29,6 @@ struct CameraFormatSelector {
     let selectedFrameRate: VideoFrameRate
 
     func bestPhotoFormat(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, dimensions: CMVideoDimensions)? {
-        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("PHOTO-FORMAT") : nil
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        AppEventLog.deepEvent("PHOTO FORMAT SCAN START", category: .format, traceID: traceID, fields: [
-            "device": device.localizedName,
-            "deviceID": device.uniqueID,
-            "formats": String(device.formats.count)
-        ])
         struct Candidate {
             let format: AVCaptureDevice.Format
             let photoDimensions: CMVideoDimensions
@@ -74,21 +67,7 @@ struct CameraFormatSelector {
             }
         }
 
-        guard let best else {
-            AppEventLog.deepEvent("PHOTO FORMAT SCAN FAILED", category: .format, level: .warning, traceID: traceID, fields: [
-                "device": device.localizedName,
-                "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-            ])
-            return nil
-        }
-        AppEventLog.deepEvent("PHOTO FORMAT SELECTED", category: .format, traceID: traceID, fields: [
-            "device": device.localizedName,
-            "photoDimensions": "\(best.photoDimensions.width)x\(best.photoDimensions.height)",
-            "photoMP": String(format: "%.2f", Double(best.photoPixels) / 1_000_000),
-            "previewPixels": String(best.previewPixels),
-            "supports30FPS": String(best.supports30FPS),
-            "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-        ])
+        guard let best else { return nil }
         return (best.format, best.photoDimensions)
     }
 
@@ -100,16 +79,6 @@ struct CameraFormatSelector {
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: VideoFrameRate? = nil
     ) -> VideoFormatSelection {
-        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("VIDEO-FORMAT") : nil
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let totalFormats = devices.reduce(0) { $0 + $1.formats.count }
-        AppEventLog.deepEvent("VIDEO FORMAT SCAN START", category: .format, traceID: traceID, fields: [
-            "devices": String(devices.count),
-            "formats": String(totalFormats),
-            "requestedResolution": (requestedResolution ?? selectedResolution).rawValue,
-            "requestedFPS": String((requestedFrameRate ?? selectedFrameRate).rawValue),
-            "codec": selectedVideoCodec
-        ])
         let resolutions = VideoResolution.allCases
         let frameRates = VideoFrameRate.allCases
         var hasFormatByResolution = Array(repeating: false, count: resolutions.count)
@@ -171,14 +140,6 @@ struct CameraFormatSelector {
             }
         }
 
-        AppEventLog.deepEvent("VIDEO FORMAT SCAN RESULT", category: .format, traceID: traceID, fields: [
-            "selected": "\(resolution.rawValue)@\(frameRate.rawValue)",
-            "availableResolutions": availableResolutions.map(\.rawValue).joined(separator: ","),
-            "supportedFPS": supportedFrameRates.map { String($0.rawValue) }.joined(separator: ","),
-            "supportedDevices": supportedDevices.map(\.localizedName).joined(separator: ","),
-            "selectedFormats": String(selectedFormatByDeviceID.count),
-            "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-        ])
         return VideoFormatSelection(
             availableResolutions: availableResolutions,
             resolution: resolution,
@@ -197,15 +158,6 @@ struct CameraFormatSelector {
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: SlowMotionFrameRate? = nil
     ) -> SlowMotionFormatSelection {
-        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("SLOMO-FORMAT") : nil
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        AppEventLog.deepEvent("SLO-MO FORMAT SCAN START", category: .format, traceID: traceID, fields: [
-            "devices": String(devices.count),
-            "formats": String(devices.reduce(0) { $0 + $1.formats.count }),
-            "requestedResolution": (requestedResolution ?? selectedResolution).rawValue,
-            "requestedFPS": String((requestedFrameRate ?? .fps240).rawValue),
-            "codec": selectedVideoCodec
-        ])
         let resolutions = VideoResolution.allCases
         let frameRates = SlowMotionFrameRate.allCases
         var ratesByResolution = Array(repeating: [SlowMotionFrameRate](), count: resolutions.count)
@@ -279,14 +231,6 @@ struct CameraFormatSelector {
             }
         }
 
-        AppEventLog.deepEvent("SLO-MO FORMAT SCAN RESULT", category: .format, traceID: traceID, fields: [
-            "selected": "\(resolution.rawValue)@\(frameRate.rawValue)",
-            "availableResolutions": availableResolutions.map(\.rawValue).joined(separator: ","),
-            "supportedFPS": supportedFrameRates.map { String($0.rawValue) }.joined(separator: ","),
-            "supportedDevices": supportedDevices.map(\.localizedName).joined(separator: ","),
-            "selectedFormats": String(selectedFormatByDeviceID.count),
-            "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-        ])
         return SlowMotionFormatSelection(
             availableResolutions: availableResolutions,
             resolution: resolution,

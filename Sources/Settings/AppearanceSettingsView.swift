@@ -6,425 +6,149 @@ struct AppearanceSettingsView: View {
     @AppStorage("iconCustomRed") private var red = 0.55
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
-    @AppStorage("appColorScheme") private var appColorScheme = "dark"
-
-    private let accentNames = CameraAccentPalette.names
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
+    private var accent = CameraAccent()
+    private let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
 
     var body: some View {
-        List {
-            Section {
-                Picker("Appearance", selection: $appColorScheme) {
-                    Text("System").tag("system")
-                    Text("Light").tag("light")
-                    Text("Dark").tag("dark")
+        SettingsPage {
+            VStack(spacing: 16) {
+                Image(systemName: "camera.aperture")
+                    .font(.system(size: 60, weight: .light))
+                    .foregroundStyle(accent.color)
+                    .shadow(color: accent.color.opacity(0.45), radius: 18)
+                Text(appearance.uppercased())
+                    .font(.system(.headline, design: .rounded)).tracking(4)
+                HStack(spacing: 20) {
+                    ForEach(["bolt.fill", "viewfinder", "gearshape.fill"], id: \.self) { symbol in
+                        Image(systemName: symbol).foregroundStyle(accent.color)
+                            .frame(width: 46, height: 46)
+                            .background(accent.color.opacity(0.14), in: Circle())
+                    }
                 }
-                .pickerStyle(.menu)
-            } header: {
-                Text("APP APPEARANCE")
-            } footer: {
-                Text("System follows your iPhone's current appearance.")
+                Text("Your camera, your color").font(.caption).foregroundStyle(.secondary)
             }
-
-            Section {
-                Picker(selection: $appearance) {
-                    ForEach(accentNames, id: \.self) { name in
-                        Text(name).tag(name)
+            .frame(maxWidth: .infinity).padding(.vertical, 24)
+            .background(LinearGradient(colors: [accent.color.opacity(0.22), Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
+            SettingsCard(title: "Choose a Theme", symbol: "paintpalette.fill") {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    ForEach(names, id: \.self) { name in
+                        Button { appearance = name } label: {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(spacing: 5) {
+                                    ForEach([1.0, 0.7, 0.4], id: \.self) { opacity in
+                                        Circle().fill(color(for: name).opacity(opacity)).frame(width: 20, height: 20)
+                                    }
+                                    Spacer(minLength: 0)
+                                    if appearance == name {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(color(for: name))
+                                    }
+                                }
+                                Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                            }
+                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(color(for: name).opacity(appearance == name ? 0.18 : 0.06), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(color(for: name).opacity(appearance == name ? 0.8 : 0.12)))
+                            .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
                     }
-                } label: {
-                    HStack {
-                        Text("Camera Accent")
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Circle()
-                            .fill(color(for: appearance))
-                            .frame(width: 18, height: 18)
-                        Text(appearance)
-                        .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
                 }
-                .pickerStyle(.menu)
-
                 if appearance == "Custom" {
-                    ColorPicker("Custom Accent", selection: customColorBinding, supportsOpacity: false)
+                    ColorPicker("Custom Accent", selection: Binding(get: { accent.color }, set: { value in
+                        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                        UIColor(value).getRed(&r, green: &g, blue: &b, alpha: &a)
+                        red = Double(r); green = Double(g); blue = Double(b)
+                    }), supportsOpacity: false)
                 }
-            } header: {
-                Text("CAMERA ACCENT")
-            } footer: {
-                Text("Accent color changes LowPolyCam's camera controls. Settings itself stays system-styled for readability.")
-            }
-
-            Section("PREVIEW") {
-                CameraAccentPreview(accent: color(for: appearance))
-                    .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
             }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Appearance")
-        .navigationBarTitleDisplayMode(.large)
-        .tint(.blue)
-    }
-
-    private var customColorBinding: Binding<Color> {
-        Binding(
-            get: { Color(red: red, green: green, blue: blue) },
-            set: { value in
-                var r: CGFloat = 0
-                var g: CGFloat = 0
-                var b: CGFloat = 0
-                var a: CGFloat = 0
-                UIColor(value).getRed(&r, green: &g, blue: &b, alpha: &a)
-                red = Double(r)
-                green = Double(g)
-                blue = Double(b)
-            }
-        )
+        .tint(accent.color).accentColor(accent.color)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .navigationTitle("Appearance").navigationBarTitleDisplayMode(.inline)
     }
 
     private func color(for name: String) -> Color {
-        CameraAccentPalette.color(for: name, red: red, green: green, blue: blue)
-    }
-}
-
-private struct CameraAccentPreview: View {
-    let accent: Color
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.black)
-
-            VStack {
-                HStack(spacing: 18) {
-                    Image(systemName: "bolt.fill")
-                    Spacer()
-                    Text("4K · 60")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .overlay(Capsule().stroke(accent.opacity(0.75)))
-                    Spacer()
-                    Image(systemName: "gearshape.fill")
-                }
-                .foregroundStyle(accent)
-                .padding(.horizontal, 18)
-                .padding(.top, 14)
-
-                Spacer()
-
-                HStack(spacing: 26) {
-                    Text("0.5×")
-                        .font(.caption.bold())
-                        .foregroundStyle(.white)
-                    ZStack {
-                        Circle().fill(.white).frame(width: 52, height: 52)
-                        Circle().stroke(accent, lineWidth: 4).frame(width: 62, height: 62)
-                    }
-                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
-                        .foregroundStyle(accent)
-                        .font(.title3)
-                }
-                .padding(.bottom, 16)
-            }
+        switch name {
+        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
+        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
+        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
+        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
+        case "Custom": return Color(red: red, green: green, blue: blue)
+        default: return Color(red: 0.65, green: 0.88, blue: 1)
         }
-        .frame(height: 180)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Camera accent preview")
     }
 }
 
 struct VideoPresetsView: View {
     @ObservedObject var camera: CameraManager
+    @Environment(\.cameraTint) private var theme
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @State private var preview: VideoQuickPreset = .balanced
-    @State private var customPresets: [CameraPreset] = []
-    @State private var newPresetName = ""
-    @State private var showingSavePresetAlert = false
-    @State private var renamePresetName = ""
-    @State private var renamePresetID: UUID?
-    @State private var showingRenamePresetAlert = false
-
     var body: some View {
-        List {
-            builtInPresetsSection
-            customPresetsSection
-            selectedPresetSection
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Video Presets")
-        .navigationBarTitleDisplayMode(.inline)
-        .tint(.blue)
-        .onAppear(perform: loadPresets)
-        .alert("Save Current Setup", isPresented: $showingSavePresetAlert) {
-            TextField("Preset name", text: $newPresetName)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") { savePreset() }
-        } message: {
-            Text("Give this camera setup a name.")
-        }
-        .alert("Rename Preset", isPresented: $showingRenamePresetAlert) {
-            TextField("Preset name", text: $renamePresetName)
-            Button("Cancel", role: .cancel) { renamePresetID = nil }
-            Button("Save") { renamePreset() }
-        } message: {
-            Text("The updated name is saved locally with the preset.")
-        }
-    }
-
-    @ViewBuilder
-    private var builtInPresetsSection: some View {
-        Section("PRESETS") {
-            ForEach(VideoQuickPreset.allCases) { preset in
-                builtInPresetRow(preset)
-            }
-        }
-    }
-
-    private func builtInPresetRow(_ preset: VideoQuickPreset) -> some View {
-        Button {
-            preview = preset
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon(for: preset))
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(iconColor(for: preset))
-                    .frame(width: 24)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(preset.rawValue)
-                        .foregroundStyle(.primary)
-                    Text(preset.detail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                }
-
-                Spacer(minLength: 6)
-                if preview == preset {
-                    Image(systemName: "checkmark")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.blue)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private var customPresetsSection: some View {
-        Section {
-            if customPresets.isEmpty {
-                Text("Save the current camera setup to create a reusable preset.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(customPresets) { preset in
-                    customPresetRow(preset)
-                }
-            }
-
-            Button {
-                newPresetName = ""
-                showingSavePresetAlert = true
-            } label: {
-                Label("Save Current Setup", systemImage: "plus.circle.fill")
-            }
-        } header: {
-            Text("CUSTOM PRESETS")
-        } footer: {
-            Text("Presets store capture mode, formats, codec, independent compression, bitrate, zoom, stabilization, white balance and camera position. Applying one uses a single coordinated camera configuration.")
-        }
-    }
-
-    private func customPresetRow(_ preset: CameraPreset) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                applyCustomPreset(preset)
-            } label: {
-                HStack(spacing: 12) {
-                    SettingsListIcon(symbol: "slider.horizontal.3", color: .purple)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(preset.name)
-                            .foregroundStyle(.primary)
-                        Text(presetSummary(preset))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+        StaticSettingsPage {
+            VStack(spacing: 9) {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(theme).shadow(color: theme.opacity(0.4), radius: 14)
+                Text(preview.rawValue).font(.title3.weight(.bold))
+                VStack(spacing: 5) {
+                    HStack(spacing: 6) {
+                        Circle().fill(.red).frame(width: 6, height: 6)
+                        Text("REC  00:00:12").font(.system(.caption, design: .monospaced).weight(.bold))
                     }
+                    HStack(spacing: 12) {
+                        Label(preview.resolution.rawValue, systemImage: "viewfinder")
+                        Label("\(preview.frameRate.rawValue) fps", systemImage: "speedometer")
+                        Text("HEVC")
+                    }.font(.caption2.weight(.semibold)).foregroundStyle(theme)
                 }
-                .contentShape(Rectangle())
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(theme.opacity(0.4)))
+                Text("HUD preview · example recording timer").font(.caption2).foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-
-            Menu {
-                Button("Apply") { applyCustomPreset(preset) }
-                Button("Rename") {
-                    renamePresetID = preset.id
-                    renamePresetName = preset.name
-                    showingRenamePresetAlert = true
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
+            .background(LinearGradient(colors: [theme.opacity(0.22), Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
+            SettingsCard(title: "Choose a Preset", symbol: "wand.and.stars", contentSpacing: 7) {
+                ForEach(VideoQuickPreset.allCases) { preset in
+                    Button { preview = preset } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preset.rawValue).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                                Text(preset.detail).font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: preview == preset ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(theme)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(theme.opacity(preview == preset ? 0.16 : 0.04), in: RoundedRectangle(cornerRadius: 12))
+                        .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
                 }
-                Button("Delete", role: .destructive) { deletePreset(preset) }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.title3)
-                    .foregroundStyle(.blue)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Actions for \(preset.name)")
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) { deletePreset(preset) } label: {
-                Label("Delete", systemImage: "trash")
+                Button {
+                    camera.applyQuickPreset(preview) { success in
+                        if success { dismiss() }
+                    }
+                } label: {
+                    Text("Use \(preview.rawValue)").font(.subheadline.weight(.bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                        .background(theme, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black)
+                }.buttonStyle(.plain)
             }
         }
-    }
-
-    @ViewBuilder
-    private var selectedPresetSection: some View {
-        Section {
-            selectedPresetSummary
-            Button {
-                camera.applyQuickPreset(preview) { success in
-                    if success { dismiss() }
-                }
-            } label: {
-                HStack {
-                    Spacer()
-                    Text("Use \(preview.rawValue)")
-                        .fontWeight(.semibold)
-                    Spacer()
-                }
-            }
-            .disabled(camera.captureMode != .video || camera.isPreviewTransitioning || camera.isLensTransitioning)
-        } header: {
-            Text("SELECTED PRESET")
-        } footer: {
-            Text(selectedPresetFooter)
+        .onAppear {
+            preview = VideoQuickPreset.allCases.first {
+                $0.resolution == camera.selectedResolution &&
+                $0.frameRate == camera.selectedFrameRate &&
+                $0.compression == camera.videoCompression &&
+                camera.selectedVideoCodec == "HEVC"
+            } ?? .balanced
         }
-    }
-
-    private var selectedPresetSummary: some View {
-        HStack(spacing: 8) {
-            Text(preview.resolution.rawValue)
-            Text("·")
-            Text("\(preview.frameRate.rawValue) fps")
-            Text("·")
-            Text("HEVC")
-            Text("·")
-            Text(preview.compression.rawValue)
-        }
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .minimumScaleFactor(0.72)
-    }
-
-    private var selectedPresetFooter: String {
-        camera.captureMode == .video
-            ? "Applying a preset changes Video resolution, frame rate, codec and compression together."
-            : "Switch Camera Setup to Video before applying a Video preset."
-    }
-
-    private func loadPresets() {
-        customPresets = CameraPresetStore.load()
-        preview = VideoQuickPreset.allCases.first {
-            $0.resolution == camera.selectedResolution &&
-            $0.frameRate == camera.selectedFrameRate &&
-            $0.compression == camera.videoCompression &&
-            camera.selectedVideoCodec == "HEVC"
-        } ?? .balanced
-    }
-
-    private func icon(for preset: VideoQuickPreset) -> String {
-        switch preset {
-        case .balanced: return "slider.horizontal.3"
-        case .highQuality: return "sparkles"
-        case .allRounder: return "square.grid.2x2.fill"
-        case .allDay: return "battery.100percent"
-        case .social: return "person.2.fill"
-        }
-    }
-
-    private func iconColor(for preset: VideoQuickPreset) -> Color {
-        switch preset {
-        case .balanced: return .blue
-        case .highQuality: return .purple
-        case .allRounder: return .green
-        case .allDay: return .orange
-        case .social: return .pink
-        }
-    }
-
-    private func applyCustomPreset(_ preset: CameraPreset) {
-        CameraHaptics.fire()
-        camera.applyCameraPreset(preset) { success in
-            guard success else { return }
-            DispatchQueue.main.async { dismiss() }
-        }
-    }
-
-    private func savePreset() {
-        let name = newPresetName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        let preset = camera.makeCameraPreset(named: name)
-        customPresets.append(preset)
-        CameraPresetStore.save(customPresets)
-        newPresetName = ""
-    }
-
-    private func renamePreset() {
-        let name = renamePresetName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let renamePresetID,
-              let index = customPresets.firstIndex(where: { $0.id == renamePresetID }) else { return }
-        customPresets[index].name = name
-        CameraPresetStore.save(customPresets)
-        self.renamePresetID = nil
-        renamePresetName = ""
-    }
-
-    private func deletePreset(_ preset: CameraPreset) {
-        customPresets.removeAll { $0.id == preset.id }
-        CameraPresetStore.save(customPresets)
-    }
-
-    private func presetSummary(_ preset: CameraPreset) -> String {
-        let mode: String
-        let resolution: String
-        let frameRate: Int
-        let compressionMode: String
-        let compressionLevel: String
-        let manualBitrate: Double
-
-        switch preset.captureMode {
-        case "PHOTO":
-            mode = "Photo"
-            resolution = "Still"
-            frameRate = 0
-            compressionMode = ""
-            compressionLevel = ""
-            manualBitrate = 0
-        case "SLO-MO":
-            mode = "Slo-Mo"
-            resolution = preset.slowMotionResolution
-            frameRate = preset.slowMotionFrameRate
-            compressionMode = preset.slowMotionCompressionMode
-            compressionLevel = preset.slowMotionCompressionLevel
-            manualBitrate = preset.slowMotionManualBitrateMbps
-        default:
-            mode = "Video"
-            resolution = preset.videoResolution
-            frameRate = preset.videoFrameRate
-            compressionMode = preset.videoCompressionMode
-            compressionLevel = preset.videoCompressionLevel
-            manualBitrate = preset.videoManualBitrateMbps
-        }
-
-        let compression = compressionMode == CompressionMode.manual.rawValue
-            ? "Manual \(String(format: "%.1f", manualBitrate)) Mbps"
-            : "Auto \(compressionLevel)"
-        return frameRate > 0 ? "\(mode) · \(resolution) · \(frameRate) fps · \(compression)" : "\(mode) · \(compression)"
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .navigationTitle("Video Presets").navigationBarTitleDisplayMode(.inline)
     }
 }

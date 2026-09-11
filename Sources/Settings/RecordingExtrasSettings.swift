@@ -82,58 +82,70 @@ struct LiveStatsOverlay: View {
     }
 }
 
+struct RecordingExtrasSettings: View {
+    @ObservedObject var camera: CameraManager
+    var positionStats: () -> Void
+    @AppStorage("longevityMode") private var longevity = false
+    @AppStorage("liveRecordingStats") private var stats = false
+    var body: some View {
+        Group {
+            if camera.captureMode == .video {
+                SettingsCard(title: "Long Sessions & Stats", symbol: "battery.100percent") {
+                    SettingsToggleRow(title: "Longevity Mode", subtitle: "Uses 720p, 30 fps, HEVC and Data Saver, then dims the screen while recording. Your previous setup returns when turned off.", isOn: Binding(get: { longevity }, set: { camera.applyLongevityMode($0) }))
+                    SettingsDivider()
+                    liveStatsControls
+                }
+            } else if camera.captureMode == .sloMo {
+                SettingsCard(title: "Recording Stats", symbol: "chart.bar.xaxis") {
+                    liveStatsControls
+                }
+            }
+        }
+        .onChange(of: stats) { _, _ in camera.refreshLiveMetrics() }
+    }
+
+    @ViewBuilder
+    private var liveStatsControls: some View {
+        SettingsToggleRow(title: "Live Recording Stats", subtitle: "Shows recording FPS, file bitrate and monitored frame drops. Uses a little extra processing.", isOn: $stats)
+        SettingsDivider()
+        NavigationLink {
+            LiveStatsSettings(positionStats: positionStats)
+        } label: {
+            SettingsNavigationRow(title: "Live Stats Settings", subtitle: "Size, information and position", symbol: "chart.bar.xaxis")
+        }.buttonStyle(.plain)
+    }
+}
+
+
 struct LiveStatsSettings: View {
     var positionStats: () -> Void
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
     @AppStorage("liveStatsSize") private var size = "Normal"
     @AppStorage("liveStatsShowFPS") private var showFPS = true
     @AppStorage("liveStatsShowBitrate") private var showBitrate = true
     @AppStorage("liveStatsShowDrops") private var showDrops = true
-
     var body: some View {
-        List {
-            Section {
-                Picker("Panel Size", selection: $size) {
-                    Text("Compact").tag("Compact")
-                    Text("Normal").tag("Normal")
-                }
-                .pickerStyle(.menu)
-            } header: {
-                Text("APPEARANCE")
-            } footer: {
-                Text("Compact uses shorter labels and less screen space.")
+        SettingsPage {
+            SettingsCard(title: "Appearance", symbol: "textformat.size") {
+                ThemeMenu(title: "Panel Size", selection: $size, options: [("Compact", "Compact"), ("Normal", "Normal")])
+                Text("Compact uses shorter labels and less space. The panel adjusts to your selected stats.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-
-            Section {
-                HapticFreeSettingsToggle(isOn: $showFPS) {
-                    Text("Capture FPS")
-                }
-                HapticFreeSettingsToggle(isOn: $showBitrate) {
-                    Text("File Bitrate")
-                }
-                HapticFreeSettingsToggle(isOn: $showDrops) {
-                    Text("Capture Drops")
-                }
-            } header: {
-                Text("INFORMATION")
-            } footer: {
-                Text("Capture Drops are gaps observed by the monitoring output; they are not a direct encoder-drop count.")
+            SettingsCard(title: "Information", symbol: "list.bullet") {
+                SettingsToggleRow(title: "Capture FPS", subtitle: "Active recording frame rate", isOn: $showFPS)
+                SettingsDivider()
+                SettingsToggleRow(title: "File Bitrate", subtitle: "Measured recording data in Mbps", isOn: $showBitrate)
+                SettingsDivider()
+                SettingsToggleRow(title: "Capture Drops", subtitle: "Frames dropped by the monitoring output; not encoder drops", isOn: $showDrops)
             }
-
-            Section {
-                Button {
-                    positionStats()
-                } label: {
-                    Label("Position Live Stats", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
-                }
-            } header: {
-                Text("POSITION")
-            } footer: {
-                Text("The Settings sheet closes so you can drag the stats panel directly on the camera screen.")
+            SettingsCard(title: "Position", symbol: "arrow.up.and.down.and.arrow.left.and.right") {
+                Button("Position Live Stats", action: positionStats).padding(.vertical, 8)
+                Text("Drag the panel on your camera screen. Camera buttons are disabled while positioning. The chosen size and information are used in the editor and during recording.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .listStyle(.insetGrouped)
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
         .navigationTitle("Live Stats")
-        .navigationBarTitleDisplayMode(.large)
-        .tint(.blue)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

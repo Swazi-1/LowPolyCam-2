@@ -25,11 +25,6 @@ enum CameraMovieMetadata {
     private static let creationDateFormatter = ISO8601DateFormatter()
 
     static func items(isSlowMotion: Bool = false) -> [AVMetadataItem] {
-        AppEventLog.deepEvent("MOVIE METADATA BUILD", category: .recording, fields: [
-            "model": Self.model,
-            "hardwareIdentifier": Self.hardwareIdentifier,
-            "slowMotion": String(isSlowMotion)
-        ])
         // Keep the exact hardware identifier when the friendly name is unknown instead of
         // degrading every newer iPhone to the generic string "iPhone".
         let values: [(AVMetadataIdentifier, String)] = [
@@ -53,8 +48,6 @@ enum CameraMovieMetadata {
             intent.value = NSNumber(value: 0)
             result.append(intent)
         }
-        AppEventLog.deepEvent("MOVIE METADATA READY", category: .recording,
-                              fields: ["itemCount": String(result.count)])
         return result
     }
 }

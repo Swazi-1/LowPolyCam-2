@@ -6,17 +6,10 @@ enum ClipFrameDiagnostics {
     private static let batchSize = 512
 
     static func inspect(_ url: URL, completion: @escaping (Int?) -> Void) {
-        let traceID = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("CLIP-FRAMES") : nil
-        let queuedAt = ProcessInfo.processInfo.systemUptime
-        AppEventLog.deepEvent("CLIP FRAME INSPECTION QUEUED", category: .recording, traceID: traceID,
-                              fields: ["file": url.lastPathComponent])
         queue.async {
-            let startedAt = ProcessInfo.processInfo.systemUptime
             do {
                 let asset = AVURLAsset(url: url)
                 guard let track = asset.tracks(withMediaType: .video).first else {
-                    AppEventLog.event("CLIP FRAME INSPECTION FAILED", category: .recording, level: .warning, traceID: traceID,
-                                      fields: ["reason": "no video track"])
                     completion(nil)
                     return
                 }
@@ -82,17 +75,8 @@ enum ClipFrameDiagnostics {
                     completion(nil)
                     return
                 }
-                AppEventLog.deepEvent("CLIP FRAME INSPECTION COMPLETE", category: .recording, traceID: traceID, fields: [
-                    "gapCount": String(gapCount),
-                    "validIntervals": String(validIntervals),
-                    "nominalFPS": String(format: "%.2f", track.nominalFrameRate),
-                    "expectedCadenceMs": String(format: "%.3f", expectedCadence * 1000),
-                    "queueWaitMs": String(format: "%.2f", (startedAt - queuedAt) * 1000),
-                    "workMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-                ])
                 completion(gapCount)
             } catch {
-                AppEventLog.log(error: error, prefix: "CLIP FRAME INSPECTION ERROR", category: .recording, traceID: traceID)
                 completion(nil)
             }
         }

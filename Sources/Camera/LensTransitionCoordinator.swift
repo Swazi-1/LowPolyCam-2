@@ -31,9 +31,14 @@ final class LensTransitionCoordinator {
     private let zoomRequests: RequestToken
     private let onTransitioningChanged: (Bool) -> Void
     private var activeRequestID: UInt64?
-    private var activeTraceStart: TimeInterval?
+    private var pendingPhysicalHandoffWorkItem: DispatchWorkItem?
+    private var pendingPhysicalHandoffRequestID: UInt64?
 
-    private func traceID(_ requestID: UInt64) -> String { "ZOOM-\(requestID)" }
+    // A drag can cross the physical-lens boundary many times per second. Waiting for a few
+    // frames lets the request stream settle so an expensive AVCaptureSession rebuild is only
+    // started for the newest target instead of repeatedly preparing/superseding old handoffs.
+    private let physicalHandoffDebounce: Double = 0.055
+    private let physicalCoverLeadIn: Double = 0.090
 
     init(
         sessionQueue: DispatchQueue,
@@ -54,12 +59,7 @@ final class LensTransitionCoordinator {
     }
 
     func takeOwnership(of requestID: UInt64) {
-        let previous = activeRequestID
         activeRequestID = requestID
-        AppEventLog.deepEvent("LENS TRANSITION OWNERSHIP", category: .lens, traceID: traceID(requestID), fields: [
-            "previousRequest": previous.map(String.init) ?? "none",
-            "newRequest": String(requestID)
-        ])
     }
 
     func shouldUseCoveredPhysicalHandoff(
@@ -159,24 +159,9 @@ final class LensTransitionCoordinator {
         selectedVideoCodec: String,
         formatSelector: CameraFormatSelector
     ) -> PreparedTransition? {
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let trace = traceID(request.id)
-        AppEventLog.deepEvent("PHYSICAL LENS PREPARATION START", category: .lens, traceID: trace, fields: [
-            "requestedZoom": String(format: "%.3f", Double(request.requestedZoom)),
-            "mode": request.mode.rawValue,
-            "targetDeviceID": request.targetDeviceID,
-            "currentDeviceID": currentDeviceID ?? "none"
-        ])
-        guard request.position == .back else {
-            AppEventLog.guardRejected("preparePhysicalHandoff", reason: "not rear camera", traceID: trace)
-            return nil
-        }
+        guard request.position == .back else { return nil }
         let physicalDevices = devices.filter { !$0.isVirtualDevice }
-        guard let device = physicalDevices.first(where: { $0.uniqueID == request.targetDeviceID }) else {
-            AppEventLog.guardRejected("preparePhysicalHandoff", reason: "target physical device not found", traceID: trace,
-                                      fields: ["physicalDevices": physicalDevices.map(\.localizedName).joined(separator: ",")])
-            return nil
-        }
+        guard let device = physicalDevices.first(where: { $0.uniqueID == request.targetDeviceID }) else { return nil }
 
         let selectedFormat: AVCaptureDevice.Format?
         let frameRate: Double
@@ -204,32 +189,17 @@ final class LensTransitionCoordinator {
         case .photo:
             return nil
         }
-        guard let selectedFormat else {
-            AppEventLog.guardRejected("preparePhysicalHandoff", reason: "no matching target format", traceID: trace,
-                                      fields: ["device": device.localizedName])
-            return nil
-        }
+        guard let selectedFormat else { return nil }
 
         var replacementInput: AVCaptureDeviceInput?
         if currentDeviceID != device.uniqueID {
             do {
-                let inputStart = ProcessInfo.processInfo.systemUptime
                 replacementInput = try AVCaptureDeviceInput(device: device)
-                AppEventLog.deepEvent("PHYSICAL LENS INPUT PREPARED", category: .lens, traceID: trace,
-                                      fields: ["durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - inputStart) * 1000)])
             } catch {
-                AppEventLog.log(error: error, prefix: "PHYSICAL LENS INPUT PREPARATION FAILED", category: .lens, traceID: trace)
                 return nil
             }
         }
 
-        let dimensions = CMVideoFormatDescriptionGetDimensions(selectedFormat.formatDescription)
-        AppEventLog.deepEvent("PHYSICAL LENS PREPARATION COMPLETE", category: .lens, traceID: trace, fields: [
-            "device": device.localizedName,
-            "format": "\(dimensions.width)x\(dimensions.height)@\(String(format: "%.1f", frameRate))",
-            "replacementInput": String(replacementInput != nil),
-            "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-        ])
         return PreparedTransition(
             request: request,
             device: device,
@@ -247,21 +217,8 @@ final class LensTransitionCoordinator {
         applyZoom: @escaping (Request, AVCaptureDevice) -> Bool,
         onFailure: @escaping () -> Void
     ) {
-        let trace = traceID(request.id)
-        AppEventLog.deepEvent("VIRTUAL LENS HANDOFF REQUEST", category: .lens, traceID: trace, fields: [
-            "device": device.localizedName,
-            "requestedZoom": String(format: "%.3f", Double(request.requestedZoom)),
-            "deviceZoomBefore": String(format: "%.3f", Double(device.videoZoomFactor))
-        ])
-        guard device.uniqueID == request.targetDeviceID else {
-            AppEventLog.guardRejected("beginVirtualHandoff", reason: "device ID changed", traceID: trace,
-                                      fields: ["actualDeviceID": device.uniqueID, "targetDeviceID": request.targetDeviceID])
-            return
-        }
-        guard initialValidate(request, device) else {
-            AppEventLog.guardRejected("beginVirtualHandoff", reason: "initial validation failed", traceID: trace)
-            return
-        }
+        guard device.uniqueID == request.targetDeviceID,
+              initialValidate(request, device) else { return }
 
         beginCover(for: request.id)
 
@@ -269,42 +226,23 @@ final class LensTransitionCoordinator {
         // the requested value. AVFoundation keeps the same input/session and performs the constituent
         // camera handoff internally, which is the fast path used by its virtual camera architecture.
         sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self, weak device] in
-            guard let self, let device else { return }
-            guard self.isActive(request.id) else {
-                AppEventLog.guardRejected("virtual lens delayed apply", reason: "transition no longer active", traceID: trace)
-                return
-            }
-            guard self.zoomRequests.isLatest(request.id) else { return }
-            guard delayedValidate(request, device) else {
-                AppEventLog.guardRejected("virtual lens delayed apply", reason: "delayed validation failed", traceID: trace)
-                return
-            }
-            AppEventLog.deepEvent("VIRTUAL LENS APPLY BEGIN", category: .lens, traceID: trace,
-                                  fields: ["deviceZoomBefore": String(format: "%.3f", Double(device.videoZoomFactor))])
+            guard let self, let device,
+                  self.isActive(request.id),
+                  self.zoomRequests.isLatest(request.id),
+                  delayedValidate(request, device) else { return }
 
             guard applyZoom(request, device) else {
-                AppEventLog.event("VIRTUAL LENS APPLY FAILED", category: .lens, level: .error, traceID: trace)
                 self.finish(request.id, revealDelay: 0)
                 onFailure()
                 return
             }
 
-            guard self.isActive(request.id), self.zoomRequests.isLatest(request.id) else { return }
-            AppEventLog.deepEvent("VIRTUAL LENS APPLY READBACK", category: .lens, traceID: trace, fields: [
-                "device": device.localizedName,
-                "deviceZoomAfter": String(format: "%.3f", Double(device.videoZoomFactor)),
-                "requestedDisplayedZoom": String(format: "%.3f", Double(request.requestedZoom))
-            ])
+            guard self.isActive(request.id),
+                  self.zoomRequests.isLatest(request.id) else { return }
 
-            // Do not reveal on a fixed timer. Even a virtual constituent switch can briefly drive
-            // AE/AWB while the ISP converges on the new optical path. Wait for a short minimum hold
-            // plus consecutive settled device-state checks, with a bounded fallback.
-            self.finishWhenDeviceSettled(
-                request.id,
-                device: device,
-                minimumHold: 0.08,
-                maximumHold: 0.28
-            )
+            // Keep the blur over the short optical/ISP constituent change. No format/input rebuild
+            // happens here, so this stays close to the system camera's fast switch behavior.
+            self.finish(request.id, revealDelay: 0.04)
         }
     }
 
@@ -323,203 +261,109 @@ final class LensTransitionCoordinator {
         onPreparationFailure: @escaping () -> Void,
         onApplyFailure: @escaping () -> Void
     ) {
-        let trace = traceID(request.id)
-        AppEventLog.deepEvent("PHYSICAL LENS HANDOFF REQUEST", category: .lens, traceID: trace, fields: [
-            "requestedZoom": String(format: "%.3f", Double(request.requestedZoom)),
-            "targetDeviceID": request.targetDeviceID,
-            "currentDeviceID": currentDeviceID ?? "none",
-            "mode": request.mode.rawValue
-        ])
-        // Do the format lookup and AVCaptureDeviceInput creation while the old preview is still
-        // fully live. The visible transition then contains only the unavoidable hardware commit.
-        guard let prepared = preparePhysicalHandoff(
-            request,
-            devices: devices,
-            currentDeviceID: currentDeviceID,
-            selectedResolution: selectedResolution,
-            selectedFrameRate: selectedFrameRate,
-            selectedSlowMotionResolution: selectedSlowMotionResolution,
-            selectedSlowMotionFrameRate: selectedSlowMotionFrameRate,
-            selectedVideoCodec: selectedVideoCodec,
-            formatSelector: formatSelector
-        ) else {
-            AppEventLog.event("PHYSICAL LENS PREPARATION FAILED", category: .lens, level: .warning, traceID: trace)
-            onPreparationFailure()
-            return
-        }
+        // Physical input swaps are much more expensive than ordinary digital zoom. Coalesce a burst
+        // of boundary crossings first; otherwise a 60/120 Hz drag can create several prepared
+        // handoffs that are obsolete before commitConfiguration() even starts.
+        pendingPhysicalHandoffWorkItem?.cancel()
+        pendingPhysicalHandoffRequestID = request.id
 
-        beginCover(for: request.id)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pendingPhysicalHandoffRequestID == request.id else { return }
 
-        // The PreviewView blur animates in during this short lead-in. Unlike the old generic path,
-        // expensive capability scans/input creation have already finished before the cover appears.
-        sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self] in
-            guard let self else { return }
-            guard self.isActive(request.id) else {
-                // A newer zoom request owns the cover now. This is the expected cancellation path
-                // during a fast drag, not a failed hardware apply; keep it in Extreme trace data
-                // without inflating the warning count or presenting a false failure.
-                AppEventLog.deepEvent("PHYSICAL LENS APPLY SUPERSEDED", category: .lens, traceID: trace,
-                                      fields: ["reason": "transition no longer active"])
-                return
-            }
+            // Clear this exact scheduled handoff even if a newer same-lens zoom made it stale.
+            // That prevents the coordinator from retaining an already-finished work item until the
+            // next camera transition.
+            self.pendingPhysicalHandoffWorkItem = nil
+            self.pendingPhysicalHandoffRequestID = nil
             guard self.zoomRequests.isLatest(request.id) else { return }
 
-            let applyStart = ProcessInfo.processInfo.systemUptime
-            AppEventLog.deepEvent("PHYSICAL LENS HARDWARE COMMIT BEGIN", category: .lens, traceID: trace,
-                                  fields: ["targetDevice": prepared.device.localizedName])
-            let applied = applyPrepared(prepared)
-            AppEventLog.deepEvent("PHYSICAL LENS HARDWARE COMMIT END", category: .lens, traceID: trace, fields: [
-                "applied": String(applied),
-                "durationMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - applyStart) * 1000),
-                "deviceZoomReadback": String(format: "%.3f", Double(prepared.device.videoZoomFactor))
-            ])
-            if !applied {
-                // A zoom gesture can produce a newer request while 4K60 is blocked inside
-                // commitConfiguration(). That makes this request stale without meaning the camera
-                // transaction failed. Keep the existing cover alive and let the newer queued zoom
-                // request take ownership instead of showing a false transition error.
-                if !self.isActive(request.id) || !self.zoomRequests.isLatest(request.id) {
+            // Do the format lookup and AVCaptureDeviceInput creation while the old preview is still
+            // fully live. The visible transition then contains only the unavoidable hardware commit.
+            guard let prepared = self.preparePhysicalHandoff(
+                request,
+                devices: devices,
+                currentDeviceID: currentDeviceID,
+                selectedResolution: selectedResolution,
+                selectedFrameRate: selectedFrameRate,
+                selectedSlowMotionResolution: selectedSlowMotionResolution,
+                selectedSlowMotionFrameRate: selectedSlowMotionFrameRate,
+                selectedVideoCodec: selectedVideoCodec,
+                formatSelector: formatSelector
+            ) else {
+                if self.zoomRequests.isLatest(request.id) {
+                    onPreparationFailure()
+                }
+                return
+            }
+
+            guard self.zoomRequests.isLatest(request.id) else { return }
+            self.beginCover(for: request.id)
+
+            // PreviewView takes ~75 ms to build its blur/frozen cover. Never start the blocking
+            // session commit while that cover is still fading in; doing so exposes the large first
+            // frame luminance jump that occurs when the ISP changes physical sensors.
+            self.sessionQueue.asyncAfter(deadline: .now() + self.physicalCoverLeadIn) { [weak self] in
+                guard let self,
+                      self.isActive(request.id),
+                      self.zoomRequests.isLatest(request.id) else { return }
+
+                let applied = applyPrepared(prepared)
+                if !applied {
+                    // A zoom gesture can produce a newer request while 4K60 is blocked inside
+                    // commitConfiguration(). That makes this request stale without meaning the camera
+                    // transaction failed. Keep the existing cover alive and let the newer queued zoom
+                    // request take ownership instead of showing a false transition error.
+                    if !self.isActive(request.id) || !self.zoomRequests.isLatest(request.id) {
+                        return
+                    }
+
+                    recoverAfterFailedApply(request)
+                    self.finish(request.id, revealDelay: 0)
+                    onApplyFailure()
                     return
                 }
 
-                AppEventLog.event("PHYSICAL LENS APPLY FAILED", category: .lens, level: .error, traceID: trace)
-                recoverAfterFailedApply(request)
-                self.finish(request.id, revealDelay: 0)
-                onApplyFailure()
-                return
+                guard self.isActive(request.id) else { return }
+
+                // The hardware switch itself succeeded. If another zoom request arrived while the slow
+                // commit was in progress, do not reveal the old target or call it a failure. The newer
+                // request will apply its final zoom/lens behind this same cover.
+                guard self.zoomRequests.isLatest(request.id) else { return }
+
+                // Keep the cover through the first part of the new stream settling. PreviewView also
+                // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
+                // can remain true across an input rebuild.
+                self.finish(request.id, revealDelay: 0.06)
             }
-
-            guard self.isActive(request.id) else { return }
-
-            // The hardware switch itself succeeded. If another zoom request arrived while the slow
-            // 4K60 commit was in progress, do not reveal the old target or call it a failure. The
-            // newer request is already queued on sessionQueue and will apply its final zoom/lens
-            // behind this same cover before it becomes responsible for the reveal.
-            guard self.zoomRequests.isLatest(request.id) else { return }
-
-            // The diagnostic trace showed the new physical sensor making a large exposure/luma
-            // correction after commitConfiguration() returned. A fixed 40 ms reveal can therefore
-            // expose that correction. Hold the cover until AE/AWB/zoom report settled for several
-            // consecutive checks, while retaining a bounded timeout so the UI can never get stuck.
-            self.finishWhenDeviceSettled(
-                request.id,
-                device: prepared.device,
-                minimumHold: 0.10,
-                maximumHold: 0.36
-            )
         }
-    }
 
-    func finishWhenDeviceSettled(
-        _ requestID: UInt64,
-        device: AVCaptureDevice,
-        minimumHold: TimeInterval = 0.10,
-        maximumHold: TimeInterval = 0.36,
-        stableChecksRequired: Int = 3
-    ) {
-        guard activeRequestID == requestID, zoomRequests.isLatest(requestID) else { return }
-        let trace = traceID(requestID)
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let minimumDeadline = startedAt + max(0, minimumHold)
-        let maximumDeadline = startedAt + max(minimumHold, maximumHold)
-        let requiredChecks = max(1, stableChecksRequired)
-        AppEventLog.deepEvent("LENS SENSOR SETTLE WAIT", category: .lens, traceID: trace, fields: [
-            "device": device.localizedName,
-            "minimumHoldMs": String(format: "%.0f", max(0, minimumHold) * 1000),
-            "maximumHoldMs": String(format: "%.0f", max(minimumHold, maximumHold) * 1000),
-            "stableChecksRequired": String(requiredChecks)
-        ])
-        pollDeviceSettle(
-            requestID,
-            device: device,
-            startedAt: startedAt,
-            minimumDeadline: minimumDeadline,
-            maximumDeadline: maximumDeadline,
-            stableChecks: 0,
-            stableChecksRequired: requiredChecks
-        )
-    }
-
-    private func pollDeviceSettle(
-        _ requestID: UInt64,
-        device: AVCaptureDevice,
-        startedAt: TimeInterval,
-        minimumDeadline: TimeInterval,
-        maximumDeadline: TimeInterval,
-        stableChecks: Int,
-        stableChecksRequired: Int
-    ) {
-        sessionQueue.asyncAfter(deadline: .now() + 0.016) { [weak self, weak device] in
-            guard let self, let device,
-                  self.activeRequestID == requestID,
-                  self.zoomRequests.isLatest(requestID) else { return }
-
-            let now = ProcessInfo.processInfo.systemUptime
-            let exposureSettled = !device.isAdjustingExposure
-            let whiteBalanceSettled = !device.isAdjustingWhiteBalance
-            let zoomSettled = !device.isRampingVideoZoom
-            let eligible = now >= minimumDeadline && exposureSettled && whiteBalanceSettled && zoomSettled
-            let nextStableChecks = eligible ? stableChecks + 1 : 0
-            let timedOut = now >= maximumDeadline
-
-            if nextStableChecks >= stableChecksRequired || timedOut {
-                AppEventLog.deepEvent("LENS SENSOR SETTLE COMPLETE", category: .lens, traceID: self.traceID(requestID), fields: [
-                    "device": device.localizedName,
-                    "elapsedMs": String(format: "%.2f", (now - startedAt) * 1000),
-                    "stableChecks": String(nextStableChecks),
-                    "timedOut": String(timedOut),
-                    "adjustingExposure": String(device.isAdjustingExposure),
-                    "adjustingWhiteBalance": String(device.isAdjustingWhiteBalance),
-                    "rampingZoom": String(device.isRampingVideoZoom)
-                ])
-                self.finish(requestID, revealDelay: 0)
-                return
-            }
-
-            self.pollDeviceSettle(
-                requestID,
-                device: device,
-                startedAt: startedAt,
-                minimumDeadline: minimumDeadline,
-                maximumDeadline: maximumDeadline,
-                stableChecks: nextStableChecks,
-                stableChecksRequired: stableChecksRequired
-            )
-        }
+        pendingPhysicalHandoffWorkItem = workItem
+        sessionQueue.asyncAfter(deadline: .now() + physicalHandoffDebounce, execute: workItem)
     }
 
     func finish(_ requestID: UInt64, revealDelay: Double) {
-        let trace = traceID(requestID)
-        AppEventLog.deepEvent("LENS COVER REVEAL SCHEDULED", category: .lens, traceID: trace,
-                              fields: ["delayMs": String(format: "%.1f", revealDelay * 1000)])
         sessionQueue.asyncAfter(deadline: .now() + revealDelay) { [weak self] in
             guard let self,
                   self.activeRequestID == requestID,
                   self.zoomRequests.isLatest(requestID) else { return }
             self.activeRequestID = nil
-            let total = self.activeTraceStart.map { (ProcessInfo.processInfo.systemUptime - $0) * 1000 }
-            self.activeTraceStart = nil
             self.onTransitioningChanged(false)
-            AppEventLog.deepEvent("LENS TRANSITION FINISHED", category: .lens, traceID: trace,
-                                  fields: ["totalMs": total.map { String(format: "%.2f", $0) } ?? "unknown"])
         }
     }
 
     func cancel() {
-        guard let requestID = activeRequestID else { return }
+        pendingPhysicalHandoffWorkItem?.cancel()
+        pendingPhysicalHandoffWorkItem = nil
+        pendingPhysicalHandoffRequestID = nil
+
+        guard activeRequestID != nil else { return }
         activeRequestID = nil
-        activeTraceStart = nil
         onTransitioningChanged(false)
-        AppEventLog.deepEvent("LENS TRANSITION CANCELED", category: .lens, traceID: traceID(requestID))
     }
 
     private func beginCover(for requestID: UInt64) {
-        let previous = activeRequestID
         activeRequestID = requestID
-        activeTraceStart = ProcessInfo.processInfo.systemUptime
-        AppEventLog.deepEvent("LENS COVER BEGIN", category: .lens, traceID: traceID(requestID), fields: [
-            "previousRequest": previous.map(String.init) ?? "none"
-        ])
         if zoomRequests.isLatest(requestID) {
             onTransitioningChanged(true)
         }

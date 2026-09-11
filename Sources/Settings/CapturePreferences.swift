@@ -16,26 +16,7 @@ enum VideoCompression: String, CaseIterable, Identifiable {
     case dataSaver = "Data Saver", medium = "Medium", high = "High"
     var id: String { rawValue }
     var bitsPerPixel: Double {
-        switch self {
-        case .dataSaver: return 0.055
-        case .medium: return 0.10
-        case .high: return 0.18
-        }
-    }
-}
-
-enum CameraAccentPalette {
-    static let names = ["Ice", "Sunset", "Mint", "Lavender", "Coral", "Custom"]
-
-    static func color(for name: String, red: Double = 0.55, green: Double = 0.85, blue: Double = 1.0) -> Color {
-        switch name {
-        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
-        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
-        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
-        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
-        case "Custom": return Color(red: red, green: green, blue: blue)
-        default: return Color(red: 0.65, green: 0.88, blue: 1)
-        }
+        switch self { case .dataSaver: return 0.055; case .medium: return 0.10; case .high: return 0.18 }
     }
 }
 
@@ -58,39 +39,17 @@ enum CameraHaptics {
     private static let light = UIImpactFeedbackGenerator(style: .light)
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let heavy = UIImpactFeedbackGenerator(style: .heavy)
-
-    private static var isEnabled: Bool {
-        let stored = UserDefaults.standard.object(forKey: "hapticCaptureEnabled")
-        return (stored as? Bool) ?? true
-    }
-
-    /// Master entry point for every app-generated haptic. Keeping the preference check here
-    /// guarantees controls, capture, countdown, and future haptics all respect the same switch.
-    static func fire(strength selectedStrength: String? = nil) {
+    static func fire(strength selectedStrength: String? = nil, captureOnly: Bool = false) {
         let defaults = UserDefaults.standard
+        if captureOnly, !(defaults.object(forKey: "hapticCaptureEnabled") as? Bool ?? true) { return }
         let strength = selectedStrength ?? defaults.string(forKey: "hapticStrength") ?? "Medium"
-        guard isEnabled else {
-            AppEventLog.deepEvent("HAPTIC SUPPRESSED", category: .ui, fields: [
-                "reason": "master disabled",
-                "strength": strength
-            ])
-            return
-        }
-        AppEventLog.deepEvent("HAPTIC REQUEST", category: .ui, fields: ["strength": strength])
+        // Reapply this when feedback is requested because iOS does not expose a reliable
+        // notification for a hardware mute-switch change while the app remains open.
         try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
         let generator = strength == "Low" ? light : strength == "Strong" ? heavy : medium
         generator.prepare()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-            // The user can disable haptics while this short prepared-feedback delay is pending.
-            guard isEnabled else {
-                AppEventLog.deepEvent("HAPTIC SUPPRESSED", category: .ui, fields: [
-                    "reason": "master disabled during delay",
-                    "strength": strength
-                ])
-                return
-            }
             generator.impactOccurred(intensity: strength == "Low" ? 0.45 : strength == "Strong" ? 1 : 0.7)
-            AppEventLog.deepEvent("HAPTIC FIRED", category: .ui, fields: ["strength": strength])
         }
     }
 }
@@ -100,261 +59,234 @@ struct CameraAccent: DynamicProperty {
     @AppStorage("iconCustomRed") private var red = 0.55
     @AppStorage("iconCustomGreen") private var green = 0.85
     @AppStorage("iconCustomBlue") private var blue = 1.0
-
-    var color: Color { CameraAccentPalette.color(for: preset, red: red, green: green, blue: blue) }
+    var color: Color {
+        switch preset {
+        case "Sunset": return Color(red: 1, green: 0.58, blue: 0.3)
+        case "Mint": return Color(red: 0.4, green: 0.95, blue: 0.7)
+        case "Lavender": return Color(red: 0.77, green: 0.64, blue: 1)
+        case "Coral": return Color(red: 1.0, green: 0.43, blue: 0.48)
+        case "Custom": return Color(red: red, green: green, blue: blue)
+        default: return Color(red: 0.65, green: 0.88, blue: 1)
+        }
+    }
 }
 
 struct CapturePreferencesView: View {
     @ObservedObject var camera: CameraManager
-    @AppStorage("shutterDelay") private var shutterDelay = 0
-    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
-    @AppStorage("tapZoomReset") private var tapZoomReset = true
-    @AppStorage("focusExposureLockMode") private var focusExposureLockMode = "AE/AF"
-    @AppStorage("tapFocusResetSeconds") private var tapFocusResetSeconds = 1
-    @AppStorage("recordingLock") private var recordingLock = false
-    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
-    @AppStorage("mirrorSelfies") private var mirrorSelfies = false
-    @AppStorage("hapticCaptureEnabled") private var hapticCaptureEnabled = true
-    @AppStorage("hapticStrength") private var hapticStrength = "Medium"
-    @AppStorage("countdownHaptics") private var countdownHaptics = false
+    init(camera: CameraManager) { self.camera = camera }
+    @AppStorage("appColorScheme") private var appColorScheme = "system"
 
     var body: some View {
-        List {
-            Section("SHUTTER") {
-                Picker("Timer", selection: $shutterDelay) {
-                    Text("Off").tag(0)
-                    Text("3 seconds").tag(3)
-                    Text("10 seconds").tag(10)
+        SettingsPage {
+            SettingsCard(title: "Capture Settings", symbol: "camera.fill") {
+                NavigationLink {
+                    ShutterHapticsSettingsView()
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Shutter & Haptics",
+                        subtitle: "Timer, feedback and strength",
+                        symbol: "timer"
+                    )
                 }
-                .pickerStyle(.menu)
+                .buttonStyle(.plain)
+
+                SettingsDivider()
+
+                NavigationLink {
+                    ZoomRecordingSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Zoom & Recording",
+                        subtitle: "Zoom feel and capture safeguards",
+                        symbol: "plus.magnifyingglass"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                SettingsDivider()
+
+                NavigationLink {
+                    CameraControlsSettingsView(camera: camera)
+                } label: {
+                    SettingsNavigationRow(
+                        title: "Camera Controls",
+                        subtitle: "Mode memory, guides and reset",
+                        symbol: "slider.horizontal.3"
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .preferredColorScheme(resolvedColorScheme(appColorScheme))
+        .navigationTitle("Capture")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ShutterHapticsSettingsView: View {
+    @AppStorage("shutterDelay") private var shutterDelay = 0
+    @AppStorage("hapticCaptureEnabled") private var haptics = true
+    @AppStorage("hapticStrength") private var strength = "Medium"
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Shutter", symbol: "timer") {
+                ThemeMenu(title: "Timer", selection: $shutterDelay, options: [(0, "Off"), (3, "3 seconds"), (10, "10 seconds")])
             }
 
-            Section("ZOOM") {
-                Picker("Zoom Speed", selection: $zoomSpeed) {
-                    Text("Slow").tag(0.5)
-                    Text("Normal").tag(1.0)
-                    Text("Fast").tag(1.5)
-                }
-                .pickerStyle(.menu)
-                HapticFreeSettingsToggle(isOn: $tapZoomReset) {
-                    Text("Tap Zoom to Reset")
-                }
-            }
-
-            Section {
-                Picker("Lock Mode", selection: $focusExposureLockMode) {
-                    Text("AE/AF · Focus + exposure").tag("AE/AF")
-                    Text("AE only · Exposure").tag("AE Only")
-                    Text("AF only · Focus").tag("AF Only")
-                }
-                .pickerStyle(.menu)
-
-                Picker("Tap Focus Reset", selection: $tapFocusResetSeconds) {
-                    Text("1 second").tag(1)
-                    Text("3 seconds").tag(3)
-                    Text("5 seconds").tag(5)
-                    Text("Never").tag(0)
-                }
-                .pickerStyle(.menu)
-            } header: {
-                Text("FOCUS & EXPOSURE")
-            } footer: {
-                Text("Long-press the preview: AE locks exposure, AF locks focus, and AE/AF locks both.")
-            }
-
-            Section {
-                HapticFreeSettingsToggle(isOn: $recordingLock) {
-                    Text("Lock Recording Controls")
-                }
-                HapticFreeSettingsToggle(isOn: $lowStorageWarning) {
-                    Text("Low Storage Warning")
-                }
-            } header: {
-                Text("RECORDING SAFEGUARDS")
-            } footer: {
-                Text("The optional warning appears below 1 GB. Critical low-storage protection remains active even when the warning is off.")
-            }
-
-            Section {
-                Picker("White Balance", selection: whiteBalanceBinding) {
-                    ForEach(CameraManager.WhiteBalancePreset.allCases) { preset in
-                        Text(preset.rawValue).tag(preset)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                if camera.whiteBalancePreset == .custom {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Temperature")
-                            Spacer()
-                            Text(String(format: "%.0f K", camera.customWhiteBalanceTemperature))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { camera.customWhiteBalanceTemperature },
-                                set: {
-                                    camera.setCustomWhiteBalance(
-                                        temperature: $0,
-                                        tint: camera.customWhiteBalanceTint,
-                                        isFinal: false
-                                    )
-                                }
-                            ),
-                            in: WhiteBalancePreferencePolicy.minimumTemperature...WhiteBalancePreferencePolicy.maximumTemperature,
-                            step: 50,
-                            onEditingChanged: { editing in
-                                if editing {
-                                    camera.beginCustomWhiteBalanceInteraction()
-                                } else {
-                                    camera.endCustomWhiteBalanceInteraction()
-                                }
-                            }
-                        )
-
-                        HStack {
-                            Text("Tint")
-                            Spacer()
-                            Text(String(format: "%+.0f", camera.customWhiteBalanceTint))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { camera.customWhiteBalanceTint },
-                                set: {
-                                    camera.setCustomWhiteBalance(
-                                        temperature: camera.customWhiteBalanceTemperature,
-                                        tint: $0,
-                                        isFinal: false
-                                    )
-                                }
-                            ),
-                            in: WhiteBalancePreferencePolicy.minimumTint...WhiteBalancePreferencePolicy.maximumTint,
-                            step: 1,
-                            onEditingChanged: { editing in
-                                if editing {
-                                    camera.beginCustomWhiteBalanceInteraction()
-                                } else {
-                                    camera.endCustomWhiteBalanceInteraction()
-                                }
-                            }
-                        )
-
-                        Button {
-                            CameraHaptics.fire()
-                            camera.setCustomWhiteBalance(
-                                temperature: WhiteBalancePreferencePolicy.defaultTemperature,
-                                tint: 0
-                            )
-                        } label: {
-                            Label("Reset Custom WB", systemImage: "arrow.counterclockwise")
-                        }
-                        .padding(.top, 10)
-                    }
-                }
-            } header: {
-                Text("WHITE BALANCE")
-            } footer: {
-                Text("Custom White Balance uses 2,500–10,000 K and tint from −150 to +150. Reset returns to 5,200 K and 0 tint without switching to Auto.")
-            }
-
-            Section {
-                HStack {
-                    Label("Torch Brightness", systemImage: "bolt.fill")
-                    Spacer()
-                    Text(String(format: "%.0f%%", camera.torchBrightnessLevel * 100))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(
-                    value: Binding(
-                        get: { camera.torchBrightnessLevel },
-                        set: { camera.setTorchBrightness($0, isFinal: false) }
-                    ),
-                    in: TorchLevelPolicy.minimumNormalizedLevel...TorchLevelPolicy.maximumNormalizedLevel,
-                    step: 0.01,
-                    onEditingChanged: { editing in
-                        if editing {
-                            camera.beginTorchBrightnessInteraction()
-                        } else {
-                            camera.endTorchBrightnessInteraction()
-                        }
-                    }
+            SettingsCard(title: "Capture Haptics", symbol: "waveform") {
+                SettingsToggleRow(
+                    title: "Haptic Capture",
+                    subtitle: "Feel a tap when the shutter starts or stops",
+                    isOn: $haptics
                 )
-                .disabled(!camera.torchAvailable || !camera.torchBrightnessSupported)
-                if !camera.torchAvailable {
-                    Text("Torch unavailable for the current camera or configuration.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("TORCH")
-            } footer: {
-                Text("Brightness is a normalized 5–100% request. The active camera may apply a lower thermal maximum or fall back to its supported torch level.")
+                SettingsDivider()
+                ThemeMenu(
+                    title: "Strength",
+                    selection: $strength,
+                    options: ["Low", "Medium", "Strong"].map { ($0, $0) },
+                    onSelect: { CameraHaptics.fire(strength: $0) }
+                )
+                .disabled(!haptics)
+            }
+        }
+        .navigationTitle("Shutter & Haptics")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ZoomRecordingSettingsView: View {
+    @ObservedObject var camera: CameraManager
+    @AppStorage("zoomSpeed") private var zoomSpeed = 1.0
+    @AppStorage("tapZoomReset") private var tapZoomReset = true
+    @AppStorage("recordingLock") private var recordingLock = false
+    @AppStorage("lowStorageWarning") private var lowStorageWarning = true
+
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Zoom", symbol: "plus.magnifyingglass") {
+                ThemeMenu(title: "Zoom Speed", selection: $zoomSpeed, options: [(0.5, "Slow"), (1.0, "Normal"), (1.5, "Fast")])
+                SettingsDivider()
+                SettingsToggleRow(
+                    title: "Tap Zoom to Reset",
+                    subtitle: "Tap the zoom value to return to 1×",
+                    isOn: $tapZoomReset
+                )
             }
 
-            Section("HAPTICS") {
-                HapticFreeSettingsToggle(isOn: $hapticCaptureEnabled) {
-                    SettingsToggleLabel(
-                        symbol: "waveform.path.ecg",
-                        color: .orange,
-                        title: "Haptics",
-                        subtitle: "Enable haptic feedback throughout LowPolyCam."
+            SettingsCard(title: "Capture Safeguards", symbol: "lock.shield.fill") {
+                if camera.captureMode != .photo {
+                    SettingsToggleRow(
+                        title: "Lock Recording Controls",
+                        subtitle: "Hold the shutter for one second to stop",
+                        isOn: $recordingLock
                     )
+                    SettingsDivider()
                 }
+                SettingsToggleRow(
+                    title: "Low Storage Warning",
+                    subtitle: "Warn before storage gets too low",
+                    isOn: $lowStorageWarning
+                )
+            }
+        }
+        .navigationTitle("Zoom & Recording")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
 
-                Picker("Haptic Strength", selection: $hapticStrength) {
-                    Text("Low").tag("Low")
-                    Text("Medium").tag("Medium")
-                    Text("Strong").tag("Strong")
-                }
-                .pickerStyle(.menu)
-                .disabled(!hapticCaptureEnabled)
-                .onChange(of: hapticStrength) { _, newValue in
-                    guard hapticCaptureEnabled else { return }
-                    CameraHaptics.fire(strength: newValue)
-                }
+private struct CameraControlsSettingsView: View {
+    @Environment(\.cameraTint) private var theme
+    @ObservedObject var camera: CameraManager
+    @AppStorage("countdownHaptics") private var countdownHaptics = false
+    @AppStorage("rememberCaptureMode") private var rememberCaptureMode = false
+    @AppStorage("centerCrosshair") private var crosshair = false
+    @AppStorage("mirrorSelfies") private var mirrorSelfies = false
 
-                HapticFreeSettingsToggle(isOn: $countdownHaptics) {
-                    SettingsToggleLabel(
-                        symbol: "timer",
-                        color: .orange,
-                        title: "Countdown Haptics",
-                        subtitle: "Add feedback during the photo timer countdown."
-                    )
-                }
-                .disabled(!hapticCaptureEnabled)
+    var body: some View {
+        SettingsPage {
+            SettingsCard(title: "Camera Controls", symbol: "slider.horizontal.3") {
+                SettingsToggleRow(title: "Countdown Haptics", subtitle: "Tap along with the shutter timer", isOn: $countdownHaptics)
+                SettingsDivider()
+                SettingsToggleRow(title: "Remember Camera Mode", subtitle: "Open in the last used capture mode", isOn: $rememberCaptureMode)
+                SettingsDivider()
+                SettingsToggleRow(title: "Center Crosshair", subtitle: "Show a marker at the frame center", isOn: $crosshair)
+                SettingsDivider()
+                SettingsToggleRow(title: "Mirror Saved Selfies", subtitle: "Save selfies as they appear in preview", isOn: $mirrorSelfies)
             }
 
-            Section("CAMERA") {
-                HapticFreeSettingsToggle(isOn: $mirrorSelfies) {
-                    Text("Mirror Saved Selfies")
-                }
-
+            SettingsCard(title: "Reset", symbol: "arrow.counterclockwise") {
                 Button {
                     camera.setExposureBias(0)
-                    camera.setCustomWhiteBalance(
-                        temperature: WhiteBalancePreferencePolicy.defaultTemperature,
-                        tint: 0
-                    )
+                    camera.selectWhiteBalancePreset(.auto)
                 } label: {
-                    Label("Reset Exposure & White Balance", systemImage: "arrow.counterclockwise")
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(theme)
+                            .frame(width: 34, height: 34)
+                            .background(theme.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reset Exposure & WB")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Restore automatic exposure and color")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.primary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .navigationTitle("Camera Controls")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct ThemeMenu<Value: Hashable>: View {
+    @Environment(\.cameraTint) private var theme
+    let title: String
+    @Binding var selection: Value
+    let options: [(Value, String)]
+    var onSelect: ((Value) -> Void)? = nil
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.subheadline.weight(.semibold))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: min(3, max(1, options.count))), spacing: 8) {
+                ForEach(options, id: \.0) { value, label in
+                    Button {
+                        selection = value
+                        onSelect?(value)
+                    } label: {
+                        Text(label)
+                            .font(.caption.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .padding(.horizontal, 4)
+                            .background(selection == value ? theme : Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                            .foregroundStyle(selection == value ? Color.black : Color.primary)
+                            .contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                    .accessibilityAddTraits(selection == value ? .isSelected : [])
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Preferences")
-        .navigationBarTitleDisplayMode(.large)
-        .tint(.blue)
     }
+}
 
-    private var whiteBalanceBinding: Binding<CameraManager.WhiteBalancePreset> {
-        Binding(
-            get: { camera.whiteBalancePreset },
-            set: { camera.selectWhiteBalancePreset($0) }
-        )
+struct SettingsPage<Content: View>: View {
+    @Environment(\.cameraTint) private var theme
+    let content: Content
+    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) { content }
+                .padding(.horizontal, 16).padding(.vertical, 14)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .tint(theme)
     }
 }
