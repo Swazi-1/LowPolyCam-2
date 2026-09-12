@@ -1096,11 +1096,15 @@ extension CameraManager {
         }
 
         let physical = desiredPhysicalDevice(in: devices, forDisplayedZoom: requestedZoom)
-        let currentVirtual = AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera
-            ? videoInput?.device.flatMap { current in
-                current.isVirtualDevice && devices.contains(where: { $0.uniqueID == current.uniqueID }) ? current : nil
-            }
-            : nil
+        let currentVirtual: AVCaptureDevice?
+        if AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera,
+           let current = videoInput?.device,
+           current.isVirtualDevice,
+           devices.contains(where: { $0.uniqueID == current.uniqueID }) {
+            currentVirtual = current
+        } else {
+            currentVirtual = nil
+        }
         let desiredDevice = preferVirtualCamera
             ? (currentVirtual ?? devices.first(where: { $0.isVirtualDevice }) ?? physical ?? devices.first)
             : (physical ?? devices.first(where: { !$0.isVirtualDevice }) ?? devices.first)
@@ -1451,11 +1455,15 @@ extension CameraManager {
         let forcePhysical4K60 = isRear4K60 && appleStyle4K60Device == nil && !physicalSupportedDevices.isEmpty
         let lensCandidates = forcePhysical4K60 ? physicalSupportedDevices : supportedDevices
         let physical = desiredPhysicalDevice(in: lensCandidates, forDisplayedZoom: requestedZoom)
-        let currentSupportedVirtual = AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera
-            ? videoInput?.device.flatMap { current in
-                current.isVirtualDevice && supportedDevices.contains(where: { $0.uniqueID == current.uniqueID }) ? current : nil
-            }
-            : nil
+        let currentSupportedVirtual: AVCaptureDevice?
+        if AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera,
+           let current = videoInput?.device,
+           current.isVirtualDevice,
+           supportedDevices.contains(where: { $0.uniqueID == current.uniqueID }) {
+            currentSupportedVirtual = current
+        } else {
+            currentSupportedVirtual = nil
+        }
         let desiredDevice: AVCaptureDevice?
         if let appleStyle4K60Device {
             desiredDevice = currentSupportedVirtual ?? appleStyle4K60Device
