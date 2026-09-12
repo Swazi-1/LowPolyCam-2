@@ -226,10 +226,20 @@ final class LensTransitionCoordinator {
         // the requested value. AVFoundation keeps the same input/session and performs the constituent
         // camera handoff internally, which is the fast path used by its virtual camera architecture.
         sessionQueue.asyncAfter(deadline: .now() + 0.035) { [weak self, weak device] in
-            guard let self, let device,
-                  self.isActive(request.id),
-                  self.zoomRequests.isLatest(request.id),
-                  delayedValidate(request, device) else { return }
+            guard let self else { return }
+            guard self.isActive(request.id) else { return }
+            guard let device else {
+                self.abortIfOwned(request.id, reason: "virtual handoff device disappeared")
+                return
+            }
+            guard self.zoomRequests.isLatest(request.id) else {
+                self.releaseIfOrphaned(request.id)
+                return
+            }
+            guard delayedValidate(request, device) else {
+                self.abortIfOwned(request.id, reason: "virtual handoff validation changed")
+                return
+            }
 
             guard applyZoom(request, device) else {
                 self.finish(request.id, revealDelay: 0)
@@ -237,8 +247,11 @@ final class LensTransitionCoordinator {
                 return
             }
 
-            guard self.isActive(request.id),
-                  self.zoomRequests.isLatest(request.id) else { return }
+            guard self.isActive(request.id) else { return }
+            guard self.zoomRequests.isLatest(request.id) else {
+                self.releaseIfOrphaned(request.id)
+                return
+            }
 
             // Keep the blur over the short optical/ISP constituent change. No format/input rebuild
             // happens here, so this stays close to the system camera's fast switch behavior.
@@ -304,9 +317,12 @@ final class LensTransitionCoordinator {
             // session commit while that cover is still fading in; doing so exposes the large first
             // frame luminance jump that occurs when the ISP changes physical sensors.
             self.sessionQueue.asyncAfter(deadline: .now() + self.physicalCoverLeadIn) { [weak self] in
-                guard let self,
-                      self.isActive(request.id),
-                      self.zoomRequests.isLatest(request.id) else { return }
+                guard let self else { return }
+                guard self.isActive(request.id) else { return }
+                guard self.zoomRequests.isLatest(request.id) else {
+                    self.releaseIfOrphaned(request.id)
+                    return
+                }
 
                 let applied = applyPrepared(prepared)
                 if !applied {
@@ -314,7 +330,11 @@ final class LensTransitionCoordinator {
                     // commitConfiguration(). That makes this request stale without meaning the camera
                     // transaction failed. Keep the existing cover alive and let the newer queued zoom
                     // request take ownership instead of showing a false transition error.
-                    if !self.isActive(request.id) || !self.zoomRequests.isLatest(request.id) {
+                    if !self.isActive(request.id) {
+                        return
+                    }
+                    if !self.zoomRequests.isLatest(request.id) {
+                        self.releaseIfOrphaned(request.id)
                         return
                     }
 
@@ -329,7 +349,10 @@ final class LensTransitionCoordinator {
                 // The hardware switch itself succeeded. If another zoom request arrived while the slow
                 // commit was in progress, do not reveal the old target or call it a failure. The newer
                 // request will apply its final zoom/lens behind this same cover.
-                guard self.zoomRequests.isLatest(request.id) else { return }
+                guard self.zoomRequests.isLatest(request.id) else {
+                    self.releaseIfOrphaned(request.id)
+                    return
+                }
 
                 // Keep the cover through the first part of the new stream settling. PreviewView also
                 // waits for the preview layer to be rendering, but AVCaptureVideoPreviewLayer.isPreviewing
@@ -362,12 +385,15 @@ final class LensTransitionCoordinator {
 
         func poll() {
             sessionQueue.asyncAfter(deadline: .now() + 0.025) { [weak self, weak device] in
-                guard let self,
-                      self.activeRequestID == requestID,
-                      self.zoomRequests.isLatest(requestID) else { return }
+                guard let self else { return }
+                guard self.activeRequestID == requestID else { return }
+                guard self.zoomRequests.isLatest(requestID) else {
+                    self.releaseIfOrphaned(requestID)
+                    return
+                }
 
                 guard let device else {
-                    self.finish(requestID, revealDelay: 0)
+                    self.abortIfOwned(requestID, reason: "sensor-settle device disappeared")
                     return
                 }
 
@@ -401,11 +427,42 @@ final class LensTransitionCoordinator {
 
     func finish(_ requestID: UInt64, revealDelay: Double) {
         sessionQueue.asyncAfter(deadline: .now() + revealDelay) { [weak self] in
-            guard let self,
-                  self.activeRequestID == requestID,
-                  self.zoomRequests.isLatest(requestID) else { return }
+            guard let self, self.activeRequestID == requestID else { return }
+            guard self.zoomRequests.isLatest(requestID) else {
+                self.releaseIfOrphaned(requestID)
+                return
+            }
             self.activeRequestID = nil
             self.onTransitioningChanged(false)
+        }
+    }
+
+    /// Releases a transition only when this request still owns the cover. This gives callers a
+    /// deterministic cleanup path for configuration/locking failures without cancelling a newer
+    /// transition that has already taken ownership.
+    func abortIfOwned(_ requestID: UInt64, reason: String) {
+        guard activeRequestID == requestID else { return }
+        activeRequestID = nil
+        onTransitioningChanged(false)
+        AppEventLog.event("LENS TRANSITION ABORTED", category: .lens, level: .warning, fields: [
+            "requestID": String(requestID),
+            "reason": reason
+        ])
+    }
+
+    /// A stale request normally hands the existing cover to the newest zoom request. If the newer
+    /// request exits before taking ownership, release the old cover after a short grace period so
+    /// the UI can never remain permanently stuck in the transitioning state.
+    private func releaseIfOrphaned(_ requestID: UInt64, after delay: Double = 0.18) {
+        sessionQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.activeRequestID == requestID,
+                  !self.zoomRequests.isLatest(requestID) else { return }
+            self.activeRequestID = nil
+            self.onTransitioningChanged(false)
+            AppEventLog.event("LENS TRANSITION ORPHAN RELEASED", category: .lens, level: .warning, fields: [
+                "requestID": String(requestID)
+            ])
         }
     }
 

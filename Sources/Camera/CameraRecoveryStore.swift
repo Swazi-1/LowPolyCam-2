@@ -4,7 +4,9 @@ enum CameraRecoveryStore {
     private static let photoExtensions: Set<String> = ["heic", "jpg", "jpeg"]
 
     private static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let fileManager = FileManager.default
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
         return base.appendingPathComponent("LowPolyCam/Recovery", isDirectory: true)
     }
 
