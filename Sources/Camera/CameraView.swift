@@ -71,6 +71,7 @@ struct CameraView: View {
             cameraPreviewLayer
             photoAspectOverlay
             previewGradient
+            focusExposureLockOverlay
             gridOverlay
             frameGuidesOverlay
             crosshairOverlay
@@ -175,9 +176,8 @@ struct CameraView: View {
             focusExposureLockLabel: camera.focusExposureLockLabel,
             stabilizationEnabled: camera.captureMode == .video && camera.isVideoStabilizationEnabled,
             isPreviewTransitioning: camera.isPreviewTransitioning || camera.isLensTransitioning,
-            reservedTopOverlayHeight: (isCleanPreview || !isHUDEnabled)
-                ? 54
-                : max(54, 14 + topControlsHeight + 8),
+            reservedTopOverlayHeight: previewReservedTopOverlayHeight,
+            reservedBottomOverlayHeight: previewReservedBottomOverlayHeight,
             fitsPhoto: camera.captureMode == .photo,
             cleanPreviewGesture: CleanPreviewGesture(rawValue: cleanPreviewGesture) ?? .doubleTap,
             captureOrientation: camera.captureOrientation,
@@ -193,6 +193,41 @@ struct CameraView: View {
             }
         )
         .ignoresSafeArea()
+    }
+
+    private var previewReservedTopOverlayHeight: CGFloat {
+        if isCleanPreview { return 0 }
+        return max(54, 14 + topControlsHeight + 8)
+    }
+
+    // Clean Preview gestures belong to the actual viewfinder, never to the controls layered over it.
+    // lowerControlsHeight is measured from the exact rendered control stack, so this remains correct
+    // when optional zoom buttons, toasts, or future controls change its size.
+    private var previewReservedBottomOverlayHeight: CGFloat {
+        let minimumControlsHeight = isCleanPreview
+            ? ShutterRowLayoutPolicy.rowHeight + 8
+            : 204
+        return max(minimumControlsHeight, lowerControlsHeight) + 14
+    }
+
+    @ViewBuilder
+    private var focusExposureLockOverlay: some View {
+        if camera.isFocusExposureLocked {
+            GeometryReader { proxy in
+                let top = proxy.safeAreaInsets.top + max(54, previewReservedTopOverlayHeight)
+                Text(camera.focusExposureLockLabel)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(accent.color)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .background(.black.opacity(0.52), in: Capsule())
+                    .position(x: proxy.size.width / 2, y: max(top, 70) + 15)
+            }
+            .allowsHitTesting(false)
+            .accessibilityLabel(Text(camera.focusExposureLockLabel))
+        }
     }
 
     @ViewBuilder
@@ -422,7 +457,9 @@ struct CameraView: View {
     @ViewBuilder
     private var bottomControls: some View {
         if isCleanPreview {
+            // Match normal mode's bottom inset so hiding the other controls never shifts the shutter.
             shutterRow
+                .padding(.bottom, 8)
         } else {
             normalBottomControls
         }

@@ -11,6 +11,7 @@ struct CameraPreview: UIViewRepresentable {
     let stabilizationEnabled: Bool
     let isPreviewTransitioning: Bool
     let reservedTopOverlayHeight: CGFloat
+    let reservedBottomOverlayHeight: CGFloat
     var fitsPhoto = false
     let cleanPreviewGesture: CleanPreviewGesture
     let captureOrientation: CaptureOrientationPreference
@@ -34,6 +35,7 @@ struct CameraPreview: UIViewRepresentable {
 
     private func configure(_ view: PreviewView) {
         view.setReservedTopOverlayHeight(reservedTopOverlayHeight)
+        view.setReservedBottomOverlayHeight(reservedBottomOverlayHeight)
         view.setPreviewTransitioning(isPreviewTransitioning)
         view.tintColor = UIColor(theme)
         view.onTapToFocus = onTapToFocus
@@ -63,6 +65,7 @@ final class PreviewView: UIView {
     private var hideFocusWorkItem: DispatchWorkItem?
     private var focusExposureLocked = false
     private var reservedTopOverlayHeight: CGFloat = 54
+    private var reservedBottomOverlayHeight: CGFloat = 94
     private var stabilizationEnabled = true
     private var cleanPreviewGesture: CleanPreviewGesture = .doubleTap
     private var captureOrientation: CaptureOrientationPreference = .auto
@@ -170,6 +173,10 @@ final class PreviewView: UIView {
         guard abs(reservedTopOverlayHeight - normalized) > 0.5 else { return }
         reservedTopOverlayHeight = normalized
         setNeedsLayout()
+    }
+
+    func setReservedBottomOverlayHeight(_ height: CGFloat) {
+        reservedBottomOverlayHeight = max(0, height)
     }
 
     func setCaptureOrientation(_ preference: CaptureOrientationPreference) {
@@ -306,7 +313,9 @@ final class PreviewView: UIView {
             lockLabel.text = label
             setNeedsLayout()
         }
-        lockLabel.isHidden = !isLocked
+        // CameraView renders the lock pill above photo masks and gradients so its contrast is
+        // identical in Photo, Video, and Slo-Mo. Keep this UIKit label only as legacy storage.
+        lockLabel.isHidden = true
         focusIndicator.layer.borderColor = tintColor.cgColor
         if isLocked {
             hideFocusWorkItem?.cancel()
@@ -372,6 +381,19 @@ final class PreviewView: UIView {
         case .twoFingerTap:
             guard recognizer === cleanTwoFingerTapRecognizer else { return }
         case .off:
+            return
+        }
+
+        let point = recognizer.location(in: self)
+        let topControlsBottom = safeAreaInsets.top + reservedTopOverlayHeight
+        let bottomControlsTop = bounds.height - safeAreaInsets.bottom - reservedBottomOverlayHeight
+        guard point.y > topControlsBottom, point.y < bottomControlsTop else {
+            AppEventLog.deepEvent("CLEAN PREVIEW GESTURE IGNORED", category: .ui, fields: [
+                "reason": "touch landed in control region",
+                "y": String(format: "%.1f", point.y),
+                "previewTop": String(format: "%.1f", topControlsBottom),
+                "previewBottom": String(format: "%.1f", bottomControlsTop)
+            ])
             return
         }
         onCleanPreviewGesture?()

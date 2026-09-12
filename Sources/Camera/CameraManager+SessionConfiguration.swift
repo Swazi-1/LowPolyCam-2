@@ -20,6 +20,7 @@ extension CameraManager {
         }
 
         invalidateVerifiedHighOutputProvenance()
+        movieOutputUsesSystemDefaultCompression = false
         invalidateCodecSupportCache()
         AppEventLog.event("Configuring camera session\(forceRebuild ? " rebuild" : "")")
 
@@ -1904,6 +1905,43 @@ extension CameraManager {
             return false
         }
 
+        // Codec-only Auto/High output settings are a persistent policy, not a per-format bitrate.
+        // AVFoundation recalculates its own default compression for the active format. If that
+        // exact policy is already installed, resetting MovieFileOutput is expensive and can add
+        // hundreds of milliseconds to Photo -> Video without changing the result.
+        if !needsCompressionProperties, movieOutputUsesSystemDefaultCompression {
+            let existing = movieOutput.outputSettings(for: connection)
+            if (existing[AVVideoCodecKey] as? String) == preferred.rawValue {
+                logMovieOutputConfigurationReadback(
+                    connection: connection,
+                    settings: existing,
+                    mode: effectiveMode,
+                    position: effectivePosition,
+                    compression: effectiveCompression,
+                    compressionMode: effectiveCompressionMode,
+                    manualBitrateMbps: effectiveManualBitrateMbps
+                )
+                installVerifiedHighOutputProvenance(
+                    requestSnapshot: requestSnapshot,
+                    connection: connection,
+                    settings: existing,
+                    mode: effectiveMode,
+                    position: effectivePosition,
+                    resolution: effectiveResolution,
+                    frameRate: effectiveFPS,
+                    codec: preferred.rawValue,
+                    shouldMirror: shouldMirror,
+                    expectedStabilization: expectedStabilization
+                )
+                AppEventLog.deepEvent("MOVIE OUTPUT CONFIG REUSED", category: .video, traceID: outputTraceID, fields: [
+                    "codec": preferred.rawValue,
+                    "policy": "system-default compression",
+                    "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - outputStartedAt) * 1000)
+                ])
+                return true
+            }
+        }
+
         var settings: [String: Any] = [AVVideoCodecKey: preferred]
         if needsCompressionProperties {
             settings[AVVideoCompressionPropertiesKey] = [
@@ -1911,6 +1949,7 @@ extension CameraManager {
             ]
         }
 
+        movieOutputUsesSystemDefaultCompression = false
         movieOutput.setOutputSettings(nil, for: connection)
         movieOutput.setOutputSettings(settings, for: connection)
 
@@ -1951,6 +1990,7 @@ extension CameraManager {
                 return false
             }
         }
+        movieOutputUsesSystemDefaultCompression = !needsCompressionProperties
         logMovieOutputConfigurationReadback(
             connection: connection,
             settings: applied,

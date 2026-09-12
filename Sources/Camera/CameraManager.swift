@@ -377,6 +377,10 @@ final class CameraManager: NSObject, ObservableObject {
     // generations so a normal Record transition cannot invalidate settled hardware proof.
     var highOutputProvenanceEpoch: UInt64 = 0
     var verifiedHighOutputProvenance: VerifiedHighOutputProvenance?
+    // True only after LowPolyCam successfully configured MovieFileOutput with codec-only
+    // settings (Apple/system-default compression). This lets mode/format changes reuse that
+    // policy without an expensive nil -> settings encoder reset.
+    var movieOutputUsesSystemDefaultCompression = false
     let photoOutput = AVCapturePhotoOutput()
     let liveMetrics = LiveCaptureMetrics()
     let audioMeter = AudioLevelMeter()
