@@ -454,33 +454,40 @@ struct CameraView: View {
         }
     }
 
-    @ViewBuilder
     private var bottomControls: some View {
-        if isCleanPreview {
-            // Match normal mode's bottom inset so hiding the other controls never shifts the shutter.
+        VStack(spacing: isCleanPreview ? 0 : 14) {
+            if !isCleanPreview {
+                normalBottomControlsAboveShutter
+            }
+
+            // Keep the exact same shutter subtree alive while Clean Preview animates. Previously
+            // SwiftUI swapped between two parent branches containing separate shutterRow instances,
+            // which could recreate the Button for a frame and show its white pressed/highlight state.
             shutterRow
-                .padding(.bottom, 8)
-        } else {
-            normalBottomControls
+                .transaction { transaction in
+                    // Clean Preview animates the surrounding controls, not the shutter itself.
+                    transaction.animation = nil
+                }
         }
+        .padding(.bottom, 8)
     }
 
-    private var normalBottomControls: some View {
+    private var normalBottomControlsAboveShutter: some View {
         VStack(spacing: 14) {
-                ZStack {
-                    Color.clear
-                    ZoomIndicator(label: camera.zoomLabel)
-                }
-                .contentShape(Rectangle())
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .padding(.horizontal, -22)
-                .background(GeometryReader { proxy in
-                    Color.clear.onAppear { zoomWidth = proxy.size.width }
-                        .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
-                })
-                .gesture(zoomGesture)
-                .allowsHitTesting(!(camera.isRecording && recordingLock))
+            ZStack {
+                Color.clear
+                ZoomIndicator(label: camera.zoomLabel)
+            }
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .padding(.horizontal, -22)
+            .background(GeometryReader { proxy in
+                Color.clear.onAppear { zoomWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in zoomWidth = width }
+            })
+            .gesture(zoomGesture)
+            .allowsHitTesting(!(camera.isRecording && recordingLock))
 
             if zoomButtonsEnabled {
                 HStack(spacing: 8) {
@@ -510,11 +517,8 @@ struct CameraView: View {
                 unavailableModes: CameraManager.CaptureMode.allCases.filter { !camera.isCaptureModeSupported($0) },
                 onSelect: { camera.selectCaptureMode($0) }
             )
-                .padding(.bottom, 8)
-
-            shutterRow
+            .padding(.bottom, 8)
         }
-        .padding(.bottom, 8)
     }
 
     /// One stable shutter row is used in both normal and Clean Preview modes. The side controls

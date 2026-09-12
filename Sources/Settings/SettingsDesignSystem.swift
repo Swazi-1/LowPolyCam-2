@@ -101,7 +101,6 @@ struct SettingsToggleLabel: View {
 /// to provide the system switch appearance, animation, accessibility and interaction behavior.
 struct HapticFreeSettingsToggle<Label: View>: View {
     @Binding var isOn: Bool
-    @AppStorage("hapticCaptureEnabled") private var appHapticsEnabled = true
     private let label: Label
 
     init(isOn: Binding<Bool>, @ViewBuilder label: () -> Label) {
@@ -109,51 +108,18 @@ struct HapticFreeSettingsToggle<Label: View>: View {
         self.label = label()
     }
 
-    @ViewBuilder
     var body: some View {
-        if appHapticsEnabled {
-            // Preserve the native iOS 26/27 switch while haptics are enabled.
-            Toggle(isOn: $isOn) {
-                label
-            }
-            .toggleStyle(.switch)
-            .onChange(of: isOn) { _, newValue in
-                logChange(newValue)
-            }
-        } else {
-            // The native switch may provide system tactile feedback independently of CameraHaptics.
-            // Once the app's master Haptics setting is off, use a visually equivalent button-backed
-            // switch so changing settings cannot generate tactile feedback behind our back.
-            Button {
-                isOn.toggle()
-                logChange(isOn)
-            } label: {
-                HStack(spacing: 12) {
-                    label
-                    Spacer(minLength: 12)
-                    ZStack(alignment: isOn ? .trailing : .leading) {
-                        Capsule()
-                            .fill(isOn ? Color.accentColor : Color(uiColor: .systemGray4))
-                            .frame(width: 51, height: 31)
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 27, height: 27)
-                            .shadow(color: .black.opacity(0.15), radius: 1, y: 1)
-                            .padding(2)
-                    }
-                    .animation(.easeInOut(duration: 0.18), value: isOn)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityValue(isOn ? "On" : "Off")
+        // Always use Apple's native iOS 26/27 switch. "Camera Haptics" controls only
+        // LowPolyCam-generated camera feedback; it does not replace or suppress system switch feel.
+        Toggle(isOn: $isOn) {
+            label
         }
-    }
-
-    private func logChange(_ newValue: Bool) {
-        AppEventLog.event("SETTINGS TOGGLE CHANGED", category: .ui, fields: [
-            "value": newValue ? "on" : "off"
-        ])
+        .toggleStyle(.switch)
+        .onChange(of: isOn) { _, newValue in
+            AppEventLog.event("SETTINGS TOGGLE CHANGED", category: .ui, fields: [
+                "value": newValue ? "on" : "off"
+            ])
+        }
     }
 }
 

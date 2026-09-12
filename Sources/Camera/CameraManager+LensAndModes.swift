@@ -1008,7 +1008,10 @@ extension CameraManager {
             }
             self.invalidatePendingVideoConfiguration()
             self.lensTransitionCoordinator.cancel()
-            let success = self.applyActiveModeFormat(preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput)
+            let success = self.applyActiveModeFormat(
+                preferVirtualCamera: !self.requiresPhysicalWhiteBalanceInput,
+                deferMovieOutputConfiguration: true
+            )
             if success {
                 self.configureAudioMeterOutput()
                 if mode == .photo {

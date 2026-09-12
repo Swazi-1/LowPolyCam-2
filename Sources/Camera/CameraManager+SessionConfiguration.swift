@@ -249,7 +249,6 @@ extension CameraManager {
                     (AppEventLog.extremeDiagnosticsEnabled &&
                         liveMetricsOutputIsAttached() && captureMode != .photo)
                 )
-                rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
                 requestedZoom = displayedZoomCandidate
                 AppEventLog.deepEvent("CAPTURE TRANSACTION FAST PATH", category: .session, traceID: transactionTrace, fields: [
                     "device": desiredDevice.localizedName,
@@ -457,7 +456,13 @@ extension CameraManager {
                 (AppEventLog.extremeDiagnosticsEnabled &&
                     liveMetricsOutputIsAttached() && captureMode != .photo)
             )
-            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: desiredDevice, previewLayer: nil)
+            if isSwitchingInput {
+                // RotationCoordinator construction can synchronously wait for a freshly swapped
+                // camera input to settle. Keeping it out of the mode-switch critical path removes
+                // a several-hundred-ms stall. applyCaptureRotation() recreates it lazily before
+                // the first actual capture/recording that needs the capture angle.
+                rotationCoordinator = nil
+            }
             requestedZoom = displayedZoom
             if shouldPreserveTorch, isSwitchingInput {
                 torchRestoreDevice = desiredDevice
@@ -941,14 +946,20 @@ extension CameraManager {
     }
 
     @discardableResult
-    func applyActiveModeFormat(preferVirtualCamera: Bool = true) -> Bool {
+    func applyActiveModeFormat(
+        preferVirtualCamera: Bool = true,
+        deferMovieOutputConfiguration: Bool = false
+    ) -> Bool {
         switch captureMode {
         case .photo:
             return applyBestPhotoFormat(preferVirtualCamera: preferVirtualCamera)
         case .sloMo:
-            return applySlowMotionFormat()
+            return applySlowMotionFormat(deferMovieOutputConfiguration: deferMovieOutputConfiguration)
         case .video:
-            return applySelectedFormat(preferVirtualCamera: preferVirtualCamera)
+            return applySelectedFormat(
+                preferVirtualCamera: preferVirtualCamera,
+                deferMovieOutputConfiguration: deferMovieOutputConfiguration
+            )
         }
     }
 
@@ -1136,18 +1147,29 @@ extension CameraManager {
     /// the detailed message on its own utility queue so record start is not held by interpolation.
     func captureConfigurationLogSnapshot(
         _ context: String,
-        label: String = "CAPTURE FORMAT/INPUT APPLIED"
+        label: String = "CAPTURE FORMAT/INPUT APPLIED",
+        readMovieOutputSettings: Bool = true
     ) -> AppEventLog.CaptureConfigurationLogSnapshot? {
         guard let device = videoInput?.device else { return nil }
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let duration = device.activeVideoMinFrameDuration.seconds
         let frameRate = duration > 0 ? 1 / duration : 0
-        let connection = movieOutput.connection(with: .video)
-        let settings = connection.map { movieOutput.outputSettings(for: $0) } ?? [:]
-        let codec = settings[AVVideoCodecKey] as? String ?? "system default"
-        let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
-        let bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
+        let codec: String
+        let bitRate: Int?
+        if readMovieOutputSettings, let connection = movieOutput.connection(with: .video) {
+            let settings = movieOutput.outputSettings(for: connection)
+            codec = settings[AVVideoCodecKey] as? String ?? "system default"
+            let compression = settings[AVVideoCompressionPropertiesKey] as? [String: Any]
+            bitRate = (compression?[AVVideoAverageBitRateKey] as? NSNumber)?.intValue
+        } else {
+            // Mode switching only needs a lightweight diagnostic snapshot. Querying
+            // AVCaptureMovieFileOutput immediately after a graph/input swap can synchronously
+            // wait hundreds of milliseconds while AVFoundation settles. Recording performs the
+            // real output readback/validation before it starts, so use the selected policy here.
+            codec = activeVideoCodec == "H264" ? AVVideoCodecType.h264.rawValue : AVVideoCodecType.hevc.rawValue
+            bitRate = Int(estimatedVideoBitsPerSecond)
+        }
         return AppEventLog.CaptureConfigurationLogSnapshot(
             label: label,
             context: context,
@@ -1219,10 +1241,15 @@ extension CameraManager {
 
     func logCaptureConfiguration(
         _ context: String,
-        label: String = "CAPTURE FORMAT/INPUT APPLIED"
+        label: String = "CAPTURE FORMAT/INPUT APPLIED",
+        readMovieOutputSettings: Bool = true
     ) {
         enqueueCaptureConfigurationLog(
-            captureConfigurationLogSnapshot(context, label: label),
+            captureConfigurationLogSnapshot(
+                context,
+                label: label,
+                readMovieOutputSettings: readMovieOutputSettings
+            ),
             context: context,
             label: label
         )
@@ -1245,7 +1272,8 @@ extension CameraManager {
         requestedManualBitrateMbps: Double? = nil,
         qualityRequestID: UInt64? = nil,
         requestedPosition: CameraPosition? = nil,
-        requestValidation: (() -> Bool)? = nil
+        requestValidation: (() -> Bool)? = nil,
+        deferMovieOutputConfiguration: Bool = false
     ) -> Bool {
         if let qualityRequestID, !qualityRequests.isLatest(qualityRequestID) { return false }
         if let requestValidation, !requestValidation() { return false }
@@ -1357,19 +1385,28 @@ extension CameraManager {
             return false
         }
 
-        let outputConfigured = configureMovieOutputSettings(
-            requestedCodec: effectiveCodec,
-            requestedCompression: effectiveCompression,
-            requestedCompressionMode: effectiveCompressionMode,
-            requestedManualBitrateMbps: effectiveManualBitrateMbps,
-            requestedResolution: selection.resolution,
-            requestedFrameRate: selection.frameRate,
-            requestedPosition: targetPosition,
-            requestedMode: .video
-        )
-        if requestedCodec != nil || requestedCompression != nil ||
-            requestedCompressionMode != nil || requestedManualBitrateMbps != nil {
-            guard outputConfigured else { return false }
+        if !deferMovieOutputConfiguration {
+            let outputConfigured = configureMovieOutputSettings(
+                requestedCodec: effectiveCodec,
+                requestedCompression: effectiveCompression,
+                requestedCompressionMode: effectiveCompressionMode,
+                requestedManualBitrateMbps: effectiveManualBitrateMbps,
+                requestedResolution: selection.resolution,
+                requestedFrameRate: selection.frameRate,
+                requestedPosition: targetPosition,
+                requestedMode: .video
+            )
+            if requestedCodec != nil || requestedCompression != nil ||
+                requestedCompressionMode != nil || requestedManualBitrateMbps != nil {
+                guard outputConfigured else { return false }
+            }
+        } else {
+            AppEventLog.deepEvent("MOVIE OUTPUT CONFIG DEFERRED", category: .video, fields: [
+                "reason": "capture mode switch fast path",
+                "mode": CaptureMode.video.rawValue,
+                "resolution": selection.resolution.rawValue,
+                "fps": String(selection.frameRate.rawValue)
+            ])
         }
         let zoomDevices = forcePhysical4K60 ? physicalSupportedDevices : [desiredDevice]
         let minZoom = zoomDevices.map { minimumSupportedZoom(for: $0) }.min() ?? minimumSupportedZoom(for: desiredDevice)
@@ -1398,7 +1435,7 @@ extension CameraManager {
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
-        logCaptureConfiguration("Video")
+        logCaptureConfiguration("Video", readMovieOutputSettings: !deferMovieOutputConfiguration)
         return true
     }
 
@@ -1432,7 +1469,8 @@ extension CameraManager {
         requestedResolution: VideoResolution? = nil,
         requestedFrameRate: SlowMotionFrameRate? = nil,
         qualityRequestID: UInt64? = nil,
-        requestedPosition: CameraPosition? = nil
+        requestedPosition: CameraPosition? = nil,
+        deferMovieOutputConfiguration: Bool = false
     ) -> Bool {
         if let qualityRequestID, !qualityRequests.isLatest(qualityRequestID) { return false }
         let targetPosition = requestedPosition ?? cameraPosition
@@ -1510,7 +1548,16 @@ extension CameraManager {
             return false
         }
 
-        _ = configureMovieOutputSettings()
+        if !deferMovieOutputConfiguration {
+            _ = configureMovieOutputSettings()
+        } else {
+            AppEventLog.deepEvent("MOVIE OUTPUT CONFIG DEFERRED", category: .video, fields: [
+                "reason": "capture mode switch fast path",
+                "mode": CaptureMode.sloMo.rawValue,
+                "resolution": resolution.rawValue,
+                "fps": String(selectedRate.rawValue)
+            ])
+        }
 
         let lensResolutions = slowMotionSelection.availableResolutionsByDeviceID[desiredDevice.uniqueID] ?? []
         let lensRates = slowMotionSelection.supportedFrameRatesByDeviceID[desiredDevice.uniqueID] ?? []
@@ -1555,7 +1602,7 @@ extension CameraManager {
         }
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
-        logCaptureConfiguration("Slo-Mo")
+        logCaptureConfiguration("Slo-Mo", readMovieOutputSettings: !deferMovieOutputConfiguration)
         return true
     }
 
@@ -2062,6 +2109,15 @@ extension CameraManager {
 
     func applyCaptureRotation(to connection: AVCaptureConnection?) {
         guard let connection else { return }
+        if rotationCoordinator == nil, let device = videoInput?.device {
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+            let elapsedMs = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+            AppEventLog.deepEvent("CAPTURE ROTATION COORDINATOR PREPARED", category: .performance, fields: [
+                "device": device.localizedName,
+                "durationMs": String(format: "%.2f", elapsedMs)
+            ])
+        }
         let automaticAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture
         let requestedAngle: CGFloat?
         switch captureOrientation {

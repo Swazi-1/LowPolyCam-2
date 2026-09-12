@@ -296,13 +296,13 @@ struct CapturePreferencesView: View {
                 Text("Brightness is a normalized 5–100% request. The active camera may apply a lower thermal maximum or fall back to its supported torch level.")
             }
 
-            Section("HAPTICS") {
+            Section("CAMERA HAPTICS") {
                 HapticFreeSettingsToggle(isOn: $hapticCaptureEnabled) {
                     SettingsToggleLabel(
                         symbol: "waveform.path.ecg",
                         color: .orange,
-                        title: "Haptics",
-                        subtitle: "Enable haptic feedback throughout LowPolyCam."
+                        title: "Camera Haptics",
+                        subtitle: "Enable LowPolyCam camera and capture feedback."
                     )
                 }
 
