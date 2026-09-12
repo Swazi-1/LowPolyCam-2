@@ -1,5 +1,5 @@
 import Foundation
-import OS
+import os
 
 enum CameraPerformanceIntervalName {
     case sessionConfiguration
