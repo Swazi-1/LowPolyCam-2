@@ -977,6 +977,7 @@ extension CameraManager {
             return
         }
         let previousMode = captureMode
+        let modeSwitchInterval = performanceMonitor.begin(.modeSwitch)
         let modeTraceID = AppEventLog.makeTraceID("MODE")
         let modeStartedAt = ProcessInfo.processInfo.systemUptime
         AppEventLog.event("========== MODE CHANGE START =========", category: .session, traceID: modeTraceID,
@@ -1000,6 +1001,7 @@ extension CameraManager {
             )
         }
         sessionQueue.async { [weak self] in
+            defer { CameraPerformanceMonitor.shared.end(modeSwitchInterval) }
             AppEventLog.queueStarted(modeQueueTicket)
             guard let self else { return }
             guard self.modeChangeRequests.isLatest(requestID) else {
@@ -1177,7 +1179,11 @@ extension CameraManager {
         // without this optional output; only measured FPS/drop counters are omitted in rear 4K60.
         let requestedByUser = UserDefaults.standard.bool(forKey: "liveRecordingStats")
         let requestedByExtremeDiagnostics = AppEventLog.extremeDiagnosticsEnabled
-        return (requestedByUser || requestedByExtremeDiagnostics) &&
+        let optionalOutputsAllowed = postPreviewOutputsEnabled || recordingState.requestsRecording || movieOutput.isRecording
+        return optionalOutputsAllowed &&
+            !liveMetricsSuppressedBySystemPressure &&
+            !liveMetricsSuppressedByHardwareCost &&
+            (requestedByUser || requestedByExtremeDiagnostics) &&
             captureMode != .photo &&
             !isRear4K60
     }
@@ -1216,8 +1222,11 @@ extension CameraManager {
         metricsTimer = nil
         liveMetrics.setRunning(false)
         setLiveMetricsConnectionEnabled(
-            (AppEventLog.extremeDiagnosticsEnabled &&
-                liveMetricsOutputIsAttached() && captureMode != .photo)
+            AppEventLog.extremeDiagnosticsEnabled &&
+                liveMetricsOutputIsAttached() &&
+                captureMode != .photo &&
+                !liveMetricsSuppressedBySystemPressure &&
+                !liveMetricsSuppressedByHardwareCost
         )
         if wasRunning {
             AppEventLog.event("Live metrics stopped")

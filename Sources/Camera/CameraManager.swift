@@ -296,12 +296,18 @@ final class CameraManager: NSObject, ObservableObject {
             guard photoFlashMode != oldValue else { return }
             UserDefaults.standard.set(photoFlashMode.rawValue, forKey: "photoFlashMode")
             AppEventLog.event("Photo flash preference changed: \(oldValue.rawValue) -> \(photoFlashMode.rawValue)")
+            sessionQueue.async { [weak self] in
+                self?.prepareCurrentPhotoSettings(reason: "flash preference changed")
+            }
         }
     }
     @Published var photoFileFormat = UserDefaults.standard.string(forKey: "photoFileFormat") ?? "HEIC" {
         didSet {
             guard photoFileFormat != oldValue else { return }
             UserDefaults.standard.set(photoFileFormat, forKey: "photoFileFormat")
+            sessionQueue.async { [weak self] in
+                self?.prepareCurrentPhotoSettings(reason: "photo codec changed")
+            }
         }
     }
     @Published var videoCompression = VideoCompression(rawValue: UserDefaults.standard.string(forKey: "videoCompression") ?? "") ?? .high {
@@ -382,6 +388,8 @@ final class CameraManager: NSObject, ObservableObject {
     // policy without an expensive nil -> settings encoder reset.
     var movieOutputUsesSystemDefaultCompression = false
     let photoOutput = AVCapturePhotoOutput()
+    lazy var photoCaptureCoordinator = PhotoCaptureCoordinator(photoOutput: self.photoOutput)
+    let performanceMonitor = CameraPerformanceMonitor.shared
     let liveMetrics = LiveCaptureMetrics()
     let audioMeter = AudioLevelMeter()
     let liveStats = LiveRecordingStatsState()
@@ -394,6 +402,7 @@ final class CameraManager: NSObject, ObservableObject {
     var activeRecordingTraceID: String?
     var recordingRequestStartedAt: TimeInterval = 0
     var movieStartCallAt: TimeInterval = 0
+    var recordingStartPerformanceInterval: CameraPerformanceInterval?
     var recordingSegmentIndex: Int = 0
     var activeRecordingSessionID: String?
     var lastExtremeRecordingHealthSecond: Int = -1
@@ -418,8 +427,13 @@ final class CameraManager: NSObject, ObservableObject {
     var nativePhotoDimensions = CMVideoDimensions(width: 0, height: 0)
     var preferredPhotoMegapixels = 12
     var photoCaptureContexts: [Int64: PhotoCaptureContext] = [:]
-    var activePhotoCaptureID: Int64?
-    var activePhotoCaptureIsBurst = false
+    var inFlightPhotoCaptureIDs: Set<Int64> = []
+    var photoPerformanceIntervals: [Int64: CameraPerformanceInterval] = [:]
+    var photoProcessingFailedCaptureIDs: Set<Int64> = []
+    var pendingSinglePhotoCapture = false
+    var burstCompletedCount = 0
+    var burstPipelineHadFailure = false
+    let maximumBurstHardwareCapturesInFlight = 2
     var pendingPhotoSaves = 0
     var inFlightPhotoFileSaves: Set<URL> = []
 
@@ -600,6 +614,13 @@ final class CameraManager: NSObject, ObservableObject {
     var storageWarningEpisodeActive = false
     var activeCriticalStorageReserveBytes = StorageGuard.minimumCriticalReserveBytes
     var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    var activePrimaryConstituentObservation: NSKeyValueObservation?
+    var systemPressureObservation: NSKeyValueObservation?
+    var postPreviewOutputsEnabled = false
+    var liveMetricsSuppressedBySystemPressure = false
+    var liveMetricsSuppressedByHardwareCost = false
+    var photoPreparationGeneration: UInt64 = 0
+    var lastPreparedPhotoSignature: String?
     var sessionObserverTokens: [NSObjectProtocol] = []
     var suppressPreferencePersistence = false
     var suppressAutomaticReconfiguration = false
@@ -690,6 +711,12 @@ final class CameraManager: NSObject, ObservableObject {
         audioMeterCancellable = audioMeter.$snapshot
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snapshot in self?.audioMeterSnapshot = snapshot }
+        photoCaptureCoordinator.onReadinessChanged = { [weak self] readiness in
+            guard let self else { return }
+            self.sessionQueue.async { [weak self] in
+                self?.handlePhotoCaptureReadinessChanged(readiness)
+            }
+        }
 
         let savedPhotoMegapixels = defaults.integer(forKey: Self.photoMegapixelsKey)
         preferredPhotoMegapixels = Self.normalizedPhotoMegapixels(savedPhotoMegapixels)
@@ -720,6 +747,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     deinit {
         sessionObserverTokens.forEach(NotificationCenter.default.removeObserver)
+        activePrimaryConstituentObservation?.invalidate()
+        systemPressureObservation?.invalidate()
         storageGuard.stopMonitoring()
         if backgroundSaveTask != .invalid {
             let task = backgroundSaveTask

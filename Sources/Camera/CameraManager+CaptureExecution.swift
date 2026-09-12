@@ -16,24 +16,78 @@ extension CameraManager {
     }
 
     func beginPhotoCapture() {
-        guard activePhotoCaptureID == nil else {
-            AppEventLog.guardRejected("beginPhotoCapture", reason: "another hardware photo capture is active",
-                                      fields: ["activeCaptureID": String(activePhotoCaptureID ?? -1)])
-            return
-        }
+        pumpPendingPhotoCaptures()
+    }
+
+    func pumpPendingPhotoCaptures() {
         guard session.isRunning else {
             AppEventLog.event("PHOTO CAPTURE REJECTED", category: .photo, level: .warning,
                               fields: ["reason": "session not running"])
-
+            pendingSinglePhotoCapture = false
             burstRemaining = 0
             burstStopRequested = false
+            activeBurstTraceID = nil
+            burstRequestedCount = 0
+            burstCompletedCount = 0
             publish { self.isCapturingPhoto = false }
             showError("Camera isn’t ready yet.")
             return
         }
 
-        let isBurst = burstRemaining > 0
-        let burstOrdinal = isBurst ? max(1, burstRequestedCount - burstRemaining + 1) : nil
+        if pendingSinglePhotoCapture {
+            guard inFlightPhotoCaptureIDs.isEmpty else { return }
+            // A shutter press must capture the moment even while iOS 26 Deferred Start is still
+            // preparing AVCapturePhotoOutput. Responsive Capture is specifically designed to
+            // buffer that request, so readiness is diagnostic here rather than a hard gate.
+            AppEventLog.deepEvent("PHOTO REQUEST SUBMITTING", category: .photo, fields: [
+                "readiness": photoCaptureReadinessLabel(photoCaptureCoordinator.captureReadiness)
+            ])
+            pendingSinglePhotoCapture = false
+            guard submitPhotoCapture(isBurst: false, burstOrdinal: nil) else {
+                publish { self.isCapturingPhoto = false }
+                AppEventLog.event("PHOTO CAPTURE REJECTED", category: .photo, level: .warning,
+                                  fields: ["reason": "session stopped before hardware submission"])
+                return
+            }
+            return
+        }
+
+        guard activeBurstTraceID != nil else { return }
+        if burstStopRequested {
+            if inFlightPhotoCaptureIDs.isEmpty {
+                finishBurstHardwareCapture()
+            }
+            return
+        }
+
+        while burstRemaining > 0,
+              inFlightPhotoCaptureIDs.count < maximumBurstHardwareCapturesInFlight {
+            // Always honor the first press immediately. After one request is in flight, let
+            // Apple's readiness coordinator pace additional burst captures so we never build an
+            // unbounded queue behind the photo processor.
+            if !inFlightPhotoCaptureIDs.isEmpty, !photoCaptureCoordinator.isReady { break }
+            let ordinal = max(1, burstRequestedCount - burstRemaining + 1)
+            burstRemaining -= 1
+            guard submitPhotoCapture(isBurst: true, burstOrdinal: ordinal) else {
+                burstPipelineHadFailure = true
+                burstRemaining = 0
+                burstStopRequested = true
+                if inFlightPhotoCaptureIDs.isEmpty {
+                    finishBurstHardwareCapture()
+                }
+                break
+            }
+        }
+
+        if burstRemaining == 0, inFlightPhotoCaptureIDs.isEmpty {
+            finishBurstHardwareCapture()
+        }
+    }
+
+    @discardableResult
+    func submitPhotoCapture(isBurst: Bool, burstOrdinal: Int?) -> Bool {
+        guard session.isRunning else { return false }
+
         let traceID: String
         if isBurst, let parent = activeBurstTraceID {
             traceID = "\(parent)-P\(burstOrdinal ?? 0)"
@@ -89,8 +143,10 @@ extension CameraManager {
             startedAt: captureStartedAt,
             burstOrdinal: burstOrdinal
         )
-        activePhotoCaptureID = captureID
-        activePhotoCaptureIsBurst = isBurst
+        inFlightPhotoCaptureIDs.insert(captureID)
+        photoCaptureCoordinator.startTracking(settings)
+        photoPerformanceIntervals[captureID] = performanceMonitor.begin(.photoRequest)
+
         let activeDevice = videoInput?.device
         let activeDimensions = activeDevice.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
         AppEventLog.event("PHOTO CAPTURE REQUEST", category: isBurst ? .burst : .photo, traceID: traceID, fields: [
@@ -104,6 +160,10 @@ extension CameraManager {
             "flashApplied": appliedFlashLabel,
             "photoQualityPriority": exposureLockedInHardware ? "speed (AE locked)" : "balanced",
             "responsive": String(photoOutput.isResponsiveCaptureEnabled),
+            "zeroShutterLag": String(photoOutput.isZeroShutterLagEnabled),
+            "fastCapturePrioritization": String(photoOutput.isFastCapturePrioritizationEnabled),
+            "readiness": photoCaptureReadinessLabel(photoCaptureCoordinator.captureReadiness),
+            "inFlight": String(inFlightPhotoCaptureIDs.count),
             "device": activeDevice?.localizedName ?? "none",
             "activePreviewFormat": activeDimensions.map { "\($0.width)x\($0.height)" } ?? "none",
             "maxPhotoDimensions": "\(dimensions.width)x\(dimensions.height)",
@@ -115,6 +175,54 @@ extension CameraManager {
         AppEventLog.deepEvent("capturePhoto() RETURNED", category: .photo, traceID: traceID, fields: [
             "callMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - submitAt) * 1000),
             "elapsedFromRequestMs": String(format: "%.3f", (ProcessInfo.processInfo.systemUptime - captureStartedAt) * 1000)
+        ])
+        return true
+    }
+
+    func finishBurstHardwareCapture() {
+        guard activeBurstTraceID != nil else { return }
+        let captured = burstCompletedCount
+        let requested = burstRequestedCount
+        let traceID = activeBurstTraceID
+        burstRemaining = 0
+        burstStopRequested = false
+        activeBurstTraceID = nil
+        burstRequestedCount = 0
+        burstCompletedCount = 0
+        publish { self.isCapturingPhoto = false }
+        AppEventLog.event("========== BURST HARDWARE COMPLETE =========", category: .burst,
+                          traceID: traceID, fields: [
+            "requested": String(requested),
+            "captured": String(captured),
+            "pendingSaves": String(pendingPhotoSaves)
+        ])
+    }
+
+    func cancelPendingPhotoScheduling(reason: String, abandonInFlight: Bool) {
+        pendingSinglePhotoCapture = false
+        burstRemaining = 0
+        burstStopRequested = true
+
+        if abandonInFlight {
+            for captureID in inFlightPhotoCaptureIDs {
+                photoCaptureCoordinator.stopTracking(captureID)
+                if let interval = photoPerformanceIntervals.removeValue(forKey: captureID) {
+                    performanceMonitor.end(interval)
+                }
+            }
+            inFlightPhotoCaptureIDs.removeAll()
+        }
+
+        let burstTrace = activeBurstTraceID
+        activeBurstTraceID = nil
+        burstRequestedCount = 0
+        burstCompletedCount = 0
+        publish { self.isCapturingPhoto = false }
+        AppEventLog.event("PHOTO HARDWARE SCHEDULER RESET", category: .photo, level: .info, traceID: burstTrace, fields: [
+            "reason": reason,
+            "abandonInFlight": String(abandonInFlight),
+            "pendingSaves": String(pendingPhotoSaves),
+            "retainedContexts": String(photoCaptureContexts.count)
         ])
     }
 
@@ -271,6 +379,8 @@ extension CameraManager {
         let filename = nextMediaFilename(fileExtension: "mov")
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         movieStartCallAt = ProcessInfo.processInfo.systemUptime
+        performanceMonitor.end(recordingStartPerformanceInterval)
+        recordingStartPerformanceInterval = performanceMonitor.begin(.recordingStart)
         AppEventLog.event("MOVIE OUTPUT startRecording()", category: .recording, traceID: activeRecordingTraceID, fields: [
             "filename": filename,
             "segment": String(recordingSegmentIndex),
@@ -362,7 +472,13 @@ extension CameraManager {
 
     func lensDisplayLabel(for device: AVCaptureDevice) -> String {
         guard cameraPosition == .back else { return "Front" }
-        switch device.deviceType {
+        let displayedDevice: AVCaptureDevice
+        if AppleCameraFeatureFlags.virtualRoutingV2, device.isVirtualDevice, let constituent = device.activePrimaryConstituent {
+            displayedDevice = constituent
+        } else {
+            displayedDevice = device
+        }
+        switch displayedDevice.deviceType {
         case .builtInUltraWideCamera:
             return "Ultra Wide"
         case .builtInTelephotoCamera:

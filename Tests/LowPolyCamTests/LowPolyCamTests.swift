@@ -505,4 +505,91 @@ final class LowPolyCamTests: XCTestCase {
         XCTAssertNotEqual(roundTripped.videoCompressionMode, roundTripped.slowMotionCompressionMode)
         defaults.removePersistentDomain(forName: suiteName)
     }
+    func testCameraConfigurationPlannerSkipsExactNoOp() {
+        let plan = CameraConfigurationPlanner.plan(
+            currentDeviceID: "virtual-back",
+            targetDeviceID: "virtual-back",
+            sameFormat: true,
+            sameFrameRate: true,
+            samePhotoDimensions: true,
+            auxiliaryGraphChangeNeeded: false,
+            baseOutputsPresent: true,
+            devicePropertiesNeedUpdate: false,
+            requestedFrameRate: 60,
+            formatMaximumFrameRate: 60
+        )
+        XCTAssertEqual(plan.route, .noChange)
+        XCTAssertNil(plan.resourceFrameRateOverride)
+    }
+
+    func testCameraConfigurationPlannerUsesDeviceOnlyRouteForZoomOrHDRChange() {
+        let plan = CameraConfigurationPlanner.plan(
+            currentDeviceID: "virtual-back",
+            targetDeviceID: "virtual-back",
+            sameFormat: true,
+            sameFrameRate: true,
+            samePhotoDimensions: true,
+            auxiliaryGraphChangeNeeded: false,
+            baseOutputsPresent: true,
+            devicePropertiesNeedUpdate: true,
+            requestedFrameRate: 60,
+            formatMaximumFrameRate: 60
+        )
+        XCTAssertEqual(plan.route, .deviceOnlyUpdate)
+    }
+
+    func testCameraConfigurationPlannerKeepsSameInputForFormatChanges() {
+        let plan = CameraConfigurationPlanner.plan(
+            currentDeviceID: "virtual-back",
+            targetDeviceID: "virtual-back",
+            sameFormat: false,
+            sameFrameRate: false,
+            samePhotoDimensions: true,
+            auxiliaryGraphChangeNeeded: false,
+            baseOutputsPresent: true,
+            devicePropertiesNeedUpdate: false,
+            requestedFrameRate: 60,
+            formatMaximumFrameRate: 60
+        )
+        XCTAssertEqual(plan.route, .sameInputReconfigure)
+    }
+
+    func testCameraConfigurationPlannerFallsBackToPhysicalInputReplacement() {
+        let plan = CameraConfigurationPlanner.plan(
+            currentDeviceID: "dual-wide",
+            targetDeviceID: "physical-wide",
+            sameFormat: false,
+            sameFrameRate: false,
+            samePhotoDimensions: true,
+            auxiliaryGraphChangeNeeded: false,
+            baseOutputsPresent: true,
+            devicePropertiesNeedUpdate: false,
+            requestedFrameRate: 240,
+            formatMaximumFrameRate: 240
+        )
+        XCTAssertEqual(plan.route, .physicalInputReplacement)
+    }
+
+    func testCameraConfigurationPlannerLimitsReservedHighFPSResources() {
+        XCTAssertEqual(
+            CameraConfigurationPlanner.frameRateOverride(
+                requestedFrameRate: 60,
+                formatMaximumFrameRate: 240
+            ),
+            60
+        )
+        XCTAssertNil(
+            CameraConfigurationPlanner.frameRateOverride(
+                requestedFrameRate: 240,
+                formatMaximumFrameRate: 240
+            )
+        )
+        XCTAssertNil(
+            CameraConfigurationPlanner.frameRateOverride(
+                requestedFrameRate: 60,
+                formatMaximumFrameRate: 60
+            )
+        )
+    }
+
 }

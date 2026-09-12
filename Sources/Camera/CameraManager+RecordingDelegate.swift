@@ -10,6 +10,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.performanceMonitor.end(self.recordingStartPerformanceInterval)
+            self.recordingStartPerformanceInterval = nil
 
             if !self.recordingState.requestsRecording {
                 self.transitionRecordingToDiscard()
@@ -78,6 +80,8 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.performanceMonitor.end(self.recordingStartPerformanceInterval)
+            self.recordingStartPerformanceInterval = nil
             let errorDetail = error.map { " error=\($0.localizedDescription)" } ?? ""
             AppEventLog.event("RECORDING DID FINISH CALLBACK", category: .recording, level: successful ? .info : .warning,
                               traceID: self.activeRecordingTraceID, fields: [

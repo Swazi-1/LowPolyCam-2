@@ -50,8 +50,13 @@ extension CameraManager {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.activeBurstTraceID = burstTrace
+            self.pendingSinglePhotoCapture = false
             self.burstRequestedCount = count
             self.burstRemaining = count
+            self.burstCompletedCount = 0
+            if self.pendingPhotoSaves == 0 {
+                self.burstPipelineHadFailure = false
+            }
             self.burstStopRequested = false
             self.burstAspect = UserDefaults.standard.string(forKey: "photoAspect") ?? "4:3"
             self.burstMegapixels = self.selectedPhotoMegapixels
@@ -68,10 +73,14 @@ extension CameraManager {
 
     func stopBurst() {
         sessionQueue.async { [weak self] in
-            guard let self, self.burstRemaining > 0 else { return }
+            guard let self, self.activeBurstTraceID != nil else { return }
             self.burstStopRequested = true
-            AppEventLog.event("Burst capture stop requested: remaining=\(self.burstRemaining)", category: .burst,
+            self.burstRemaining = 0
+            AppEventLog.event("Burst capture stop requested: inFlight=\(self.inFlightPhotoCaptureIDs.count)", category: .burst,
                               traceID: self.activeBurstTraceID)
+            if self.inFlightPhotoCaptureIDs.isEmpty {
+                self.finishBurstHardwareCapture()
+            }
         }
     }
 
@@ -92,8 +101,10 @@ extension CameraManager {
             guard let self else { return }
             self.burstRemaining = 0
             self.burstRequestedCount = 0
+            self.burstCompletedCount = 0
             self.activeBurstTraceID = nil
             self.burstStopRequested = false
+            self.pendingSinglePhotoCapture = true
             self.beginPhotoCapture()
         }
         return true

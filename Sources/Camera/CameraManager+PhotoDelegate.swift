@@ -35,8 +35,12 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             sessionQueue.async {
                 let trace = self.photoCaptureContexts[captureID]?.traceID
                 AppEventLog.log(error: error, prefix: "PHOTO PROCESSING CALLBACK FAILED", category: .photo, traceID: trace)
-                self.photoCaptureContexts.removeValue(forKey: captureID)
-                self.burstStopRequested = true
+                self.photoProcessingFailedCaptureIDs.insert(captureID)
+                if self.photoCaptureContexts[captureID]?.isBurst == true {
+                    self.burstPipelineHadFailure = true
+                    self.burstStopRequested = true
+                    self.burstRemaining = 0
+                }
             }
             showError(error.localizedDescription)
             return
@@ -46,8 +50,12 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                 let trace = self.photoCaptureContexts[captureID]?.traceID
                 AppEventLog.event("PHOTO FILE REPRESENTATION MISSING", category: .photo, level: .error, traceID: trace,
                                   fields: ["captureID": String(captureID)])
-                self.photoCaptureContexts.removeValue(forKey: captureID)
-                self.burstStopRequested = true
+                self.photoProcessingFailedCaptureIDs.insert(captureID)
+                if self.photoCaptureContexts[captureID]?.isBurst == true {
+                    self.burstPipelineHadFailure = true
+                    self.burstStopRequested = true
+                    self.burstRemaining = 0
+                }
             }
             showError("Couldn’t create the photo file.")
             return
@@ -186,19 +194,29 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             ])
 
             if !success {
-                self.burstStopRequested = true
+                if context.isBurst {
+                    self.burstPipelineHadFailure = true
+                    self.burstStopRequested = true
+                    self.burstRemaining = 0
+                }
                 AppEventLog.event("Photo save failed: \(context.filename)")
             } else if !context.isBurst {
                 self.postStatus("Photo saved to Photos")
                 AppEventLog.event("Photo saved to Photos: \(context.filename)")
             } else if self.pendingPhotoSaves == 0,
-                      self.activePhotoCaptureID == nil,
-                      self.burstRemaining == 0 {
+                      self.inFlightPhotoCaptureIDs.isEmpty,
+                      self.burstRemaining == 0,
+                      self.activeBurstTraceID == nil,
+                      !self.burstPipelineHadFailure {
                 self.postStatus("Photos saved to Photos")
             }
 
             if self.pendingPhotoSaves == 0 {
                 self.refreshAvailableStorage()
+                // A burst failure only suppresses the aggregate success message for the save
+                // batch it belongs to. Once every pending save has settled, a future burst gets
+                // a clean result state even if it starts before this callback finishes.
+                self.burstPipelineHadFailure = false
             }
             self.refreshRecoveryCount()
             self.endBackgroundMediaSaveIfPossible()
@@ -208,58 +226,64 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
         let captureID = resolvedSettings.uniqueID
         sessionQueue.async {
-            guard self.activePhotoCaptureID == captureID else {
-                if error != nil {
-                    self.photoCaptureContexts.removeValue(forKey: captureID)
-                }
-                return
+            self.photoCaptureCoordinator.stopTracking(captureID)
+            self.inFlightPhotoCaptureIDs.remove(captureID)
+            if let interval = self.photoPerformanceIntervals.removeValue(forKey: captureID) {
+                self.performanceMonitor.end(interval)
             }
 
-            let wasBurst = self.activePhotoCaptureIsBurst
             let context = self.photoCaptureContexts[captureID]
-            self.activePhotoCaptureID = nil
-            self.activePhotoCaptureIsBurst = false
+            let wasBurst = context?.isBurst ?? false
+            let processingFailed = self.photoProcessingFailedCaptureIDs.remove(captureID) != nil
 
             if let context {
                 AppEventLog.event("PHOTO HARDWARE CAPTURE COMPLETE", category: wasBurst ? .burst : .photo, traceID: context.traceID, fields: [
                     "captureID": String(captureID),
                     "elapsedMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - context.startedAt) * 1000),
-                    "error": error?.localizedDescription ?? "none"
+                    "error": error?.localizedDescription ?? (processingFailed ? "processing failed" : "none"),
+                    "inFlight": String(self.inFlightPhotoCaptureIDs.count),
+                    "readiness": self.photoCaptureReadinessLabel(self.photoCaptureCoordinator.captureReadiness)
                 ])
             }
 
             if let error {
                 self.photoCaptureContexts.removeValue(forKey: captureID)
-                self.burstRemaining = 0
-                self.burstStopRequested = false
-                self.publish { self.isCapturingPhoto = false }
-                if let context { AppEventLog.log(error: error, prefix: "PHOTO HARDWARE CAPTURE FAILED", category: .photo, traceID: context.traceID) }
+                if wasBurst {
+                    self.burstPipelineHadFailure = true
+                    self.burstStopRequested = true
+                    self.burstRemaining = 0
+                } else {
+                    self.pendingSinglePhotoCapture = false
+                }
+                if let context {
+                    AppEventLog.log(error: error, prefix: "PHOTO HARDWARE CAPTURE FAILED", category: wasBurst ? .burst : .photo, traceID: context.traceID)
+                }
                 self.showError("Photo capture failed: \(error.localizedDescription)")
-                return
+            } else if processingFailed {
+                // didFinishProcessingPhoto already surfaced the specific processing/file error.
+                // Keep the hardware scheduler consistent and release the retained context here.
+                self.photoCaptureContexts.removeValue(forKey: captureID)
+                if wasBurst {
+                    self.burstPipelineHadFailure = true
+                    self.burstStopRequested = true
+                    self.burstRemaining = 0
+                } else {
+                    self.pendingSinglePhotoCapture = false
+                }
+            } else if wasBurst, self.activeBurstTraceID != nil {
+                self.burstCompletedCount += 1
             }
 
             if wasBurst {
-                self.burstRemaining = max(0, self.burstRemaining - 1)
-                if self.burstRemaining > 0 && !self.burstStopRequested && self.session.isRunning {
-                    self.beginPhotoCapture()
-                } else {
-                    let captured = self.burstRequestedCount - self.burstRemaining
-                    self.burstRemaining = 0
-                    self.burstStopRequested = false
-                    self.publish { self.isCapturingPhoto = false }
-                    AppEventLog.event("========== BURST HARDWARE COMPLETE =========", category: .burst,
-                                      traceID: self.activeBurstTraceID, fields: [
-                        "requested": String(self.burstRequestedCount),
-                        "captured": String(max(0, captured)),
-                        "pendingSaves": String(self.pendingPhotoSaves)
-                    ])
-                    self.activeBurstTraceID = nil
-                    self.burstRequestedCount = 0
+                self.pumpPendingPhotoCaptures()
+                if self.burstStopRequested, self.inFlightPhotoCaptureIDs.isEmpty {
+                    self.finishBurstHardwareCapture()
                 }
             } else {
                 // The hardware capture is finished. Cropping, resizing and Photos-library
                 // saving can continue on storageQueue without making the shutter feel stuck.
                 self.publish { self.isCapturingPhoto = false }
+                self.pumpPendingPhotoCaptures()
             }
         }
     }

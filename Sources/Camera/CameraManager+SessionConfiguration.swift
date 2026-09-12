@@ -15,10 +15,14 @@ extension CameraManager {
         let hasPhoto = session.outputs.contains(where: { $0 === photoOutput })
         if !forceRebuild, hasVideo, hasMovie, hasPhoto {
             publishAudioStatus()
-            configureAudioMeterOutput()
+            if postPreviewOutputsEnabled {
+                configureAudioMeterOutput()
+            }
             return
         }
 
+        let sessionConfigurationInterval = performanceMonitor.begin(.sessionConfiguration)
+        defer { performanceMonitor.end(sessionConfigurationInterval) }
         invalidateVerifiedHighOutputProvenance()
         movieOutputUsesSystemDefaultCompression = false
         invalidateCodecSupportCache()
@@ -26,6 +30,14 @@ extension CameraManager {
 
         invalidatePendingVideoConfiguration()
         lensTransitionCoordinator.cancel()
+        postPreviewOutputsEnabled = false
+        liveMetricsSuppressedBySystemPressure = false
+        liveMetricsSuppressedByHardwareCost = false
+        lastPreparedPhotoSignature = nil
+        activePrimaryConstituentObservation?.invalidate()
+        systemPressureObservation?.invalidate()
+        activePrimaryConstituentObservation = nil
+        systemPressureObservation = nil
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         stopLiveMetrics()
@@ -34,6 +46,7 @@ extension CameraManager {
         // noncritical capture outputs finish initialization. Keep automatic deferred start
         // enabled explicitly so this performance behavior is part of our session contract.
         session.automaticallyRunsDeferredStart = true
+        session.setDeferredStartDelegate(self, deferredStartDelegateCallbackQueue: sessionQueue)
         session.beginConfiguration()
         session.sessionPreset = .inputPriority
 
@@ -111,28 +124,18 @@ extension CameraManager {
             photoOutput.isDeferredStartEnabled = true
         }
         session.addOutput(photoOutput)
-        if photoOutput.isResponsiveCaptureSupported {
-            photoOutput.isResponsiveCaptureEnabled = true
-        }
+        configureApplePhotoPipeline()
 
-        // Fold the optional audio-meter output into the initial transaction. Previously this was
-        // added by configureAudioMeterOutput() immediately after commitConfiguration(), which
-        // forced a second capture-session transaction during startup. The connection remains
-        // disabled until an actual recording needs meter samples.
-        let wantsInitialAudioMeter = audioInput != nil && captureMode != .photo && audioLevelMeterMode != .off
-        if wantsInitialAudioMeter, session.canAddOutput(audioMeter.output) {
-            if audioMeter.output.isDeferredStartSupported {
-                audioMeter.output.isDeferredStartEnabled = true
-            }
-            session.addOutput(audioMeter.output)
-        }
-
+        // Optional analysis/data outputs are deliberately not part of the first-preview graph.
+        // They are enabled after session startup/deferred-start so preview wins the launch race.
         session.commitConfiguration()
-        configureAudioMeterOutput()
 
         let formatApplied = applyActiveModeFormat(preferVirtualCamera: !requiresPhysicalWhiteBalanceInput)
         if formatApplied {
             deferredWhiteBalanceRequest = nil
+        }
+        if let activeDevice = videoInput?.device {
+            installActiveDeviceObservers(for: activeDevice)
         }
         synchronizeTorchState()
         AppEventLog.event("Camera session configured")
@@ -155,6 +158,8 @@ extension CameraManager {
         refreshAuxiliaryOutputs: Bool = true,
         requestedCodec: String? = nil
     ) -> CGFloat? {
+        let performanceInterval = performanceMonitor.begin(.captureTransaction)
+        defer { performanceMonitor.end(performanceInterval) }
         let transactionTrace = AppEventLog.extremeDiagnosticsEnabled ? AppEventLog.makeTraceID("CAPTURE-TX") : nil
         let transactionStart = ProcessInfo.processInfo.systemUptime
         let oldDeviceForTrace = videoInput?.device
@@ -203,21 +208,65 @@ extension CameraManager {
             liveMetricsAttachmentWanted() != liveMetricsOutputIsAttached()
         let baseOutputsPresent = session.outputs.contains(where: { $0 === movieOutput }) &&
             session.outputs.contains(where: { $0 === photoOutput })
+        let desiredAutoHDR = effectiveCodec != "H264"
+        let needsDeviceUpdate =
+            abs(desiredDevice.videoZoomFactor - targetDeviceZoomCandidate) >= 0.005 ||
+            desiredDevice.automaticallyAdjustsVideoHDREnabled != desiredAutoHDR ||
+            (effectiveCodec == "H264" && desiredDevice.isVideoHDREnabled) ||
+            (desiredDevice.isGeometricDistortionCorrectionSupported &&
+                !desiredDevice.isGeometricDistortionCorrectionEnabled)
+        let formatMaximumFrameRate = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? frameRate
+        let desiredResourceOverride = CameraConfigurationPlanner.frameRateOverride(
+            requestedFrameRate: frameRate,
+            formatMaximumFrameRate: formatMaximumFrameRate
+        )
+        let currentResourceOverrideFPS: Double? = {
+            guard let currentInput, currentInput.videoMinFrameDurationOverride.isValid else { return nil }
+            let seconds = currentInput.videoMinFrameDurationOverride.seconds
+            return seconds > 0 ? 1 / seconds : nil
+        }()
+        let sameResourceOverride: Bool = {
+            switch (currentResourceOverrideFPS, desiredResourceOverride) {
+            case (nil, nil): return true
+            case let (.some(current), .some(desired)): return abs(current - desired) < 0.5
+            default: return false
+            }
+        }()
+        let configurationPlan = CameraConfigurationPlanner.plan(
+            currentDeviceID: currentInput?.device.uniqueID,
+            targetDeviceID: desiredDevice.uniqueID,
+            sameFormat: sameFormat,
+            sameFrameRate: sameFrameRate && sameResourceOverride,
+            samePhotoDimensions: samePhotoDimensions,
+            auxiliaryGraphChangeNeeded: auxiliaryGraphChangeNeeded,
+            baseOutputsPresent: baseOutputsPresent,
+            devicePropertiesNeedUpdate: needsDeviceUpdate,
+            requestedFrameRate: frameRate,
+            formatMaximumFrameRate: formatMaximumFrameRate
+        )
+        AppEventLog.deepEvent("CAPTURE CONFIGURATION PLAN", category: .session, traceID: transactionTrace, fields: [
+            "route": configurationPlan.route.rawValue,
+            "requestedFPS": String(format: "%.2f", frameRate),
+            "formatMaxFPS": String(format: "%.2f", formatMaximumFrameRate),
+            "resourceFPSOverride": configurationPlan.resourceFrameRateOverride.map { String(format: "%.2f", $0) } ?? "default",
+            "sameInput": String(sameInput)
+        ])
+
+        // Hardware-cost suppression belongs to the graph that exceeded Apple's budget. A real
+        // format/input reconfiguration gets one clean chance to restore the optional metrics
+        // stream; enforceCaptureHardwareBudget() immediately removes it again if the new graph is
+        // still too expensive. System-pressure suppression remains independent and is never reset
+        // by a mode change.
+        if configurationPlan.route == .sameInputReconfigure ||
+            configurationPlan.route == .physicalInputReplacement {
+            liveMetricsSuppressedByHardwareCost = false
+        }
 
         // Most AVFoundation latency in the diagnostic session came from commitConfiguration().
         // If the capture graph/format/FPS is already exactly what was requested, do not open a
         // no-op session transaction just to re-assert zoom/HDR device properties. Those properties
         // can be updated directly under the AVCaptureDevice configuration lock.
-        if sameInput, sameFormat, sameFrameRate, samePhotoDimensions,
-           !auxiliaryGraphChangeNeeded, baseOutputsPresent {
-            let desiredAutoHDR = effectiveCodec != "H264"
-            let needsDeviceUpdate =
-                abs(desiredDevice.videoZoomFactor - targetDeviceZoomCandidate) >= 0.005 ||
-                desiredDevice.automaticallyAdjustsVideoHDREnabled != desiredAutoHDR ||
-                (effectiveCodec == "H264" && desiredDevice.isVideoHDREnabled) ||
-                (desiredDevice.isGeometricDistortionCorrectionSupported &&
-                    !desiredDevice.isGeometricDistortionCorrectionEnabled)
-
+        if configurationPlan.route == .noChange || configurationPlan.route == .deviceOnlyUpdate {
             if needsDeviceUpdate {
                 do {
                     try desiredDevice.lockForConfiguration()
@@ -266,8 +315,11 @@ extension CameraManager {
         // unusable, including attempts that fail before AVFoundation accepts the replacement.
         invalidateVerifiedHighOutputProvenance()
         let oldInput = currentInput
+        let oldInputFrameDurationOverride = oldInput?.videoMinFrameDurationOverride ?? .invalid
         let shouldPreserveTorch = oldInput?.device.hasTorch == true && oldInput?.device.torchMode == .on
         let isSwitchingInput = oldInput?.device.uniqueID != desiredDevice.uniqueID
+        let physicalInputInterval = isSwitchingInput ? performanceMonitor.begin(.physicalInputReplacement) : nil
+        defer { performanceMonitor.end(physicalInputInterval) }
         let torchRequestID = torchRequests.next(reason: "capture configuration transaction")
         let shouldRetryTorchAfterPreviewHandoff = shouldPreserveTorch &&
             isSwitchingInput &&
@@ -374,6 +426,7 @@ extension CameraManager {
                 ])
                 if let oldInput, session.canAddInput(oldInput) {
                     session.addInput(oldInput)
+                    oldInput.videoMinFrameDurationOverride = oldInputFrameDurationOverride
                     videoInput = oldInput
                 } else {
                     torchRestoreDevice = nil
@@ -382,6 +435,14 @@ extension CameraManager {
             }
             session.addInput(replacementInput)
             videoInput = replacementInput
+        }
+
+        if let activeInput = videoInput {
+            applyVideoResourceFrameRateOverride(
+                configurationPlan.resourceFrameRateOverride,
+                to: activeInput,
+                traceID: transactionTrace
+            )
         }
 
         let displayedZoom = snappedZoomFactor(requestedZoom, for: desiredDevice)
@@ -438,6 +499,11 @@ extension CameraManager {
                 photoOutput.maxPhotoDimensions = photoDimensions
             }
 
+            // ZSL/responsive-capture support is format dependent. Refresh Apple's photo pipeline
+            // while this session configuration is already open so a lens/format switch never
+            // leaves stale responsive-capture state behind or creates another standalone commit.
+            configureApplePhotoPipeline()
+
             let commitStart = ProcessInfo.processInfo.systemUptime
             session.commitConfiguration()
             let commitMs = (ProcessInfo.processInfo.systemUptime - commitStart) * 1000
@@ -462,6 +528,7 @@ extension CameraManager {
                 // a several-hundred-ms stall. applyCaptureRotation() recreates it lazily before
                 // the first actual capture/recording that needs the capture angle.
                 rotationCoordinator = nil
+                installActiveDeviceObservers(for: desiredDevice)
             }
             requestedZoom = displayedZoom
             if shouldPreserveTorch, isSwitchingInput {
@@ -483,8 +550,10 @@ extension CameraManager {
                                   traceID: transactionTrace, category: .session)
             AppEventLog.deepEvent("CAPTURE TRANSACTION COMPLETE", category: .session, traceID: transactionTrace, fields: [
                 "totalMs": String(format: "%.2f", (ProcessInfo.processInfo.systemUptime - transactionStart) * 1000),
-                "displayedZoom": String(format: "%.3f", Double(displayedZoom))
+                "displayedZoom": String(format: "%.3f", Double(displayedZoom)),
+                "route": configurationPlan.route.rawValue
             ])
+            enforceCaptureHardwareBudget(reason: "capture transaction")
             return displayedZoom
         } catch {
             if isSwitchingInput {
@@ -493,6 +562,7 @@ extension CameraManager {
                 }
                 if let oldInput, session.canAddInput(oldInput) {
                     session.addInput(oldInput)
+                    oldInput.videoMinFrameDurationOverride = oldInputFrameDurationOverride
                     videoInput = oldInput
                 } else {
                     torchRestoreDevice = nil
@@ -1026,8 +1096,13 @@ extension CameraManager {
         }
 
         let physical = desiredPhysicalDevice(in: devices, forDisplayedZoom: requestedZoom)
+        let currentVirtual = AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera
+            ? videoInput?.device.flatMap { current in
+                current.isVirtualDevice && devices.contains(where: { $0.uniqueID == current.uniqueID }) ? current : nil
+            }
+            : nil
         let desiredDevice = preferVirtualCamera
-            ? (devices.first(where: { $0.isVirtualDevice }) ?? physical ?? devices.first)
+            ? (currentVirtual ?? devices.first(where: { $0.isVirtualDevice }) ?? physical ?? devices.first)
             : (physical ?? devices.first(where: { !$0.isVirtualDevice }) ?? devices.first)
 
         guard let desiredDevice, let photoChoice = formatSelector.bestPhotoFormat(for: desiredDevice) else {
@@ -1077,6 +1152,9 @@ extension CameraManager {
         resetFocusAndExposureState()
         synchronizeWhiteBalanceAfterConfiguration()
         logCaptureConfiguration("Photo")
+        if postPreviewOutputsEnabled {
+            prepareCurrentPhotoSettings(reason: "Photo mode configured")
+        }
         return true
     }
 
@@ -1117,11 +1195,30 @@ extension CameraManager {
     }
 
     func displayedZoomFactor(for deviceZoomFactor: CGFloat, device: AVCaptureDevice) -> CGFloat {
-        deviceZoomFactor / wideAngleDeviceZoomFactor(for: device)
+        // Apple's multiplier is the authoritative UI conversion for virtual camera systems.
+        // Keep LowPolyCam's existing physical-lens mapping for Slo-Mo/manual-WB inputs so a
+        // physical Ultra Wide sensor still presents as 0.5× rather than suddenly becoming 1×.
+        if AppleCameraFeatureFlags.virtualRoutingV2, device.isVirtualDevice {
+            let multiplier = device.displayVideoZoomFactorMultiplier
+            if multiplier.isFinite, multiplier > 0 {
+                return deviceZoomFactor * multiplier
+            }
+        }
+        return deviceZoomFactor / wideAngleDeviceZoomFactor(for: device)
     }
 
     func deviceZoomFactor(for displayedZoomFactor: CGFloat, device: AVCaptureDevice) -> CGFloat {
-        let requested = displayedZoomFactor * wideAngleDeviceZoomFactor(for: device)
+        let requested: CGFloat
+        if AppleCameraFeatureFlags.virtualRoutingV2, device.isVirtualDevice {
+            let multiplier = device.displayVideoZoomFactorMultiplier
+            if multiplier.isFinite, multiplier > 0 {
+                requested = displayedZoomFactor / multiplier
+            } else {
+                requested = displayedZoomFactor * wideAngleDeviceZoomFactor(for: device)
+            }
+        } else {
+            requested = displayedZoomFactor * wideAngleDeviceZoomFactor(for: device)
+        }
         return min(max(requested, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
     }
 
@@ -1354,14 +1451,19 @@ extension CameraManager {
         let forcePhysical4K60 = isRear4K60 && appleStyle4K60Device == nil && !physicalSupportedDevices.isEmpty
         let lensCandidates = forcePhysical4K60 ? physicalSupportedDevices : supportedDevices
         let physical = desiredPhysicalDevice(in: lensCandidates, forDisplayedZoom: requestedZoom)
+        let currentSupportedVirtual = AppleCameraFeatureFlags.virtualRoutingV2 && preferVirtualCamera
+            ? videoInput?.device.flatMap { current in
+                current.isVirtualDevice && supportedDevices.contains(where: { $0.uniqueID == current.uniqueID }) ? current : nil
+            }
+            : nil
         let desiredDevice: AVCaptureDevice?
         if let appleStyle4K60Device {
-            desiredDevice = appleStyle4K60Device
+            desiredDevice = currentSupportedVirtual ?? appleStyle4K60Device
         } else if forcePhysical4K60 {
             desiredDevice = physical ?? physicalSupportedDevices.first
         } else {
             desiredDevice = preferVirtualCamera
-                ? (supportedDevices.first(where: { $0.isVirtualDevice }) ?? physical ?? supportedDevices.first)
+                ? (currentSupportedVirtual ?? supportedDevices.first(where: { $0.isVirtualDevice }) ?? physical ?? supportedDevices.first)
                 : (physical ?? supportedDevices.first(where: { !$0.isVirtualDevice }) ?? supportedDevices.first)
         }
         guard let desiredDevice,

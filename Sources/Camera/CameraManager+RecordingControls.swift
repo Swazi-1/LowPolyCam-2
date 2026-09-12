@@ -1187,7 +1187,8 @@ extension CameraManager {
     /// The audio-data output is optional and disabled outside an active recording. It reads the
     /// same authorized microphone input as the movie output and never creates a parallel recorder.
     func configureAudioMeterOutput() {
-        let wanted = audioInput != nil && captureMode != .photo && audioLevelMeterMode != .off
+        let optionalOutputsAllowed = postPreviewOutputsEnabled || recordingState.requestsRecording || movieOutput.isRecording
+        let wanted = optionalOutputsAllowed && audioInput != nil && captureMode != .photo && audioLevelMeterMode != .off
         let attached = audioMeterOutputIsAttached()
         if wanted != attached {
             session.beginConfiguration()

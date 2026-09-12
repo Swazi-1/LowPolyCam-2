@@ -44,8 +44,14 @@ extension CameraManager {
         } else {
             AppEventLog.event("Session recovery: forcing camera session rebuild")
             showError("Camera session error. Trying to recover…")
+            cancelPendingPhotoScheduling(reason: "session runtime error", abandonInFlight: true)
             configureSessionIfNeeded(forceRebuild: true)
-            if !session.isRunning { session.startRunning() }
+            if !session.isRunning {
+                let interval = performanceMonitor.begin(.sessionStart)
+                session.startRunning()
+                performanceMonitor.end(interval)
+            }
+            schedulePostPreviewOutputEnableFallback(reason: "runtime error recovery fallback")
             publish { self.isSessionRunning = self.session.isRunning }
         }
     }
@@ -74,8 +80,7 @@ extension CameraManager {
         }
         stopLiveMetrics()
         lensTransitionCoordinator.cancel()
-        burstRemaining = 0
-        burstStopRequested = true
+        cancelPendingPhotoScheduling(reason: "session interrupted", abandonInFlight: true)
         synchronizeTorchState()
         let sessionAvailable = session.isRunning && !session.isInterrupted
         publish {
@@ -102,7 +107,12 @@ extension CameraManager {
         _ = qualityRequests.next()
         _ = captureConfigurationGeneration.next()
         configureSessionIfNeeded()
-        if !session.isRunning { session.startRunning() }
+        if !session.isRunning {
+            let interval = performanceMonitor.begin(.sessionStart)
+            session.startRunning()
+            performanceMonitor.end(interval)
+        }
+        schedulePostPreviewOutputEnableFallback(reason: "interruption recovery fallback")
         applyDeferredWhiteBalanceIfPossible()
         synchronizeTorchState()
         publish { self.isSessionRunning = self.session.isRunning }
@@ -110,8 +120,14 @@ extension CameraManager {
     }
 
     func rebuildSessionAfterMediaServicesReset() {
+        cancelPendingPhotoScheduling(reason: "media services reset", abandonInFlight: true)
         configureSessionIfNeeded(forceRebuild: true)
-        if !session.isRunning { session.startRunning() }
+        if !session.isRunning {
+            let interval = performanceMonitor.begin(.sessionStart)
+            session.startRunning()
+            performanceMonitor.end(interval)
+        }
+        schedulePostPreviewOutputEnableFallback(reason: "media services reset fallback")
         publish { self.isSessionRunning = self.session.isRunning }
     }
 
@@ -289,12 +305,14 @@ extension CameraManager {
                 self.applyDeferredWhiteBalanceIfPossible()
                 return
             }
+            let sessionStartInterval = self.performanceMonitor.begin(.sessionStart)
             self.session.startRunning()
+            self.performanceMonitor.end(sessionStartInterval)
             AppEventLog.event("Camera session running")
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = true }
             self.applyDeferredWhiteBalanceIfPossible()
-            self.configureAudioMeterOutput()
+            self.schedulePostPreviewOutputEnableFallback(reason: "session start fallback")
             self.synchronizeTorchState()
             self.refreshAvailableStorage()
             self.storageQueue.async { [weak self] in
@@ -319,8 +337,7 @@ extension CameraManager {
             _ = self.captureConfigurationGeneration.next()
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
-            self.burstRemaining = 0
-            self.burstStopRequested = true
+            self.cancelPendingPhotoScheduling(reason: "camera stop", abandonInFlight: true)
             self.cancelSplitTimer()
             if self.movieOutput.isRecording {
                 self.requestNativeRecordingStop(reason: "camera stop")
@@ -379,8 +396,7 @@ extension CameraManager {
             _ = self.torchRequests.next()
             self.stopLiveMetrics()
             self.lensTransitionCoordinator.cancel()
-            self.burstRemaining = 0
-            self.burstStopRequested = true
+            self.cancelPendingPhotoScheduling(reason: "app inactive", abandonInFlight: true)
             self.cancelSplitTimer()
 
             // Keep hardware and UI in sync when the app/phone becomes inactive. iOS normally
@@ -429,11 +445,14 @@ extension CameraManager {
             self.configureSessionIfNeeded()
             self.scheduleCapabilitySnapshotRefresh(reason: "app became active")
             if !self.session.isRunning {
+                let sessionStartInterval = self.performanceMonitor.begin(.sessionStart)
                 self.session.startRunning()
+                self.performanceMonitor.end(sessionStartInterval)
             }
             try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             self.publish { self.isSessionRunning = self.session.isRunning }
             self.applyDeferredWhiteBalanceIfPossible()
+            self.schedulePostPreviewOutputEnableFallback(reason: "app active fallback")
             self.synchronizeTorchState()
         }
     }
